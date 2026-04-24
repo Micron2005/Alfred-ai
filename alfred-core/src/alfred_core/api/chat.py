@@ -30,6 +30,8 @@ from alfred_core.llm.base import ChatMessage
 from alfred_core.memory import extract_and_strip, recent_facts, save_facts
 from alfred_core.persona import ContextBundle, Mode, build_persona
 from alfred_core.router import Router
+from alfred_core.tools.email import EmailError, send_email
+from alfred_core.tools.email_marker import EmailDraft, extract_drafts, replace_marker
 from alfred_core.wake import analyze
 from alfred_core.weather import WeatherService
 
@@ -106,6 +108,29 @@ async def _history(session: AsyncSession, conversation_id: UUID) -> list[Message
         .order_by(Message.created_at.asc())
     )
     return list(result.scalars().all())
+
+
+def _process_email_drafts(reply: str, settings: Settings) -> str:
+    """Send each [SEND_EMAIL] block and inline a confirmation in its place."""
+    drafts = extract_drafts(reply)
+    if not drafts:
+        return reply
+    for draft in drafts:
+        reply = replace_marker(reply, draft, _send_one(draft, settings))
+    return reply
+
+
+def _send_one(draft: EmailDraft, settings: Settings) -> str:
+    try:
+        result = send_email(
+            to=draft.to,
+            subject=draft.subject,
+            body=draft.body,
+            settings=settings,
+        )
+    except EmailError as exc:
+        return f"_(I couldn't send that email — {exc})_"
+    return f"_(Email sent to {result.to} — subject: \"{result.subject}\")_"
 
 
 async def _build_context(settings: Settings, session: AsyncSession) -> ContextBundle:
@@ -188,6 +213,8 @@ async def chat(req: ChatRequest, session: AsyncSession = Depends(get_session)) -
     visible_reply, new_facts = extract_and_strip(reply.content)
     if new_facts:
         await save_facts(session, new_facts)
+
+    visible_reply = _process_email_drafts(visible_reply, settings)
 
     assistant_msg = Message(
         conversation_id=convo.id,
