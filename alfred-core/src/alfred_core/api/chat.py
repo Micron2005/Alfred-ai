@@ -79,14 +79,17 @@ async def _load_or_create(session: AsyncSession, cid: UUID | None) -> Conversati
 
 
 def _derive_title(user_text: str) -> str:
-    """First sentence (or first ~60 chars) of the user's first message."""
+    """First sentence (or first ~80 chars) of the user's first message."""
     text = user_text.strip().replace("\n", " ")
-    # Stop at the first sentence-ending punctuation if there is one.
+    # Find the EARLIEST sentence-ending punctuation across all types,
+    # not whichever type we happen to check first.
+    best_idx = len(text)
     for stop in (". ", "? ", "! "):
         idx = text.find(stop)
-        if 0 < idx < 80:
-            text = text[: idx + 1]
-            break
+        if 0 < idx < best_idx:
+            best_idx = idx
+    if best_idx < 80:
+        text = text[: best_idx + 1]
     if len(text) > 80:
         text = text[:77].rstrip() + "…"
     return text or "New conversation"
@@ -151,10 +154,11 @@ async def chat(req: ChatRequest, session: AsyncSession = Depends(get_session)) -
             msgs.append(ChatMessage(role="assistant", content=m.content))
     msgs.append(ChatMessage(role="user", content=user_text))
 
+    is_first_message = len(history) == 0
     session.add(
         Message(conversation_id=convo.id, role="user", content=user_text)
     )
-    if convo.title == "New conversation":
+    if is_first_message:
         convo.title = _derive_title(user_text)
 
     try:

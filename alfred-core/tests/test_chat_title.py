@@ -14,6 +14,13 @@ def test_first_sentence_is_used_when_present() -> None:
     assert _derive_title(text) == "What's the weather today?"
 
 
+def test_earliest_punctuation_wins_across_types() -> None:
+    # Bug-fix regression: an exclamation mark appearing earliest must win
+    # even though "." is checked first in the code.
+    text = "Help! I need to find this. Where is it?"
+    assert _derive_title(text) == "Help!"
+
+
 def test_long_run_on_is_truncated_with_ellipsis() -> None:
     text = (
         "this is an extremely long opening message with no punctuation that "
