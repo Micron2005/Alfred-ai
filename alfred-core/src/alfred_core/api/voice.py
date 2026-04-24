@@ -8,6 +8,8 @@ returned WAV in an ``<audio>`` element.
 
 from __future__ import annotations
 
+import asyncio
+
 from fastapi import APIRouter, File, HTTPException, UploadFile
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
@@ -35,8 +37,10 @@ async def speech_to_text(audio: UploadFile = File(...)) -> TranscriptOut:
     data = await audio.read()
     if not data:
         raise HTTPException(status_code=400, detail="Empty audio upload")
+    # Whisper inference is synchronous + CPU-heavy. Run it on a worker thread
+    # so it doesn't pin the event loop for everyone else (chat, TTS, health).
     try:
-        text = stt.transcribe(data)
+        text = await asyncio.to_thread(stt.transcribe, data)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Transcription failed: {exc}") from exc
     return TranscriptOut(text=text)
