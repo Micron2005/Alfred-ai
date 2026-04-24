@@ -21,6 +21,13 @@ def test_earliest_punctuation_wins_across_types() -> None:
     assert _derive_title(text) == "Help!"
 
 
+def test_leading_punctuation_does_not_hide_later_enders_of_same_type() -> None:
+    # Bug-fix regression: ". " at index 0 must be skipped without
+    # preventing discovery of later ". " boundaries in the same text.
+    text = ". OK. Got it! Let me help."
+    assert _derive_title(text) == ". OK."
+
+
 def test_long_run_on_is_truncated_with_ellipsis() -> None:
     text = (
         "this is an extremely long opening message with no punctuation that "

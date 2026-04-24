@@ -86,7 +86,10 @@ def _derive_title(user_text: str) -> str:
     # not whichever type we happen to check first.
     best_idx = len(text)
     for stop in (". ", "? ", "! "):
-        idx = text.find(stop)
+        # Start at index 1 so a sentence-ender at position 0 (which would
+        # yield an empty or 1-char title) is skipped without hiding a
+        # valid ender that appears later in the same text.
+        idx = text.find(stop, 1)
         if 0 < idx < best_idx:
             best_idx = idx
     if best_idx < 80:
