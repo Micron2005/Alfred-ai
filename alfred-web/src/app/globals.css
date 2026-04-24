@@ -1,0 +1,44 @@
+:root {
+  --bg: #f6f4ef;
+  --fg: #1a1a1a;
+  --accent: #6d5b3d;
+  --muted: #7a7366;
+  --bubble-user: #e6e1d6;
+  --bubble-assistant: #ffffff;
+  --border: #d9d2c4;
+  --shadow: 0 1px 3px rgba(0, 0, 0, 0.06);
+}
+
+.nightfall {
+  --bg: #0a0a0c;
+  --fg: #d8d8e0;
+  --accent: #e4b63a;
+  --muted: #6f6f7a;
+  --bubble-user: #181822;
+  --bubble-assistant: #101015;
+  --border: #1f1f28;
+  --shadow: 0 1px 3px rgba(228, 182, 58, 0.08);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: ui-serif, Georgia, "Times New Roman", serif;
+  transition: background 300ms ease, color 300ms ease;
+}
+
+button {
+  font-family: inherit;
+}
+
+textarea,
+input {
+  font-family: inherit;
+}
