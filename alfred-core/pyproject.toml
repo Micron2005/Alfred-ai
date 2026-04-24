@@ -6,7 +6,6 @@ build-backend = "hatchling.build"
 name = "alfred-core"
 version = "0.1.0"
 description = "Alfred AI backend — persona, orchestration, tools"
-readme = "../README.md"
 requires-python = ">=3.11"
 authors = [{ name = "Mukarram Mohammad Alam" }]
 dependencies = [
