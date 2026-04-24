@@ -7,7 +7,8 @@ Postgres, not in the browser tab.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
+from typing import overload
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -19,6 +20,22 @@ from alfred_core.db.models import Conversation, Message
 from alfred_core.db.session import get_session
 
 router = APIRouter(prefix="/conversations", tags=["conversations"])
+
+
+@overload
+def _as_utc(dt: datetime) -> datetime: ...
+@overload
+def _as_utc(dt: None) -> None: ...
+def _as_utc(dt: datetime | None) -> datetime | None:
+    """The Postgres column is TIMESTAMP WITHOUT TIME ZONE, so SQLAlchemy
+    returns naive datetimes even though we always write UTC. Tag those
+    naive values as UTC so JSON serialization includes the +00:00 suffix
+    and the browser doesn't read them as local-clock values."""
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=UTC)
+    return dt.astimezone(UTC)
 
 
 class ConversationSummary(BaseModel):
@@ -71,8 +88,8 @@ async def list_conversations(
             id=convo.id,
             title=convo.title,
             mode=convo.mode,
-            created_at=convo.created_at,
-            last_message_at=last_message_at,
+            created_at=_as_utc(convo.created_at),
+            last_message_at=_as_utc(last_message_at),
             message_count=message_count or 0,
         )
         for convo, last_message_at, message_count in rows
@@ -101,7 +118,7 @@ async def get_conversation(
         id=convo.id,
         title=convo.title,
         mode=convo.mode,
-        created_at=convo.created_at,
+        created_at=_as_utc(convo.created_at),
         messages=[
             MessageOut(
                 id=m.id,
@@ -109,7 +126,7 @@ async def get_conversation(
                 content=m.content,
                 backend=m.backend,
                 model=m.model,
-                created_at=m.created_at,
+                created_at=_as_utc(m.created_at),
             )
             for m in msgs
             if m.role in ("user", "assistant")

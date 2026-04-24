@@ -6,12 +6,20 @@ Phase 5 when we add long-term memory.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
 from sqlalchemy import ForeignKey, String, Text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+
+
+def _utcnow() -> datetime:
+    """Aware UTC ``now``. ``datetime.utcnow`` is deprecated in 3.12 and
+    produces a naive value, which is the root cause of the wrong-clock bug
+    in the conversation sidebar — values were treated as local time by the
+    browser. We normalise to aware UTC at write time."""
+    return datetime.now(UTC)
 
 
 class Base(DeclarativeBase):
@@ -24,7 +32,7 @@ class Conversation(Base):
     id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
     title: Mapped[str] = mapped_column(String(200), default="New conversation")
     mode: Mapped[str] = mapped_column(String(32), default="standard")
-    created_at: Mapped[datetime] = mapped_column(default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(default=_utcnow)
 
     messages: Mapped[list[Message]] = relationship(
         back_populates="conversation",
@@ -47,7 +55,7 @@ class Message(Base):
     metadata_json: Mapped[dict[str, object] | None] = mapped_column(
         JSONB, nullable=True, default=None
     )
-    created_at: Mapped[datetime] = mapped_column(default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(default=_utcnow)
 
     conversation: Mapped[Conversation] = relationship(back_populates="messages")
 
@@ -66,7 +74,7 @@ class Fact(Base):
     id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
     content: Mapped[str] = mapped_column(Text, unique=True)
     source: Mapped[str] = mapped_column(String(32), default="auto")
-    created_at: Mapped[datetime] = mapped_column(default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(default=_utcnow)
 
 
 class Feedback(Base):
@@ -84,4 +92,4 @@ class Feedback(Base):
     )
     rating: Mapped[int] = mapped_column()  # +1 up, -1 down
     note: Mapped[str | None] = mapped_column(Text, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(default=_utcnow)
