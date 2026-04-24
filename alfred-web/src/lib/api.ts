@@ -9,6 +9,7 @@ export interface ChatMessageOut {
   content: string;
   backend?: string | null;
   model?: string | null;
+  created_at?: string;
 }
 
 export interface ChatReply {
@@ -16,6 +17,23 @@ export interface ChatReply {
   mode: Mode;
   mode_changed: boolean;
   assistant: ChatMessageOut;
+}
+
+export interface ConversationSummary {
+  id: string;
+  title: string;
+  mode: Mode;
+  created_at: string;
+  last_message_at: string | null;
+  message_count: number;
+}
+
+export interface ConversationDetail {
+  id: string;
+  title: string;
+  mode: Mode;
+  created_at: string;
+  messages: ChatMessageOut[];
 }
 
 export async function sendMessage(
@@ -53,4 +71,24 @@ export async function setMode(mode: Mode): Promise<Mode> {
   if (!resp.ok) throw new Error("Could not set mode");
   const data = (await resp.json()) as { mode: Mode };
   return data.mode;
+}
+
+export async function listConversations(): Promise<ConversationSummary[]> {
+  const resp = await fetch(`${API_BASE}/conversations`);
+  if (!resp.ok) throw new Error("Could not list conversations");
+  const data = (await resp.json()) as { conversations: ConversationSummary[] };
+  return data.conversations;
+}
+
+export async function getConversation(id: string): Promise<ConversationDetail> {
+  const resp = await fetch(`${API_BASE}/conversations/${id}`);
+  if (!resp.ok) throw new Error("Could not load conversation");
+  return resp.json() as Promise<ConversationDetail>;
+}
+
+export async function deleteConversation(id: string): Promise<void> {
+  const resp = await fetch(`${API_BASE}/conversations/${id}`, {
+    method: "DELETE",
+  });
+  if (!resp.ok) throw new Error("Could not delete conversation");
 }

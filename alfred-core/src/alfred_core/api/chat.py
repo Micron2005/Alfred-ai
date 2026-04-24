@@ -78,6 +78,20 @@ async def _load_or_create(session: AsyncSession, cid: UUID | None) -> Conversati
     return convo
 
 
+def _derive_title(user_text: str) -> str:
+    """First sentence (or first ~60 chars) of the user's first message."""
+    text = user_text.strip().replace("\n", " ")
+    # Stop at the first sentence-ending punctuation if there is one.
+    for stop in (". ", "? ", "! "):
+        idx = text.find(stop)
+        if 0 < idx < 80:
+            text = text[: idx + 1]
+            break
+    if len(text) > 80:
+        text = text[:77].rstrip() + "…"
+    return text or "New conversation"
+
+
 async def _history(session: AsyncSession, conversation_id: UUID) -> list[Message]:
     result = await session.execute(
         select(Message)
@@ -140,6 +154,8 @@ async def chat(req: ChatRequest, session: AsyncSession = Depends(get_session)) -
     session.add(
         Message(conversation_id=convo.id, role="user", content=user_text)
     )
+    if convo.title == "New conversation":
+        convo.title = _derive_title(user_text)
 
     try:
         reply = await _llm_router.complete(msgs)
