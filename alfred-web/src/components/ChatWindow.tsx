@@ -38,28 +38,43 @@ export function ChatWindow() {
     setVoiceOut(localStorage.getItem(VOICE_OUT_KEY) === "1");
   }, []);
 
+  function stopCurrentAudio() {
+    const prev = audioRef.current;
+    if (!prev) return;
+    prev.pause();
+    if (prev.src) URL.revokeObjectURL(prev.src);
+    audioRef.current = null;
+  }
+
   function setVoiceOutPersisted(enabled: boolean) {
     setVoiceOut(enabled);
     if (typeof window !== "undefined") {
       localStorage.setItem(VOICE_OUT_KEY, enabled ? "1" : "0");
     }
-    if (!enabled && audioRef.current) {
-      audioRef.current.pause();
-      audioRef.current = null;
-    }
+    if (!enabled) stopCurrentAudio();
   }
 
   async function speak(text: string) {
+    let url: string | null = null;
     try {
       const blob = await synthesizeSpeech(text);
-      const url = URL.createObjectURL(blob);
+      url = URL.createObjectURL(blob);
       const audio = new Audio(url);
-      audioRef.current?.pause();
+      stopCurrentAudio();
       audioRef.current = audio;
-      audio.onended = () => URL.revokeObjectURL(url);
+      const objectUrl = url;
+      const cleanup = () => {
+        URL.revokeObjectURL(objectUrl);
+        if (audioRef.current === audio) audioRef.current = null;
+      };
+      audio.onended = cleanup;
+      audio.onerror = cleanup;
       await audio.play();
+      url = null; // ownership transferred to the audio element + cleanup callbacks
     } catch {
-      // TTS is best-effort; never block the chat experience on it.
+      // TTS is best-effort; if anything went wrong (network, autoplay
+      // policy, decode error) free the URL we never managed to attach.
+      if (url) URL.revokeObjectURL(url);
     }
   }
 
