@@ -62,14 +62,22 @@ export function Composer({ onSend, disabled }: ComposerProps) {
         });
         chunksRef.current = [];
         if (blob.size === 0) {
+          setMicError(
+            "I didn't pick up any audio. Check that your microphone is selected in Windows Sound settings.",
+          );
           setMic("idle");
           return;
         }
         setMic("transcribing");
         try {
           const transcript = await transcribeAudio(blob);
-          if (transcript.trim()) {
-            await onSend(transcript.trim());
+          const cleaned = transcript.trim();
+          if (cleaned) {
+            await onSend(cleaned);
+          } else {
+            setMicError(
+              "I couldn't make out any words. Try speaking a bit louder or closer to the mic.",
+            );
           }
         } catch (err) {
           setMicError(err instanceof Error ? err.message : "Transcription failed");
