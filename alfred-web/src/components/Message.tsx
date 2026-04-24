@@ -25,19 +25,6 @@ export function Message({ msg }: { msg: ChatMessageOut }) {
         }}
       >
         {msg.content}
-        {msg.backend && !isUser ? (
-          <div
-            style={{
-              marginTop: 6,
-              fontSize: 11,
-              color: "var(--muted)",
-              fontFamily: "ui-monospace, Menlo, monospace",
-            }}
-          >
-            via {msg.backend}
-            {msg.model ? ` · ${msg.model}` : ""}
-          </div>
-        ) : null}
       </div>
     </div>
   );

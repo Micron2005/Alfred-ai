@@ -52,6 +52,23 @@ class Message(Base):
     conversation: Mapped[Conversation] = relationship(back_populates="messages")
 
 
+class Fact(Base):
+    """A single fact Alfred has learned about his user.
+
+    Populated both automatically (via ``[REMEMBER: ...]`` markers Alfred
+    emits in his own replies) and explicitly (via the ``/facts`` endpoints).
+    Recent facts are injected into every system prompt so Alfred always has
+    them in mind.
+    """
+
+    __tablename__ = "facts"
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    content: Mapped[str] = mapped_column(Text, unique=True)
+    source: Mapped[str] = mapped_column(String(32), default="auto")
+    created_at: Mapped[datetime] = mapped_column(default=datetime.utcnow)
+
+
 class Feedback(Base):
     """Thumbs-up / thumbs-down feedback on individual assistant messages.
 
