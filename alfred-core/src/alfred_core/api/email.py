@@ -8,6 +8,8 @@ side-step the chat round-trip.
 
 from __future__ import annotations
 
+import asyncio
+
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
@@ -33,7 +35,10 @@ class EmailOut(BaseModel):
 async def send(payload: EmailIn) -> EmailOut:
     settings = get_settings()
     try:
-        result = send_email(
+        # SMTP is synchronous + blocking — offload to a worker thread so
+        # the event loop stays responsive while we wait on Gmail.
+        result = await asyncio.to_thread(
+            send_email,
             to=payload.to,
             subject=payload.subject,
             body=payload.body,

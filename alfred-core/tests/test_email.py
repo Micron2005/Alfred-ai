@@ -127,6 +127,23 @@ Second.
     assert [d.to for d in drafts] == ["a@x.com", "b@x.com"]
 
 
+def test_extract_drafts_body_cannot_override_headers() -> None:
+    """Regression: body lines like 'to:' must not change the recipient."""
+    reply = """\
+[SEND_EMAIL]
+to: alice@example.com
+subject: Meeting notes
+body:
+Please forward
+to: charlie@wrong.com
+[/SEND_EMAIL]"""
+    drafts = extract_drafts(reply)
+    assert len(drafts) == 1
+    assert drafts[0].to == "alice@example.com"
+    assert drafts[0].subject == "Meeting notes"
+    assert "charlie@wrong.com" in drafts[0].body
+
+
 def test_extract_drafts_skips_malformed() -> None:
     reply = """\
 [SEND_EMAIL]

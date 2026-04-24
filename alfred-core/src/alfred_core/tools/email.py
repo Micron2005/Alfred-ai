@@ -7,10 +7,10 @@ client secrets, no token storage. The downside is that the user must
 have 2-step verification enabled on their Google account, but that's
 already a sensible baseline.
 
-Sending is intentionally synchronous and fail-fast — the chat handler
-that wraps this is already running on a background-task path, and we
-want the LLM to receive a concrete success/failure signal rather than
-a fire-and-forget queue.
+Sending is intentionally synchronous and fail-fast — we want the LLM
+to receive a concrete success/failure signal rather than a fire-and-
+forget queue. Async callers must offload via ``asyncio.to_thread`` so
+this blocking I/O does not stall the event loop.
 """
 
 from __future__ import annotations

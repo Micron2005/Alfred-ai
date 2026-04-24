@@ -42,12 +42,17 @@ class EmailMarkerError(ValueError):
 
 
 def _parse_inner(inner: str) -> tuple[str, str, str]:
-    fields: dict[str, str] = {
-        m.group(1).lower(): m.group(2).strip() for m in _FIELD.finditer(inner)
-    }
+    # Split header section (before `body:`) from body section so a line
+    # in the body that happens to start with `to:` or `subject:` cannot
+    # silently override the real header values.
     body_match = _BODY_MARKER.search(inner)
+    header_section = inner[: body_match.start()] if body_match else inner
     body = inner[body_match.end():].strip() if body_match else ""
 
+    fields: dict[str, str] = {
+        m.group(1).lower(): m.group(2).strip()
+        for m in _FIELD.finditer(header_section)
+    }
     to = fields.get("to", "")
     subject = fields.get("subject", "")
     if not to or not subject or not body:

@@ -14,6 +14,7 @@ Flow for each user message:
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime
 from uuid import UUID
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -110,13 +111,21 @@ async def _history(session: AsyncSession, conversation_id: UUID) -> list[Message
     return list(result.scalars().all())
 
 
-def _process_email_drafts(reply: str, settings: Settings) -> str:
-    """Send each [SEND_EMAIL] block and inline a confirmation in its place."""
+async def _process_email_drafts(reply: str, settings: Settings) -> str:
+    """Send each [SEND_EMAIL] block and inline a confirmation in its place.
+
+    SMTP is blocking I/O. We hand each send to a worker thread so the
+    event loop stays free for other requests. Sends are sequential
+    rather than gathered — if the user dictated multiple emails in one
+    turn they should fail loudly one at a time, not silently in
+    parallel.
+    """
     drafts = extract_drafts(reply)
     if not drafts:
         return reply
     for draft in drafts:
-        reply = replace_marker(reply, draft, _send_one(draft, settings))
+        confirmation = await asyncio.to_thread(_send_one, draft, settings)
+        reply = replace_marker(reply, draft, confirmation)
     return reply
 
 
@@ -214,7 +223,7 @@ async def chat(req: ChatRequest, session: AsyncSession = Depends(get_session)) -
     if new_facts:
         await save_facts(session, new_facts)
 
-    visible_reply = _process_email_drafts(visible_reply, settings)
+    visible_reply = await _process_email_drafts(visible_reply, settings)
 
     assistant_msg = Message(
         conversation_id=convo.id,
