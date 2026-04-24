@@ -11,7 +11,6 @@ import {
   type Mode,
   deleteConversation,
   getConversation,
-  getMode,
   listConversations,
   sendMessage,
 } from "@/lib/api";
@@ -59,13 +58,10 @@ export function ChatWindow() {
     }
   }, []);
 
-  // On first mount: fetch current mode + list conversations + restore last
-  // active conversation (if any) so the user picks up where they left off.
+  // On first mount: list conversations + restore last active conversation
+  // (if any) so the user picks up where they left off. Mode is per-conversation
+  // and defaults to standard; it gets set from the loaded conversation.
   useEffect(() => {
-    void getMode()
-      .then(setMode)
-      .catch(() => {});
-
     void (async () => {
       const list = await refreshList();
       const saved =
@@ -119,6 +115,7 @@ export function ChatWindow() {
   function handleNewChat() {
     setConvoId(null);
     setMessages([]);
+    setMode("standard");
     setError(null);
     localStorage.removeItem(ACTIVE_CONVO_KEY);
   }

@@ -55,24 +55,6 @@ export async function sendMessage(
   return resp.json() as Promise<ChatReply>;
 }
 
-export async function getMode(): Promise<Mode> {
-  const resp = await fetch(`${API_BASE}/mode`);
-  if (!resp.ok) throw new Error("Could not fetch mode");
-  const data = (await resp.json()) as { mode: Mode };
-  return data.mode;
-}
-
-export async function setMode(mode: Mode): Promise<Mode> {
-  const resp = await fetch(`${API_BASE}/mode`, {
-    method: "PUT",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ mode }),
-  });
-  if (!resp.ok) throw new Error("Could not set mode");
-  const data = (await resp.json()) as { mode: Mode };
-  return data.mode;
-}
-
 export async function listConversations(): Promise<ConversationSummary[]> {
   const resp = await fetch(`${API_BASE}/conversations`);
   if (!resp.ok) throw new Error("Could not list conversations");
