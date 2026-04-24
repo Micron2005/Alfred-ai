@@ -13,9 +13,11 @@ import {
   getConversation,
   listConversations,
   sendMessage,
+  synthesizeSpeech,
 } from "@/lib/api";
 
 const ACTIVE_CONVO_KEY = "alfred.activeConversationId";
+const VOICE_OUT_KEY = "alfred.voiceOutEnabled";
 
 export function ChatWindow() {
   const [messages, setMessages] = useState<ChatMessageOut[]>([]);
@@ -25,7 +27,41 @@ export function ChatWindow() {
   const [busy, setBusy] = useState(false);
   const [loadingConvo, setLoadingConvo] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [voiceOut, setVoiceOut] = useState(false);
   const endRef = useRef<HTMLDivElement>(null);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+
+  // Restore the user's voice-out preference. Defaults to off so a fresh
+  // install doesn't surprise the user with audio.
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    setVoiceOut(localStorage.getItem(VOICE_OUT_KEY) === "1");
+  }, []);
+
+  function setVoiceOutPersisted(enabled: boolean) {
+    setVoiceOut(enabled);
+    if (typeof window !== "undefined") {
+      localStorage.setItem(VOICE_OUT_KEY, enabled ? "1" : "0");
+    }
+    if (!enabled && audioRef.current) {
+      audioRef.current.pause();
+      audioRef.current = null;
+    }
+  }
+
+  async function speak(text: string) {
+    try {
+      const blob = await synthesizeSpeech(text);
+      const url = URL.createObjectURL(blob);
+      const audio = new Audio(url);
+      audioRef.current?.pause();
+      audioRef.current = audio;
+      audio.onended = () => URL.revokeObjectURL(url);
+      await audio.play();
+    } catch {
+      // TTS is best-effort; never block the chat experience on it.
+    }
+  }
 
   // Refresh the conversation list from the server.
   const refreshList = useCallback(async () => {
@@ -105,6 +141,9 @@ export function ChatWindow() {
       setMode(reply.mode);
       setMessages((prev) => [...prev, reply.assistant]);
       await refreshList();
+      if (voiceOut && reply.assistant.content.trim()) {
+        void speak(reply.assistant.content);
+      }
     } catch (e) {
       setError(e instanceof Error ? e.message : "Unknown error");
     } finally {
@@ -174,7 +213,26 @@ export function ChatWindow() {
               {greeting}
             </p>
           </div>
-          <ModeIndicator mode={mode} />
+          <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+            <button
+              type="button"
+              onClick={() => setVoiceOutPersisted(!voiceOut)}
+              aria-pressed={voiceOut}
+              title={voiceOut ? "Mute Alfred's voice" : "Unmute Alfred's voice"}
+              style={{
+                padding: "6px 10px",
+                borderRadius: 6,
+                border: "1px solid var(--border)",
+                background: voiceOut ? "var(--accent)" : "transparent",
+                color: voiceOut ? "#fff" : "var(--muted)",
+                cursor: "pointer",
+                fontSize: 13,
+              }}
+            >
+              {voiceOut ? "🔊 Voice on" : "🔇 Voice off"}
+            </button>
+            <ModeIndicator mode={mode} />
+          </div>
         </header>
 
         <main

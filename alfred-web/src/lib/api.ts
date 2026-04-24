@@ -74,3 +74,32 @@ export async function deleteConversation(id: string): Promise<void> {
   });
   if (!resp.ok) throw new Error("Could not delete conversation");
 }
+
+export async function transcribeAudio(blob: Blob): Promise<string> {
+  const form = new FormData();
+  const ext = blob.type.includes("ogg") ? "ogg" : "webm";
+  form.append("audio", blob, `clip.${ext}`);
+  const resp = await fetch(`${API_BASE}/voice/stt`, {
+    method: "POST",
+    body: form,
+  });
+  if (!resp.ok) {
+    const detail = await resp.text();
+    throw new Error(`Transcription failed: ${resp.status} — ${detail}`);
+  }
+  const data = (await resp.json()) as { text: string };
+  return data.text;
+}
+
+export async function synthesizeSpeech(text: string): Promise<Blob> {
+  const resp = await fetch(`${API_BASE}/voice/tts`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ text }),
+  });
+  if (!resp.ok) {
+    const detail = await resp.text();
+    throw new Error(`Speech synthesis failed: ${resp.status} — ${detail}`);
+  }
+  return resp.blob();
+}
