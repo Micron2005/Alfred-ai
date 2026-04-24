@@ -2,34 +2,47 @@
 
 Flow for each user message:
 1. Parse wake/mode phrases (activate / deactivate Nightfall Protocol).
-2. Build the current persona's system prompt.
-3. Load conversation history from Postgres.
-4. Call the router to pick a backend (local vs Claude for coding).
-5. Persist the user + assistant messages.
-6. Return the assistant's reply plus the current mode.
+2. Build a ContextBundle (current time, weather, known facts about the user).
+3. Build the current persona's system prompt with that context baked in.
+4. Load conversation history from Postgres.
+5. Call the router to pick a backend (local vs Claude for coding).
+6. Extract any ``[REMEMBER: ...]`` markers from the reply, persist them as
+   facts, and strip them from the visible reply.
+7. Persist the user + assistant messages.
+8. Return the assistant's reply plus the current mode.
 """
 
 from __future__ import annotations
 
+from datetime import datetime
 from uuid import UUID
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from alfred_core.config import get_settings
+from alfred_core.config import Settings, get_settings
 from alfred_core.db.models import Conversation, Message
 from alfred_core.db.session import get_session
 from alfred_core.llm.base import ChatMessage
-from alfred_core.persona import Mode, build_persona
+from alfred_core.memory import extract_and_strip, recent_facts, save_facts
+from alfred_core.persona import ContextBundle, Mode, build_persona
 from alfred_core.router import Router
 from alfred_core.state import mode_state
 from alfred_core.wake import analyze
+from alfred_core.weather import WeatherService
 
 router = APIRouter(prefix="/chat", tags=["chat"])
 
-_llm_router = Router.from_settings(get_settings())
+_settings = get_settings()
+_llm_router = Router.from_settings(_settings)
+_weather = WeatherService(
+    latitude=_settings.alfred_location_latitude,
+    longitude=_settings.alfred_location_longitude,
+    city_label=_settings.alfred_location_city,
+)
 
 
 class ChatRequest(BaseModel):
@@ -74,6 +87,29 @@ async def _history(session: AsyncSession, conversation_id: UUID) -> list[Message
     return list(result.scalars().all())
 
 
+async def _build_context(settings: Settings, session: AsyncSession) -> ContextBundle:
+    try:
+        tz = ZoneInfo(settings.alfred_timezone)
+    except ZoneInfoNotFoundError:
+        tz = ZoneInfo("UTC")
+    now_local = datetime.now(tz)
+
+    weather_summary = ""
+    snapshot = await _weather.get()
+    if snapshot is not None:
+        weather_summary = snapshot.summary()
+
+    facts = await recent_facts(session)
+    known_facts = tuple(f.content for f in facts)
+
+    return ContextBundle(
+        now_local=now_local,
+        timezone_label=settings.alfred_timezone,
+        weather_summary=weather_summary,
+        known_facts=known_facts,
+    )
+
+
 @router.post("", response_model=ChatReply)
 async def chat(req: ChatRequest, session: AsyncSession = Depends(get_session)) -> ChatReply:
     settings = get_settings()
@@ -87,7 +123,8 @@ async def chat(req: ChatRequest, session: AsyncSession = Depends(get_session)) -
         mode_state.set(wake.mode_change)
         mode_changed = True
 
-    persona = build_persona(mode_state.mode, settings)
+    context = await _build_context(settings, session)
+    persona = build_persona(mode_state.mode, settings, context)
 
     convo = await _load_or_create(session, req.conversation_id)
 
@@ -116,10 +153,14 @@ async def chat(req: ChatRequest, session: AsyncSession = Depends(get_session)) -
             ),
         ) from exc
 
+    visible_reply, new_facts = extract_and_strip(reply.content)
+    if new_facts:
+        await save_facts(session, new_facts)
+
     assistant_msg = Message(
         conversation_id=convo.id,
         role="assistant",
-        content=reply.content,
+        content=visible_reply,
         backend=reply.backend,
         model=reply.model,
     )

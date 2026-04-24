@@ -38,6 +38,12 @@ class Settings(BaseSettings):
     anthropic_model: str = Field(default="claude-sonnet-4-5-20250929")
     use_cloud_for_coding: bool = Field(default=True)
 
+    # ─── Location / time / weather ──────────────────────────────────────
+    alfred_location_city: str = Field(default="Fredericksburg, VA")
+    alfred_location_latitude: float = Field(default=38.3032)
+    alfred_location_longitude: float = Field(default=-77.4605)
+    alfred_timezone: str = Field(default="America/New_York")
+
     # ─── Database ───────────────────────────────────────────────────────
     database_url: str = Field(
         default="postgresql+psycopg://alfred:wayne-manor@localhost:5432/alfred"
