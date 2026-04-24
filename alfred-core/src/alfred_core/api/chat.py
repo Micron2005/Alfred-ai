@@ -30,7 +30,6 @@ from alfred_core.llm.base import ChatMessage
 from alfred_core.memory import extract_and_strip, recent_facts, save_facts
 from alfred_core.persona import ContextBundle, Mode, build_persona
 from alfred_core.router import Router
-from alfred_core.state import mode_state
 from alfred_core.wake import analyze
 from alfred_core.weather import WeatherService
 
@@ -72,10 +71,32 @@ async def _load_or_create(session: AsyncSession, cid: UUID | None) -> Conversati
             raise HTTPException(status_code=404, detail="Conversation not found.")
         return existing
 
-    convo = Conversation(mode=mode_state.mode.value)
+    # New conversations always start in Standard mode. Nightfall is
+    # activated per-conversation via the wake phrase.
+    convo = Conversation(mode=Mode.STANDARD.value)
     session.add(convo)
     await session.flush()
     return convo
+
+
+def _derive_title(user_text: str) -> str:
+    """First sentence (or first ~80 chars) of the user's first message."""
+    text = user_text.strip().replace("\n", " ")
+    # Find the EARLIEST sentence-ending punctuation across all types,
+    # not whichever type we happen to check first.
+    best_idx = len(text)
+    for stop in (". ", "? ", "! "):
+        # Start at index 1 so a sentence-ender at position 0 (which would
+        # yield an empty or 1-char title) is skipped without hiding a
+        # valid ender that appears later in the same text.
+        idx = text.find(stop, 1)
+        if 0 < idx < best_idx:
+            best_idx = idx
+    if best_idx < 80:
+        text = text[: best_idx + 1]
+    if len(text) > 80:
+        text = text[:77].rstrip() + "…"
+    return text or "New conversation"
 
 
 async def _history(session: AsyncSession, conversation_id: UUID) -> list[Message]:
@@ -117,16 +138,24 @@ async def chat(req: ChatRequest, session: AsyncSession = Depends(get_session)) -
     if not user_text:
         raise HTTPException(status_code=400, detail="Message is empty.")
 
+    convo = await _load_or_create(session, req.conversation_id)
+
+    # Per-conversation mode: use whatever mode this conversation was
+    # last in. Each conversation owns its own mode, so switching between
+    # conversations in the sidebar does not leak state between them.
+    try:
+        current_mode = Mode(convo.mode)
+    except ValueError:
+        current_mode = Mode.STANDARD
+
     wake = analyze(user_text)
     mode_changed = False
-    if wake.mode_change is not None and wake.mode_change is not mode_state.mode:
-        mode_state.set(wake.mode_change)
+    if wake.mode_change is not None and wake.mode_change is not current_mode:
+        current_mode = wake.mode_change
         mode_changed = True
 
     context = await _build_context(settings, session)
-    persona = build_persona(mode_state.mode, settings, context)
-
-    convo = await _load_or_create(session, req.conversation_id)
+    persona = build_persona(current_mode, settings, context)
 
     history = await _history(session, convo.id)
     msgs: list[ChatMessage] = [ChatMessage(role="system", content=persona.system_prompt)]
@@ -137,9 +166,12 @@ async def chat(req: ChatRequest, session: AsyncSession = Depends(get_session)) -
             msgs.append(ChatMessage(role="assistant", content=m.content))
     msgs.append(ChatMessage(role="user", content=user_text))
 
+    is_first_message = len(history) == 0
     session.add(
         Message(conversation_id=convo.id, role="user", content=user_text)
     )
+    if is_first_message:
+        convo.title = _derive_title(user_text)
 
     try:
         reply = await _llm_router.complete(msgs)
@@ -166,13 +198,13 @@ async def chat(req: ChatRequest, session: AsyncSession = Depends(get_session)) -
     )
     session.add(assistant_msg)
 
-    convo.mode = mode_state.mode.value
+    convo.mode = current_mode.value
     await session.commit()
     await session.refresh(assistant_msg)
 
     return ChatReply(
         conversation_id=convo.id,
-        mode=mode_state.mode,
+        mode=current_mode,
         mode_changed=mode_changed,
         assistant=ChatMessageOut(
             id=assistant_msg.id,
