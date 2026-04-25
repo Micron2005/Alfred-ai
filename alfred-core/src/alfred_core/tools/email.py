@@ -74,6 +74,10 @@ def send_email(
 
     sender = settings.alfred_gmail_address.strip()
     display = settings.alfred_gmail_display_name.strip() or "Alfred"
+    # Google shows app passwords as "abcd abcd abcd abcd" — those spaces
+    # are presentational only. Strip every whitespace character so a
+    # paste-as-displayed copy still authenticates.
+    password = re.sub(r"\s+", "", settings.alfred_gmail_app_password)
 
     msg = EmailMessage()
     msg["From"] = formataddr((display, sender))
@@ -84,7 +88,7 @@ def send_email(
     try:
         with smtplib.SMTP(_SMTP_HOST, _SMTP_PORT, timeout=20) as smtp:
             smtp.starttls()
-            smtp.login(sender, settings.alfred_gmail_app_password)
+            smtp.login(sender, password)
             smtp.send_message(msg)
     except smtplib.SMTPAuthenticationError as exc:
         raise EmailError(

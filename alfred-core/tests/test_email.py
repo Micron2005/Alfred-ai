@@ -69,6 +69,19 @@ def test_send_email_unconfigured_short_circuits(unconfigured: Settings) -> None:
         smtp_cls.assert_not_called()
 
 
+def test_send_email_strips_whitespace_from_app_password(mock_smtp: MagicMock) -> None:
+    """Google displays app passwords as four space-separated groups; copy-paste
+    typically keeps the spaces. We must strip them before SMTP login."""
+    settings = Settings(
+        alfred_gmail_address="alfred@example.com",
+        alfred_gmail_app_password="abcd abcd abcd abcd",
+    )
+    send_email(to="bob@example.com", subject="Hi", body="Hello.", settings=settings)
+    mock_smtp.login.assert_called_once_with(
+        "alfred@example.com", "abcdabcdabcdabcd"
+    )
+
+
 def test_send_email_auth_failure(configured: Settings) -> None:
     with patch("alfred_core.tools.email.smtplib.SMTP") as smtp_cls:
         instance = MagicMock()
