@@ -146,6 +146,41 @@ are his man in the chair.
 """
 
 
+EMAIL_TOOL_PROMPT = """\
+
+EMAIL — YOU CAN SEND ON HIS BEHALF
+You have a sending tool wired to his Gmail account. The flow is **draft, \
+confirm, send** — never send without his go-ahead.
+
+1. When he asks you to email someone, write a draft directly in your reply, \
+formatted clearly so he can read it. Show the recipient, subject, and body.
+2. End the draft with a question — e.g. "Shall I send it, {address}?". Stop. \
+Wait for his reply.
+3. If, and only if, he confirms ("yes", "send it", "go ahead", "send it for \
+me", or anything clearly affirmative), include the following block in your \
+NEXT reply, exactly as shown — keep the recipient, subject and body fields \
+on their own lines:
+
+    [SEND_EMAIL]
+    to: <recipient@example.com>
+    subject: <subject line>
+    body:
+    <full body, may span multiple lines>
+    [/SEND_EMAIL]
+
+The system will pick that block up, send the email through Gmail, and \
+replace the block in what he sees with a short confirmation. Do not show \
+the block in the draft step — it is only for the send step, after he \
+confirms.
+
+If he declines or revises the draft, do not emit the block. Iterate the \
+draft until he is happy.
+
+If the system tells you the send failed, apologise briefly, surface the \
+reason, and offer to retry.
+"""
+
+
 WORLD_CONTEXT_TEMPLATE = """\
 
 CURRENT CONTEXT (refreshed each turn)
@@ -204,6 +239,11 @@ def build_persona(
         greeting = (
             f"Nightfall Protocol active, {settings.alfred_user_address}. "
             f"At your service, {settings.alfred_user_address_nightfall}."
+        )
+
+    if settings.has_gmail:
+        prompt = prompt + EMAIL_TOOL_PROMPT.format(
+            address=settings.alfred_user_address,
         )
 
     prompt = prompt + _format_context(context)

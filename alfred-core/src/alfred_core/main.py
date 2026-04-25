@@ -9,7 +9,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from alfred_core import __version__
-from alfred_core.api import chat, conversations, facts, health, voice
+from alfred_core.api import chat, conversations, email, facts, health, voice
 from alfred_core.db.session import init_db
 
 
@@ -39,6 +39,7 @@ app.include_router(chat.router)
 app.include_router(facts.router)
 app.include_router(conversations.router)
 app.include_router(voice.router)
+app.include_router(email.router)
 
 
 @app.get("/")

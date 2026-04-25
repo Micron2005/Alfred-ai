@@ -49,10 +49,22 @@ class Settings(BaseSettings):
         default="postgresql+psycopg://alfred:wayne-manor@localhost:5432/alfred"
     )
 
+    # ─── Gmail (SMTP, app-password auth) ────────────────────────────────
+    alfred_gmail_address: str = Field(default="")
+    alfred_gmail_app_password: str = Field(default="")
+    alfred_gmail_display_name: str = Field(default="Alfred (for Mukarram)")
+
     @property
     def has_cloud(self) -> bool:
         """Whether a real Anthropic key has been configured."""
         return bool(self.anthropic_api_key and self.anthropic_api_key.strip())
+
+    @property
+    def has_gmail(self) -> bool:
+        """Whether outgoing Gmail credentials are configured."""
+        return bool(
+            self.alfred_gmail_address.strip() and self.alfred_gmail_app_password.strip()
+        )
 
 
 @lru_cache(maxsize=1)
