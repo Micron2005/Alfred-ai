@@ -41,6 +41,12 @@ export function Composer({ onSend, disabled }: ComposerProps) {
   const recorderRef = useRef<MediaRecorder | null>(null);
   const chunksRef = useRef<Blob[]>([]);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  // Mirror of `images` state for the unmount cleanup. The cleanup runs
+  // exactly once with the dependency-array-captured value, which would be
+  // the empty initial state — using a ref keeps it pointing at the live
+  // attachments so we revoke real object URLs on unmount.
+  const imagesRef = useRef<AttachedImage[]>([]);
+  imagesRef.current = images;
 
   useEffect(() => {
     return () => {
@@ -51,14 +57,13 @@ export function Composer({ onSend, disabled }: ComposerProps) {
   }, []);
 
   // Revoke object URLs on unmount so we don't leak memory if the user
-  // attaches images and then navigates away without sending.
+  // attaches images and then navigates away without sending. Per-image
+  // cleanup for the normal send/remove paths happens inline in submit
+  // and removeImage.
   useEffect(() => {
     return () => {
-      for (const img of images) URL.revokeObjectURL(img.previewUrl);
+      for (const img of imagesRef.current) URL.revokeObjectURL(img.previewUrl);
     };
-    // We deliberately only run this on unmount. Per-image cleanup happens
-    // inline in removeImage / submit.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   async function ingestFiles(files: FileList | File[], origin: "picker" | "paste" | "drop") {
