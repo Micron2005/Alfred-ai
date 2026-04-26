@@ -54,6 +54,16 @@ class Settings(BaseSettings):
     alfred_gmail_app_password: str = Field(default="")
     alfred_gmail_display_name: str = Field(default="Alfred (for Mukarram)")
 
+    # ─── Voice (TTS) ────────────────────────────────────────────────────
+    # `edge` uses Microsoft's Edge Read-Aloud neural voices (free, online,
+    # noticeably more natural). `piper` uses the offline Piper binary baked
+    # into the image. Edge falls back to Piper automatically if the network
+    # call fails, so the offline fallback is always there.
+    alfred_tts_backend: str = Field(default="edge")
+    alfred_edge_tts_voice: str = Field(default="en-GB-RyanNeural")
+    alfred_edge_tts_rate: str = Field(default="+0%")
+    alfred_edge_tts_pitch: str = Field(default="+0Hz")
+
     @property
     def has_cloud(self) -> bool:
         """Whether a real Anthropic key has been configured."""
