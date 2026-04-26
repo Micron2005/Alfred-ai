@@ -52,10 +52,22 @@ _weather = WeatherService(
 )
 
 
+class PresenceSignal(BaseModel):
+    """Live camera-presence snapshot taken at send-time.
+
+    Sent only when the user has the camera toggle on; otherwise the
+    field is omitted entirely so Alfred doesn't speak as if he can
+    "see" when he can't.
+    """
+
+    faces_visible: int
+
+
 class ChatRequest(BaseModel):
     message: str
     conversation_id: UUID | None = None
     images: list[ImagePayload] = []
+    presence: PresenceSignal | None = None
 
 
 class ImageOut(BaseModel):
@@ -161,7 +173,11 @@ def _send_one(draft: EmailDraft, settings: Settings) -> str:
     return f"_(Email sent to {result.to} — subject: \"{result.subject}\")_"
 
 
-async def _build_context(settings: Settings, session: AsyncSession) -> ContextBundle:
+async def _build_context(
+    settings: Settings,
+    session: AsyncSession,
+    presence: PresenceSignal | None = None,
+) -> ContextBundle:
     try:
         tz = ZoneInfo(settings.alfred_timezone)
     except ZoneInfoNotFoundError:
@@ -181,6 +197,7 @@ async def _build_context(settings: Settings, session: AsyncSession) -> ContextBu
         timezone_label=settings.alfred_timezone,
         weather_summary=weather_summary,
         known_facts=known_facts,
+        faces_visible=presence.faces_visible if presence is not None else None,
     )
 
 
@@ -215,7 +232,7 @@ async def chat(req: ChatRequest, session: AsyncSession = Depends(get_session)) -
         current_mode = wake.mode_change
         mode_changed = True
 
-    context = await _build_context(settings, session)
+    context = await _build_context(settings, session, req.presence)
     persona = build_persona(current_mode, settings, context)
 
     history = await _history(session, convo.id)

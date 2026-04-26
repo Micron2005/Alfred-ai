@@ -48,6 +48,10 @@ class ContextBundle:
     timezone_label: str = ""
     weather_summary: str = ""
     known_facts: tuple[str, ...] = ()
+    # Live presence signal from the browser camera, when the user has
+    # toggled it on. ``None`` means the camera is off (or unsupported);
+    # an integer means "this many faces are visible right now".
+    faces_visible: int | None = None
 
 
 STANDARD_TEMPLATE = """\
@@ -86,10 +90,22 @@ VOICE AND MANNER
 
 WHAT YOU CAN DO NOW
 Chat. Answer questions. Help with planning and thinking. Remember things \
-about him. Tell him the current time and weather when relevant. More \
-capabilities (smart-home control, 3D-printer assistance, email, voice, \
-camera-based awareness) are being installed; acknowledge limitations honestly \
-if he asks for something not yet wired up.
+about him. Tell him the current time and weather when relevant. When he \
+turns the camera on, you can see how many people are in the room (a live \
+count appears in the CURRENT CONTEXT block below). When he attaches an \
+image — including a snapshot from his camera — you can see and reason \
+about it. More capabilities (smart-home control, 3D-printer assistance) \
+are being installed; acknowledge limitations honestly if he asks for \
+something not yet wired up.
+
+CAMERA — IMPORTANT
+- Only mention what you see when it's relevant to the conversation, when \
+he asks, or when something genuinely warrants comment (e.g. someone new \
+walking in). Do not narrate his face or commentate on every frame.
+- If the CURRENT CONTEXT block does not include a camera line, the camera \
+is off — do not pretend you can see him. Say so if asked.
+- Even when the camera is on, the count is just that — a count. You don't \
+know whose face it is unless he tells you. Don't guess.
 
 WHAT YOU ARE NOT
 - You are not a sycophant. Do not use phrases like "Great question!" or \
@@ -138,6 +154,16 @@ WHAT YOU DO
 - Keep the work moving.
 - Continue to build memory as in Standard Mode: when he tells you something \
 important, include a hidden line "[REMEMBER: <one-sentence fact>]".
+
+CAMERA — IMPORTANT
+- Same camera signal as Standard Mode: a live face count appears in the \
+CURRENT CONTEXT block when he has the camera on. Treat it as ambient \
+intel, not a cue to commentate.
+- Speak to it only when relevant — a new person entering the room, an \
+unexpected count, a direct question. Otherwise, work the problem.
+- If the CURRENT CONTEXT block does not include a camera line, the camera \
+is off — do not pretend you can see him. Acknowledge it plainly if asked.
+- The count is a count. Identity is not yours to assume.
 
 DEACTIVATION
 He may say "deactivate Nightfall Protocol", "stand down", or similar, at \
@@ -196,7 +222,7 @@ reason, and offer to retry.
 WORLD_CONTEXT_TEMPLATE = """\
 
 CURRENT CONTEXT (refreshed each turn)
-{time_line}{weather_line}{facts_block}
+{time_line}{weather_line}{presence_line}{facts_block}
 """
 
 
@@ -219,13 +245,31 @@ def _format_context(context: ContextBundle | None) -> str:
         bullets = "\n".join(f"  • {fact}" for fact in context.known_facts)
         facts_block = f"- What you already know about him:\n{bullets}\n"
 
-    if not (time_line or weather_line or facts_block):
+    presence_line = ""
+    if context.faces_visible is not None:
+        # Phrase as direct observation so Alfred treats it as something
+        # he himself can see, not a system fact. Don't change persona
+        # on the basis of presence — that's the user's call (see the
+        # Nightfall protocol rule above).
+        n = context.faces_visible
+        if n == 0:
+            phrase = "no one — the room appears empty"
+        elif n == 1:
+            phrase = "one person (presumably him)"
+        else:
+            phrase = f"{n} people"
+        presence_line = (
+            f"- Through the laptop camera you can currently see {phrase}.\n"
+        )
+
+    if not (time_line or weather_line or facts_block or presence_line):
         return ""
 
     return WORLD_CONTEXT_TEMPLATE.format(
         time_line=time_line,
         weather_line=weather_line,
         facts_block=facts_block,
+        presence_line=presence_line,
     )
 
 

@@ -25,6 +25,14 @@ export interface ComposerHandle {
   /** Programmatically start the voice-recording flow (e.g. from a wake
    *  word). No-op if already recording, transcribing, or disabled. */
   startVoice: () => void;
+  /** Attach an image to the composer (e.g. a webcam snapshot from the
+   *  "Look" button). The image counts against MAX_IMAGES; if the
+   *  attachment would exceed the cap, the oldest images are dropped to
+   *  make room — matching how the manual paperclip handles overflow.
+   *  Returns true if attached, false if rejected. */
+  attachImage: (
+    image: ChatImage & { label?: string },
+  ) => boolean;
 }
 
 type MicState = "idle" | "recording" | "transcribing";
@@ -329,6 +337,29 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
         if (micRef.current !== "idle") return;
         if (startingRef.current) return;
         void startRecording();
+      },
+      attachImage: (img) => {
+        if (disabledRef.current) return false;
+        const attached: AttachedImage = {
+          data: img.data,
+          mime_type: img.mime_type,
+          id: crypto.randomUUID(),
+          // Webcam snapshots don't have a File backing them, so build a
+          // data URL preview directly from the bytes we already have.
+          previewUrl: `data:${img.mime_type};base64,${img.data}`,
+          label: img.label ?? "Webcam snapshot",
+        };
+        setImages((prev) => {
+          // Drop the oldest images if we'd exceed the cap, to mirror
+          // how the user would expect a fresh capture to slot in.
+          const next = [...prev, attached];
+          while (next.length > MAX_IMAGES) {
+            const removed = next.shift();
+            if (removed) URL.revokeObjectURL(removed.previewUrl);
+          }
+          return next;
+        });
+        return true;
       },
     }),
     // eslint-disable-next-line react-hooks/exhaustive-deps

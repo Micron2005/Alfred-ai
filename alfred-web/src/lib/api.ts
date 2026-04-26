@@ -44,10 +44,16 @@ export interface ConversationDetail {
   messages: ChatMessageOut[];
 }
 
+export interface PresenceSignal {
+  /** How many faces are visible in the camera at send time. */
+  faces_visible: number;
+}
+
 export async function sendMessage(
   message: string,
   conversationId: string | null,
   images: ChatImage[] = [],
+  presence: PresenceSignal | null = null,
 ): Promise<ChatReply> {
   const resp = await fetch(`${API_BASE}/chat`, {
     method: "POST",
@@ -56,6 +62,11 @@ export async function sendMessage(
       message,
       conversation_id: conversationId,
       images,
+      // Omit the field entirely (rather than sending null) when the
+      // camera is off, so the backend's `PresenceSignal | None`
+      // serializer treats it as "no observation" rather than
+      // "observation: nothing".
+      ...(presence ? { presence } : {}),
     }),
   });
   if (!resp.ok) {
