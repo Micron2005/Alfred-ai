@@ -22,9 +22,13 @@ const ACTIVE_CONVO_KEY = "alfred.activeConversationId";
 const VOICE_OUT_KEY = "alfred.voiceOutEnabled";
 const HANDS_FREE_KEY = "alfred.handsFreeEnabled";
 
-const PICOVOICE_ACCESS_KEY =
-  process.env.NEXT_PUBLIC_PICOVOICE_ACCESS_KEY ?? "";
-const WAKE_KEYWORD = process.env.NEXT_PUBLIC_WAKE_KEYWORD ?? "Jarvis";
+const WAKE_KEYWORD = process.env.NEXT_PUBLIC_WAKE_KEYWORD ?? "hey_jarvis";
+
+// Pretty label for status text — "hey_jarvis" → "Hey Jarvis".
+const WAKE_LABEL = WAKE_KEYWORD.replace(/_/g, " ").replace(
+  /\b\w/g,
+  (c) => c.toUpperCase(),
+);
 
 export function ChatWindow() {
   const [messages, setMessages] = useState<ChatMessageOut[]>([]);
@@ -52,7 +56,6 @@ export function ChatWindow() {
 
   const wake = useWakeWord({
     enabled: handsFree,
-    accessKey: PICOVOICE_ACCESS_KEY,
     keyword: WAKE_KEYWORD,
     onWake: () => composerRef.current?.startVoice(),
   });
@@ -274,8 +277,8 @@ export function ChatWindow() {
               aria-pressed={handsFree}
               title={
                 handsFree
-                  ? `Hands-free is on — say "${WAKE_KEYWORD}" to start a message`
-                  : `Turn on hands-free (wake word: "${WAKE_KEYWORD}")`
+                  ? `Hands-free is on — say "${WAKE_LABEL}" to start a message`
+                  : `Turn on hands-free (wake word: "${WAKE_LABEL}")`
               }
               style={{
                 padding: "6px 10px",
@@ -289,9 +292,9 @@ export function ChatWindow() {
             >
               {handsFree
                 ? wake.status === "listening"
-                  ? `🎙️ "${WAKE_KEYWORD}" — listening`
+                  ? `🎙️ "${WAKE_LABEL}" — listening`
                   : wake.status === "paused"
-                    ? `🎙️ "${WAKE_KEYWORD}" — paused`
+                    ? `🎙️ "${WAKE_LABEL}" — paused`
                     : wake.status === "starting"
                       ? "🎙️ Starting…"
                       : wake.status === "error"

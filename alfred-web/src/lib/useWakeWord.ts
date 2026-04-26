@@ -1,48 +1,63 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { PorcupineWorker } from "@picovoice/porcupine-web";
-import type { WebVoiceProcessor } from "@picovoice/web-voice-processor";
 
 /**
- * Hands-free wake-word detection via Picovoice Porcupine in the browser.
+ * Hands-free wake-word detection via openWakeWord in the browser.
  *
- * Detection runs entirely client-side — Porcupine ships a WASM blob that
- * processes microphone frames locally, so audio never leaves the page.
- * Only the AccessKey itself is verified online (a one-time activation
- * check by Picovoice).
+ * Detection runs entirely client-side. We use the
+ * `openwakeword-wasm-browser` package, which loads small ONNX models
+ * (mel spectrogram + embedding + Silero VAD + a per-keyword classifier)
+ * and runs them through `onnxruntime-web` against the live mic frames.
+ * Audio never leaves the page; no API key, no signup, no remote calls.
  *
  * The hook:
- *  - keeps a single PorcupineWorker + WebVoiceProcessor instance alive
- *    while ``enabled`` is true
+ *  - keeps a single `WakeWordEngine` alive while ``enabled`` is true
  *  - calls ``onWake`` whenever the configured wake word fires
  *  - reports lifecycle errors via ``error``
  *  - exposes ``pause`` / ``resume`` so callers can stop listening while
  *    the existing voice-recording flow has the mic, then resume
  *
- * The Porcupine + WebVoiceProcessor packages are loaded dynamically the
- * first time the hook starts so they don't end up in the SSR bundle.
+ * The engine is loaded dynamically the first time the hook starts so
+ * onnxruntime-web's bundle stays out of SSR + initial page load.
  */
+
+/**
+ * Built-in openWakeWord keywords this hook knows about. These match the
+ * pre-trained ONNX models we ship under
+ * ``/public/openwakeword/models/<name>_v0.1.onnx``.
+ */
+export const BUILT_IN_KEYWORDS = [
+  "hey_jarvis",
+  "alexa",
+  "hey_mycroft",
+  "hey_rhasspy",
+  "timer",
+  "weather",
+] as const;
+
+export type BuiltInKeyword = (typeof BUILT_IN_KEYWORDS)[number];
+
 export interface UseWakeWordOptions {
   /** Whether the user has turned on hands-free mode. */
   enabled: boolean;
   /**
-   * Built-in Porcupine keyword to listen for (case-sensitive label).
-   * Defaults to "Jarvis" — the closest built-in to "Hey Alfred".
+   * Built-in openWakeWord keyword to listen for. Defaults to
+   * ``"hey_jarvis"`` — the closest pre-trained model to "Hey Alfred".
    */
-  keyword?: string;
+  keyword?: BuiltInKeyword | string;
   /** Callback fired on wake-word detection. */
   onWake: () => void;
   /**
-   * Picovoice AccessKey from https://console.picovoice.ai/. Required.
-   * Without it the hook reports an error and stays idle.
+   * Public URL prefix where the ONNX model files live. Defaults to
+   * ``/openwakeword/models`` which is what ``alfred-web`` ships.
    */
-  accessKey: string;
+  baseAssetUrl?: string;
   /**
-   * Public path to the Porcupine model parameters file. Defaults to
-   * ``/porcupine_params.pv`` which is what ``alfred-web`` ships.
+   * Detection threshold (0–1). Higher = fewer false positives, more
+   * misses. The library default of 0.5 works well for hey_jarvis.
    */
-  modelPath?: string;
+  detectionThreshold?: number;
 }
 
 export type WakeStatus = "off" | "starting" | "listening" | "paused" | "error";
@@ -56,10 +71,29 @@ export interface UseWakeWordReturn {
   resume: () => void;
 }
 
-type WebVoiceProcessorStatic = typeof WebVoiceProcessor;
+// Minimal structural type for the engine — keeps us decoupled from the
+// internal ``WakeWordEngine`` class while still type-safe at the call
+// site. The real type comes from ``openwakeword-wasm-browser`` once the
+// dynamic import resolves.
+type DetectEvent = { keyword: string; score: number; at?: number };
+interface WakeWordEngineLike {
+  load(): Promise<void>;
+  start(opts?: { deviceId?: string; gain?: number }): Promise<void>;
+  stop(): Promise<void>;
+  on(
+    event: "detect" | "ready" | "speech-start" | "speech-end" | "error",
+    handler: (payload: DetectEvent | unknown) => void,
+  ): () => void;
+}
 
 export function useWakeWord(opts: UseWakeWordOptions): UseWakeWordReturn {
-  const { enabled, keyword = "Jarvis", onWake, accessKey, modelPath = "/porcupine_params.pv" } = opts;
+  const {
+    enabled,
+    keyword = "hey_jarvis",
+    onWake,
+    baseAssetUrl = "/openwakeword/models",
+    detectionThreshold = 0.5,
+  } = opts;
 
   const [status, setStatus] = useState<WakeStatus>("off");
   const [error, setError] = useState<string | null>(null);
@@ -70,28 +104,28 @@ export function useWakeWord(opts: UseWakeWordOptions): UseWakeWordReturn {
   const onWakeRef = useRef(onWake);
   onWakeRef.current = onWake;
 
-  // Live engine + audio-pipeline handles. Held outside React state so
-  // we can release them imperatively from cleanup paths.
-  const porcupineRef = useRef<PorcupineWorker | null>(null);
-  const wvpRef = useRef<WebVoiceProcessorStatic | null>(null);
+  // Live engine handle + paused flag. Held outside React state so we
+  // can release them imperatively from cleanup paths.
+  const engineRef = useRef<WakeWordEngineLike | null>(null);
   const pausedRef = useRef(false);
+  const detachListenerRef = useRef<(() => void) | null>(null);
 
   const teardown = useCallback(async () => {
-    const porcupine = porcupineRef.current;
-    const wvp = wvpRef.current;
-    porcupineRef.current = null;
-    wvpRef.current = null;
+    const engine = engineRef.current;
+    const detach = detachListenerRef.current;
+    engineRef.current = null;
+    detachListenerRef.current = null;
     pausedRef.current = false;
-    if (porcupine && wvp) {
+    if (detach) {
       try {
-        await wvp.unsubscribe(porcupine);
+        detach();
       } catch {
-        /* the page may be tearing down — ignore */
+        /* ignore — page tear-down */
       }
     }
-    if (porcupine) {
+    if (engine) {
       try {
-        await porcupine.release();
+        await engine.stop();
       } catch {
         /* same */
       }
@@ -106,82 +140,72 @@ export function useWakeWord(opts: UseWakeWordOptions): UseWakeWordReturn {
       return;
     }
 
-    if (!accessKey || !accessKey.trim()) {
-      setStatus("error");
-      setError(
-        "Wake-word requires a Picovoice AccessKey. Set NEXT_PUBLIC_PICOVOICE_ACCESS_KEY in .env (free at console.picovoice.ai) and rebuild alfred-web.",
-      );
-      return;
-    }
-
     let cancelled = false;
     setStatus("starting");
     setError(null);
 
     void (async () => {
       try {
-        // Lazy-load so SSR + initial bundle stay slim. The Porcupine
-        // package ships its own Worker and WASM under the hood.
-        const [{ PorcupineWorker, BuiltInKeyword }, wvpModule] = await Promise.all([
-          import("@picovoice/porcupine-web"),
-          import("@picovoice/web-voice-processor"),
-        ]);
-        const { WebVoiceProcessor } = wvpModule;
-
-        // Map the user-friendly label to the BuiltInKeyword enum value.
-        // Keys on the enum are PascalCase (e.g. "Jarvis", "HeyGoogle").
-        type BuiltInKeywordEnum = typeof BuiltInKeyword;
-        type BuiltInKey = keyof BuiltInKeywordEnum;
-        const requested = keyword.replace(/\s+/g, "") as BuiltInKey;
-        const builtin =
-          BuiltInKeyword[requested] ??
-          (Object.values(BuiltInKeyword).find((v) => v === keyword) as
-            | BuiltInKeywordEnum[BuiltInKey]
-            | undefined);
-        if (!builtin) {
-          throw new Error(
-            `Unknown built-in wake word "${keyword}". Pick one of: ` +
-              Object.values(BuiltInKeyword).join(", "),
-          );
+        // Lazy-load so onnxruntime-web doesn't end up in SSR or the
+        // initial bundle.
+        const mod = await import("openwakeword-wasm-browser");
+        const WakeWordEngine = (
+          mod as { default?: unknown; WakeWordEngine?: unknown }
+        ).default ?? (mod as { WakeWordEngine?: unknown }).WakeWordEngine;
+        if (typeof WakeWordEngine !== "function") {
+          throw new Error("openwakeword-wasm-browser export shape changed");
         }
+        const Engine = WakeWordEngine as new (
+          opts: Record<string, unknown>,
+        ) => WakeWordEngineLike;
 
-        const porcupine = await PorcupineWorker.create(
-          accessKey.trim(),
-          [{ builtin, sensitivity: 0.5 }],
-          () => {
-            if (pausedRef.current) return;
-            try {
-              onWakeRef.current();
-            } catch {
-              /* swallow — caller mistakes shouldn't kill the engine */
-            }
-          },
-          { publicPath: modelPath },
-        );
+        const engine = new Engine({
+          baseAssetUrl,
+          keywords: [keyword],
+          detectionThreshold,
+          cooldownMs: 2000,
+        });
+
         if (cancelled) {
-          await porcupine.release();
+          await engine.stop().catch(() => {});
           return;
         }
 
-        await WebVoiceProcessor.subscribe(porcupine);
+        const detach = engine.on("detect", (payload) => {
+          if (pausedRef.current) return;
+          const evt = payload as DetectEvent;
+          if (evt && typeof evt.keyword === "string") {
+            onWakeRef.current();
+          }
+        });
+
+        await engine.load();
         if (cancelled) {
-          await WebVoiceProcessor.unsubscribe(porcupine);
-          await porcupine.release();
+          detach();
+          await engine.stop().catch(() => {});
           return;
         }
 
-        porcupineRef.current = porcupine;
-        wvpRef.current = WebVoiceProcessor;
-        setStatus("listening");
-      } catch (err) {
+        await engine.start();
+        if (cancelled) {
+          detach();
+          await engine.stop().catch(() => {});
+          return;
+        }
+
+        engineRef.current = engine;
+        detachListenerRef.current = detach;
+        setStatus(pausedRef.current ? "paused" : "listening");
+      } catch (e) {
         if (cancelled) return;
-        setError(
-          err instanceof Error
-            ? `Wake-word couldn't start: ${err.message}`
-            : "Wake-word couldn't start.",
-        );
+        const msg = e instanceof Error ? e.message : String(e);
         setStatus("error");
-        await teardown();
+        setError(
+          msg.toLowerCase().includes("permission") ||
+            msg.toLowerCase().includes("notallowed")
+            ? "Microphone permission denied. Allow mic access in your browser, then toggle hands-free off and on."
+            : `Wake-word setup failed: ${msg}`,
+        );
       }
     })();
 
@@ -189,7 +213,7 @@ export function useWakeWord(opts: UseWakeWordOptions): UseWakeWordReturn {
       cancelled = true;
       void teardown();
     };
-  }, [enabled, accessKey, keyword, modelPath, teardown]);
+  }, [enabled, keyword, baseAssetUrl, detectionThreshold, teardown]);
 
   const pause = useCallback(() => {
     pausedRef.current = true;
