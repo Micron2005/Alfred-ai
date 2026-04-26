@@ -1,11 +1,18 @@
-"""Anthropic Claude backend for hard coding / reasoning tasks.
+"""Anthropic Claude backend for hard coding / reasoning / vision tasks.
 
 This is the only part of Alfred that leaves your home. You can disable it
 entirely by leaving ANTHROPIC_API_KEY blank or setting USE_CLOUD_FOR_CODING
 to false.
+
+Vision lives here too: when a user message has images attached, we ship
+them as Anthropic ``image`` content blocks alongside the text. This is
+the only path Alfred has to actually *see* something today — local Ollama
+chat models are text-only.
 """
 
 from __future__ import annotations
+
+from typing import Any, cast
 
 from anthropic import AsyncAnthropic
 from anthropic.types import MessageParam
@@ -27,7 +34,7 @@ class AnthropicBackend(LLMBackend):
 
         system_parts = [m.content for m in messages if m.role == "system"]
         convo: list[MessageParam] = [
-            {"role": m.role, "content": m.content}
+            _to_anthropic_message(m)
             for m in messages
             if m.role in ("user", "assistant")
         ]
@@ -45,3 +52,31 @@ class AnthropicBackend(LLMBackend):
             model=chosen,
             backend=self.name,
         )
+
+
+def _to_anthropic_message(m: ChatMessage) -> MessageParam:
+    """Convert one ChatMessage into Anthropic's MessageParam shape.
+
+    Plain text messages stay as a string for compactness. Messages with
+    images become a list of content blocks: every image first (Anthropic
+    recommends image-before-text for best comprehension), then the text.
+    Empty text is preserved as an empty string block so the request still
+    contains the user's intent (e.g. "describe this").
+    """
+    if not m.images:
+        return cast(MessageParam, {"role": m.role, "content": m.content})
+
+    blocks: list[dict[str, Any]] = []
+    for img in m.images:
+        blocks.append(
+            {
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": img.mime_type,
+                    "data": img.data,
+                },
+            }
+        )
+    blocks.append({"type": "text", "text": m.content or ""})
+    return cast(MessageParam, {"role": m.role, "content": blocks})

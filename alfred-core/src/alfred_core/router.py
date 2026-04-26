@@ -1,6 +1,9 @@
 """Decides which LLM backend handles a given turn.
 
 Rules of thumb:
+- If the user's most recent turn carries one or more images AND the cloud
+  backend is enabled, send it to Claude — local Ollama chat models are
+  text-only and we don't want to silently drop the image.
 - If the user's request looks like a hard coding task AND the cloud backend
   is enabled, send it to Claude.
 - Otherwise stay local.
@@ -30,6 +33,10 @@ _CODE_SIGNALS = re.compile(
 )
 
 
+class VisionUnavailableError(RuntimeError):
+    """Raised when an image-bearing turn arrives but no vision backend is wired."""
+
+
 @dataclass
 class Router:
     local: LLMBackend
@@ -51,7 +58,15 @@ class Router:
             use_cloud_for_coding=settings.use_cloud_for_coding,
         )
 
-    def pick(self, last_user_message: str) -> LLMBackend:
+    def pick(self, last_user_message: str, *, has_images: bool = False) -> LLMBackend:
+        if has_images:
+            if self.cloud is None:
+                raise VisionUnavailableError(
+                    "I can't see images yet — Alfred needs an Anthropic API "
+                    "key for that. Set ANTHROPIC_API_KEY in .env and restart "
+                    "the containers, and I'll be able to look at what you send."
+                )
+            return self.cloud
         if (
             self.cloud is not None
             and self.use_cloud_for_coding
@@ -61,9 +76,11 @@ class Router:
         return self.local
 
     async def complete(self, messages: list[ChatMessage]) -> ChatResponse:
-        last_user = next(
-            (m.content for m in reversed(messages) if m.role == "user"),
-            "",
+        last_user_msg = next(
+            (m for m in reversed(messages) if m.role == "user"),
+            None,
         )
-        backend = self.pick(last_user)
+        last_user_text = last_user_msg.content if last_user_msg else ""
+        has_images = bool(last_user_msg and last_user_msg.images)
+        backend = self.pick(last_user_text, has_images=has_images)
         return await backend.complete(messages)

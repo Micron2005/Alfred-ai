@@ -38,6 +38,30 @@ def _as_utc(dt: datetime | None) -> datetime | None:
     return dt.astimezone(UTC)
 
 
+def _extract_images(metadata: dict[str, object] | None) -> list[MessageImageOut]:
+    """Pull image attachments out of a Message's ``metadata_json`` blob.
+
+    Images live there as ``{"images": [{"data": "...", "mime_type": "..."}]}``.
+    If anything is missing or malformed we return an empty list rather than
+    erroring — old messages predate the field, and we'd rather degrade
+    gracefully than 500 the whole conversation.
+    """
+    if not metadata:
+        return []
+    raw = metadata.get("images")
+    if not isinstance(raw, list):
+        return []
+    out: list[MessageImageOut] = []
+    for entry in raw:
+        if not isinstance(entry, dict):
+            continue
+        data = entry.get("data")
+        mime = entry.get("mime_type")
+        if isinstance(data, str) and isinstance(mime, str):
+            out.append(MessageImageOut(data=data, mime_type=mime))
+    return out
+
+
 class ConversationSummary(BaseModel):
     id: UUID
     title: str
@@ -51,12 +75,18 @@ class ConversationList(BaseModel):
     conversations: list[ConversationSummary]
 
 
+class MessageImageOut(BaseModel):
+    data: str
+    mime_type: str
+
+
 class MessageOut(BaseModel):
     id: UUID
     role: str
     content: str
     backend: str | None = None
     model: str | None = None
+    images: list[MessageImageOut] = []
     created_at: datetime
 
 
@@ -126,6 +156,7 @@ async def get_conversation(
                 content=m.content,
                 backend=m.backend,
                 model=m.model,
+                images=_extract_images(m.metadata_json),
                 created_at=_as_utc(m.created_at),
             )
             for m in msgs
