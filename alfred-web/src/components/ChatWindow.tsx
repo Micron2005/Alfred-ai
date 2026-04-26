@@ -22,7 +22,11 @@ const ACTIVE_CONVO_KEY = "alfred.activeConversationId";
 const VOICE_OUT_KEY = "alfred.voiceOutEnabled";
 const HANDS_FREE_KEY = "alfred.handsFreeEnabled";
 
-const WAKE_KEYWORD = process.env.NEXT_PUBLIC_WAKE_KEYWORD ?? "hey_alfred";
+// Use ``||`` (not ``??``) so an empty-string value from Docker Compose
+// — which is what `${NEXT_PUBLIC_WAKE_KEYWORD}` expands to when the
+// user upgrades from a pre-PR `.env` that lacks the var — falls back to
+// the default instead of being inlined as `""` into the bundle.
+const WAKE_KEYWORD = process.env.NEXT_PUBLIC_WAKE_KEYWORD || "hey_alfred";
 
 // Pretty label for status text — "hey_jarvis" → "Hey Jarvis".
 const WAKE_LABEL = WAKE_KEYWORD.replace(/_/g, " ").replace(
