@@ -23,8 +23,12 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import type { FaceDetector } from "@mediapipe/tasks-vision";
 
+// MediaPipe pins JS↔WASM offsets per release — the CDN URL must match the
+// installed npm package exactly. Bumping the package without bumping this
+// constant (or vice versa) will surface as nonsense detection results or
+// cryptic ``Aborted()`` failures inside the WASM module.
 const WASM_BASE_URL =
-  "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/wasm";
+  "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.34/wasm";
 const FACE_MODEL_URL = "/mediapipe/models/blaze_face_short_range.tflite";
 
 export type CameraStatus =
