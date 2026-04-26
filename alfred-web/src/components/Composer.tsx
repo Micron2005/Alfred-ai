@@ -218,6 +218,13 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   micRef.current = mic;
   const disabledRef = useRef<boolean>(Boolean(disabled));
   disabledRef.current = Boolean(disabled);
+  // Synchronous lock for the async window inside startRecording: between
+  // the call to startRecording() and `await getUserMedia()` resolving,
+  // micRef is still "idle". Without this, two wake-word firings in quick
+  // succession (e.g. while the mic-permission prompt is open) would each
+  // pass the micRef guard, spawning two MediaRecorder instances and
+  // orphaning the first one's stream.
+  const startingRef = useRef<boolean>(false);
 
   // Notify the parent whenever recording starts or stops so it can pause
   // wake-word listening (otherwise we'd race the user's own voice).
@@ -226,6 +233,8 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   }, [mic, onMicStateChange]);
 
   async function startRecording() {
+    if (startingRef.current) return;
+    startingRef.current = true;
     setMicError(null);
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
@@ -292,6 +301,8 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
           : "Microphone unavailable",
       );
       setMic("idle");
+    } finally {
+      startingRef.current = false;
     }
   }
 
@@ -316,6 +327,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
       startVoice: () => {
         if (disabledRef.current) return;
         if (micRef.current !== "idle") return;
+        if (startingRef.current) return;
         void startRecording();
       },
     }),
