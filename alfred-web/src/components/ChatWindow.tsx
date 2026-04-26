@@ -6,6 +6,7 @@ import { Message } from "@/components/Message";
 import { Composer } from "@/components/Composer";
 import { ConversationSidebar } from "@/components/ConversationSidebar";
 import {
+  type ChatImage,
   type ChatMessageOut,
   type ConversationSummary,
   type Mode,
@@ -140,17 +141,18 @@ export function ChatWindow() {
     }
   }, [mode]);
 
-  async function handleSend(text: string) {
+  async function handleSend(text: string, images: ChatImage[] = []) {
     setError(null);
     const userMsg: ChatMessageOut = {
       id: crypto.randomUUID(),
       role: "user",
       content: text,
+      images: images.length > 0 ? images : undefined,
     };
     setMessages((prev) => [...prev, userMsg]);
     setBusy(true);
     try {
-      const reply = await sendMessage(text, convoId);
+      const reply = await sendMessage(text, convoId, images);
       setConvoId(reply.conversation_id);
       localStorage.setItem(ACTIVE_CONVO_KEY, reply.conversation_id);
       setMode(reply.mode);

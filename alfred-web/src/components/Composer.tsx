@@ -4,24 +4,49 @@ import {
   useEffect,
   useRef,
   useState,
+  type ClipboardEvent,
+  type DragEvent,
   type FormEvent,
   type KeyboardEvent,
 } from "react";
-import { transcribeAudio } from "@/lib/api";
+import { readFileAsChatImage, transcribeAudio, type ChatImage } from "@/lib/api";
 
 interface ComposerProps {
-  onSend: (text: string) => Promise<void> | void;
+  onSend: (text: string, images: ChatImage[]) => Promise<void> | void;
   disabled?: boolean;
 }
 
 type MicState = "idle" | "recording" | "transcribing";
 
+interface AttachedImage extends ChatImage {
+  /** Stable id used for React keys + remove buttons. */
+  id: string;
+  /** Object URL for the thumbnail preview. Revoked when removed. */
+  previewUrl: string;
+  /** Display label (filename or "Pasted image"). */
+  label: string;
+}
+
+const ALLOWED_MIME = /^image\/(png|jpe?g|gif|webp)$/;
+const MAX_BYTES = 5 * 1024 * 1024;
+const MAX_IMAGES = 6;
+
 export function Composer({ onSend, disabled }: ComposerProps) {
   const [text, setText] = useState("");
   const [mic, setMic] = useState<MicState>("idle");
   const [micError, setMicError] = useState<string | null>(null);
+  const [images, setImages] = useState<AttachedImage[]>([]);
+  const [imageError, setImageError] = useState<string | null>(null);
+  const [isDragging, setIsDragging] = useState(false);
   const recorderRef = useRef<MediaRecorder | null>(null);
   const chunksRef = useRef<Blob[]>([]);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  // Mirror of `images` state for the unmount cleanup. The cleanup runs
+  // exactly once with the dependency-array-captured value, which would be
+  // the empty initial state — using a ref keeps it pointing at the live
+  // attachments so we revoke real object URLs on unmount.
+  const imagesRef = useRef<AttachedImage[]>([]);
+  imagesRef.current = images;
 
   useEffect(() => {
     return () => {
@@ -31,12 +56,95 @@ export function Composer({ onSend, disabled }: ComposerProps) {
     };
   }, []);
 
+  // Revoke object URLs on unmount so we don't leak memory if the user
+  // attaches images and then navigates away without sending. Per-image
+  // cleanup for the normal send/remove paths happens inline in submit
+  // and removeImage.
+  useEffect(() => {
+    return () => {
+      for (const img of imagesRef.current) URL.revokeObjectURL(img.previewUrl);
+    };
+  }, []);
+
+  async function ingestFiles(files: FileList | File[], origin: "picker" | "paste" | "drop") {
+    setImageError(null);
+    const incoming = Array.from(files).filter((f) => f.size > 0);
+    if (incoming.length === 0) return;
+
+    if (images.length + incoming.length > MAX_IMAGES) {
+      setImageError(
+        `You can attach up to ${MAX_IMAGES} images per message; that would be ${images.length + incoming.length}.`,
+      );
+      return;
+    }
+
+    const accepted: AttachedImage[] = [];
+    for (const file of incoming) {
+      if (!ALLOWED_MIME.test(file.type)) {
+        setImageError(
+          `${file.name || "That file"} isn't an image type Alfred supports (PNG, JPEG, GIF, WebP).`,
+        );
+        continue;
+      }
+      if (file.size > MAX_BYTES) {
+        setImageError(
+          `${file.name || "That image"} is over the 5 MB limit.`,
+        );
+        continue;
+      }
+      try {
+        const encoded = await readFileAsChatImage(file);
+        const previewUrl = URL.createObjectURL(file);
+        const label =
+          origin === "paste" && !file.name ? "Pasted image" : file.name || "Image";
+        accepted.push({
+          ...encoded,
+          id: crypto.randomUUID(),
+          previewUrl,
+          label,
+        });
+      } catch (err) {
+        setImageError(
+          err instanceof Error ? err.message : "Could not read that image.",
+        );
+      }
+    }
+    if (accepted.length > 0) {
+      setImages((prev) => [...prev, ...accepted]);
+    }
+  }
+
+  function removeImage(id: string) {
+    setImages((prev) => {
+      const target = prev.find((img) => img.id === id);
+      if (target) URL.revokeObjectURL(target.previewUrl);
+      return prev.filter((img) => img.id !== id);
+    });
+  }
+
   async function submit(e: FormEvent) {
     e.preventDefault();
     const trimmed = text.trim();
-    if (!trimmed || disabled) return;
+    if (disabled) return;
+    // Either text or at least one image is required — empty submissions
+    // would be rejected by the backend.
+    if (!trimmed && images.length === 0) return;
+    const payload: ChatImage[] = images.map(({ data, mime_type }) => ({
+      data,
+      mime_type,
+    }));
+    // Snapshot what we need to clean up, then clear local state, then
+    // hand off to the parent so the bubble shows the user's message + images
+    // immediately.
+    const toRevoke = images.map((img) => img.previewUrl);
     setText("");
-    await onSend(trimmed);
+    setImages([]);
+    setImageError(null);
+    try {
+      await onSend(trimmed, payload);
+    } finally {
+      for (const url of toRevoke) URL.revokeObjectURL(url);
+    }
   }
 
   function onKeyDown(e: KeyboardEvent<HTMLTextAreaElement>) {
@@ -44,6 +152,41 @@ export function Composer({ onSend, disabled }: ComposerProps) {
       e.preventDefault();
       void submit(e as unknown as FormEvent);
     }
+  }
+
+  function onPaste(e: ClipboardEvent<HTMLTextAreaElement>) {
+    const items = e.clipboardData?.items;
+    if (!items) return;
+    const files: File[] = [];
+    for (const item of items) {
+      if (item.kind === "file") {
+        const file = item.getAsFile();
+        if (file && ALLOWED_MIME.test(file.type)) files.push(file);
+      }
+    }
+    if (files.length > 0) {
+      e.preventDefault();
+      void ingestFiles(files, "paste");
+    }
+  }
+
+  function onDragOver(e: DragEvent<HTMLFormElement>) {
+    if (e.dataTransfer?.types.includes("Files")) {
+      e.preventDefault();
+      setIsDragging(true);
+    }
+  }
+
+  function onDragLeave(e: DragEvent<HTMLFormElement>) {
+    if (e.currentTarget.contains(e.relatedTarget as Node)) return;
+    setIsDragging(false);
+  }
+
+  function onDrop(e: DragEvent<HTMLFormElement>) {
+    e.preventDefault();
+    setIsDragging(false);
+    const files = e.dataTransfer?.files;
+    if (files && files.length > 0) void ingestFiles(files, "drop");
   }
 
   async function startRecording() {
@@ -73,7 +216,22 @@ export function Composer({ onSend, disabled }: ComposerProps) {
           const transcript = await transcribeAudio(blob);
           const cleaned = transcript.trim();
           if (cleaned) {
-            await onSend(cleaned);
+            // Read from the ref, not the captured `images` state — the
+            // user may have added or removed attachments while recording.
+            const live = imagesRef.current;
+            const payload: ChatImage[] = live.map(({ data, mime_type }) => ({
+              data,
+              mime_type,
+            }));
+            const toRevoke = live.map((img) => img.previewUrl);
+            setText("");
+            setImages([]);
+            setImageError(null);
+            try {
+              await onSend(cleaned, payload);
+            } finally {
+              for (const url of toRevoke) URL.revokeObjectURL(url);
+            }
           } else {
             setMicError(
               "I couldn't make out any words. Try speaking a bit louder or closer to the mic.",
@@ -117,18 +275,80 @@ export function Composer({ onSend, disabled }: ComposerProps) {
         : "Speak to Alfred";
   const micGlyph = mic === "recording" ? "■" : mic === "transcribing" ? "…" : "🎙";
 
+  const canSubmit = !disabled && !micBusy && (text.trim().length > 0 || images.length > 0);
+
   return (
     <form
       onSubmit={submit}
+      onDragOver={onDragOver}
+      onDragLeave={onDragLeave}
+      onDrop={onDrop}
       style={{
         display: "flex",
         flexDirection: "column",
         gap: 6,
         padding: 12,
         borderTop: "1px solid var(--border)",
-        background: "var(--bg)",
+        background: isDragging ? "var(--bubble-user)" : "var(--bg)",
+        transition: "background 120ms ease",
       }}
     >
+      {images.length > 0 && (
+        <div
+          style={{
+            display: "flex",
+            flexWrap: "wrap",
+            gap: 8,
+            paddingBottom: 4,
+          }}
+        >
+          {images.map((img) => (
+            <div
+              key={img.id}
+              style={{
+                position: "relative",
+                width: 64,
+                height: 64,
+                borderRadius: 8,
+                overflow: "hidden",
+                border: "1px solid var(--border)",
+                background: "var(--bubble-assistant)",
+              }}
+            >
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img
+                src={img.previewUrl}
+                alt={img.label}
+                style={{ width: "100%", height: "100%", objectFit: "cover" }}
+              />
+              <button
+                type="button"
+                onClick={() => removeImage(img.id)}
+                aria-label={`Remove ${img.label}`}
+                title={`Remove ${img.label}`}
+                style={{
+                  position: "absolute",
+                  top: 2,
+                  right: 2,
+                  width: 20,
+                  height: 20,
+                  borderRadius: 10,
+                  border: "none",
+                  background: "rgba(0, 0, 0, 0.6)",
+                  color: "#fff",
+                  fontSize: 12,
+                  lineHeight: 1,
+                  cursor: "pointer",
+                  padding: 0,
+                }}
+              >
+                ×
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+
       <div style={{ display: "flex", gap: 8 }}>
         <button
           type="button"
@@ -151,16 +371,51 @@ export function Composer({ onSend, disabled }: ComposerProps) {
           {micGlyph}
         </button>
 
+        <button
+          type="button"
+          onClick={() => fileInputRef.current?.click()}
+          disabled={disabled || micBusy || images.length >= MAX_IMAGES}
+          aria-label="Attach an image"
+          title="Attach an image (or paste / drop one)"
+          style={{
+            padding: "10px 14px",
+            borderRadius: 8,
+            border: "1px solid var(--border)",
+            background: "var(--bubble-assistant)",
+            color: "var(--fg)",
+            cursor: disabled || micBusy ? "wait" : "pointer",
+            fontSize: 16,
+            minWidth: 48,
+          }}
+        >
+          📎
+        </button>
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept="image/png,image/jpeg,image/gif,image/webp"
+          multiple
+          style={{ display: "none" }}
+          onChange={(e) => {
+            if (e.target.files) void ingestFiles(e.target.files, "picker");
+            // Reset so picking the same file twice still fires onChange.
+            e.target.value = "";
+          }}
+        />
+
         <textarea
           value={text}
           onChange={(e) => setText(e.target.value)}
           onKeyDown={onKeyDown}
+          onPaste={onPaste}
           placeholder={
             mic === "recording"
               ? "Listening…"
               : mic === "transcribing"
                 ? "Transcribing your message…"
-                : 'Say "Hello Alfred" — or hit the mic to speak.'
+                : isDragging
+                  ? "Drop your image here…"
+                  : 'Say "Hello Alfred" — or hit the mic, or attach an image.'
           }
           rows={2}
           disabled={disabled || micBusy}
@@ -177,7 +432,7 @@ export function Composer({ onSend, disabled }: ComposerProps) {
         />
         <button
           type="submit"
-          disabled={disabled || micBusy || !text.trim()}
+          disabled={!canSubmit}
           style={{
             padding: "10px 18px",
             borderRadius: 8,
@@ -194,6 +449,9 @@ export function Composer({ onSend, disabled }: ComposerProps) {
       </div>
       {micError && (
         <div style={{ color: "#b91c1c", fontSize: 12 }}>{micError}</div>
+      )}
+      {imageError && (
+        <div style={{ color: "#b91c1c", fontSize: 12 }}>{imageError}</div>
       )}
     </form>
   );

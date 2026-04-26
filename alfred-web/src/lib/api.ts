@@ -3,12 +3,20 @@ export const API_BASE =
 
 export type Mode = "standard" | "nightfall";
 
+export interface ChatImage {
+  /** Base-64 encoded bytes (no `data:` prefix). */
+  data: string;
+  /** IANA mime type, e.g. `image/png`. */
+  mime_type: string;
+}
+
 export interface ChatMessageOut {
   id: string;
   role: "user" | "assistant";
   content: string;
   backend?: string | null;
   model?: string | null;
+  images?: ChatImage[];
   created_at?: string;
 }
 
@@ -39,6 +47,7 @@ export interface ConversationDetail {
 export async function sendMessage(
   message: string,
   conversationId: string | null,
+  images: ChatImage[] = [],
 ): Promise<ChatReply> {
   const resp = await fetch(`${API_BASE}/chat`, {
     method: "POST",
@@ -46,13 +55,45 @@ export async function sendMessage(
     body: JSON.stringify({
       message,
       conversation_id: conversationId,
+      images,
     }),
   });
   if (!resp.ok) {
     const detail = await resp.text();
-    throw new Error(`Alfred is unreachable: ${resp.status} — ${detail}`);
+    // Backend returns FastAPI's {detail: "..."} JSON shape on errors;
+    // parse it for a clean error message rather than dumping the whole
+    // body. Fall back to the raw text if it's not JSON.
+    let cleanDetail = detail;
+    try {
+      const parsed = JSON.parse(detail) as { detail?: string };
+      if (parsed.detail) cleanDetail = parsed.detail;
+    } catch {
+      /* leave detail as-is */
+    }
+    throw new Error(`Alfred is unreachable: ${resp.status} — ${cleanDetail}`);
   }
   return resp.json() as Promise<ChatReply>;
+}
+
+/** Read a File as base64 (no data: prefix) and return it alongside the mime. */
+export async function readFileAsChatImage(file: File): Promise<ChatImage> {
+  const data: string = await new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = reader.result;
+      if (typeof result !== "string") {
+        reject(new Error("Could not read image"));
+        return;
+      }
+      // FileReader.readAsDataURL gives "data:<mime>;base64,<payload>";
+      // strip the prefix so the backend receives clean base64.
+      const comma = result.indexOf(",");
+      resolve(comma === -1 ? result : result.slice(comma + 1));
+    };
+    reader.onerror = () => reject(reader.error ?? new Error("Could not read image"));
+    reader.readAsDataURL(file);
+  });
+  return { data, mime_type: file.type || "image/png" };
 }
 
 export async function listConversations(): Promise<ConversationSummary[]> {

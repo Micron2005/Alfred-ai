@@ -27,12 +27,17 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from alfred_core.config import Settings, get_settings
 from alfred_core.db.models import Conversation, Message
 from alfred_core.db.session import get_session
-from alfred_core.llm.base import ChatMessage
+from alfred_core.llm.base import ChatImage, ChatMessage
 from alfred_core.memory import extract_and_strip, recent_facts, save_facts
 from alfred_core.persona import ContextBundle, Mode, build_persona
-from alfred_core.router import Router
+from alfred_core.router import Router, VisionUnavailableError
 from alfred_core.tools.email import EmailError, send_email
 from alfred_core.tools.email_marker import EmailDraft, extract_drafts, replace_marker
+from alfred_core.tools.images import (
+    ImagePayload,
+    ImageValidationError,
+    validate_images,
+)
 from alfred_core.wake import analyze
 from alfred_core.weather import WeatherService
 
@@ -50,6 +55,19 @@ _weather = WeatherService(
 class ChatRequest(BaseModel):
     message: str
     conversation_id: UUID | None = None
+    images: list[ImagePayload] = []
+
+
+class ImageOut(BaseModel):
+    """Image as returned to the client.
+
+    We keep the same shape as the inbound payload (base64 bytes + mime
+    type) so the React side can render thumbnails directly from the
+    field — no extra fetch round-trip and no static-file plumbing.
+    """
+
+    data: str
+    mime_type: str
 
 
 class ChatMessageOut(BaseModel):
@@ -58,6 +76,7 @@ class ChatMessageOut(BaseModel):
     content: str
     backend: str | None = None
     model: str | None = None
+    images: list[ImageOut] = []
 
 
 class ChatReply(BaseModel):
@@ -169,8 +188,16 @@ async def _build_context(settings: Settings, session: AsyncSession) -> ContextBu
 async def chat(req: ChatRequest, session: AsyncSession = Depends(get_session)) -> ChatReply:
     settings = get_settings()
     user_text = req.message.strip()
-    if not user_text:
+    if not user_text and not req.images:
+        # An empty message with no image is genuinely empty; an empty
+        # message *with* images is fine ("describe this") and we let
+        # the model handle it.
         raise HTTPException(status_code=400, detail="Message is empty.")
+
+    try:
+        validated_images: list[ChatImage] = validate_images(req.images)
+    except ImageValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     convo = await _load_or_create(session, req.conversation_id)
 
@@ -194,21 +221,40 @@ async def chat(req: ChatRequest, session: AsyncSession = Depends(get_session)) -
     history = await _history(session, convo.id)
     msgs: list[ChatMessage] = [ChatMessage(role="system", content=persona.system_prompt)]
     for m in history:
-        if m.role == "user":
-            msgs.append(ChatMessage(role="user", content=m.content))
-        elif m.role == "assistant":
-            msgs.append(ChatMessage(role="assistant", content=m.content))
-    msgs.append(ChatMessage(role="user", content=user_text))
+        if m.role in ("user", "assistant"):
+            msgs.append(ChatMessage(role=m.role, content=m.content))
+    # Only attach images to the *current* user turn — re-shipping every
+    # past image on every subsequent turn would balloon request size and
+    # bills. The assistant's text reply has already absorbed whatever it
+    # needed from earlier images.
+    msgs.append(
+        ChatMessage(role="user", content=user_text, images=validated_images)
+    )
 
     is_first_message = len(history) == 0
+    user_message_metadata: dict[str, object] | None = None
+    if validated_images:
+        user_message_metadata = {
+            "images": [
+                {"data": img.data, "mime_type": img.mime_type}
+                for img in validated_images
+            ]
+        }
     session.add(
-        Message(conversation_id=convo.id, role="user", content=user_text)
+        Message(
+            conversation_id=convo.id,
+            role="user",
+            content=user_text,
+            metadata_json=user_message_metadata,
+        )
     )
     if is_first_message:
-        convo.title = _derive_title(user_text)
+        convo.title = _derive_title(user_text) if user_text else "New conversation"
 
     try:
         reply = await _llm_router.complete(msgs)
+    except VisionUnavailableError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(
             status_code=502,

@@ -146,6 +146,18 @@ are his man in the chair.
 """
 
 
+VISION_TOOL_PROMPT = """\
+
+VISION — YOU CAN SEE WHAT HE SHARES
+He may attach one or more images to his message. When he does, you can \
+actually see them — describe what's there, answer questions about it, \
+and reason from what you observe. Don't pretend you can't see; the \
+image is provided to you with the turn. Speak about what's actually \
+visible rather than guessing. If the image is unclear or the question \
+ambiguous, ask him a precise follow-up.
+"""
+
+
 EMAIL_TOOL_PROMPT = """\
 
 EMAIL — YOU CAN SEND ON HIS BEHALF
@@ -240,6 +252,9 @@ def build_persona(
             f"Nightfall Protocol active, {settings.alfred_user_address}. "
             f"At your service, {settings.alfred_user_address_nightfall}."
         )
+
+    if settings.has_cloud:
+        prompt = prompt + VISION_TOOL_PROMPT
 
     if settings.has_gmail:
         prompt = prompt + EMAIL_TOOL_PROMPT.format(
