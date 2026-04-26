@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { PorcupineWorker } from "@picovoice/porcupine-web";
 import type { WebVoiceProcessor } from "@picovoice/web-voice-processor";
 
@@ -201,5 +201,12 @@ export function useWakeWord(opts: UseWakeWordOptions): UseWakeWordReturn {
     setStatus((s) => (s === "paused" ? "listening" : s));
   }, []);
 
-  return { status, error, pause, resume };
+  // Memoize the return so consumers can use it in effect dependency
+  // arrays without re-firing on every render. ``pause`` and ``resume``
+  // are already stable via ``useCallback([])`` so the identity here only
+  // changes when ``status`` or ``error`` actually change.
+  return useMemo(
+    () => ({ status, error, pause, resume }),
+    [status, error, pause, resume],
+  );
 }

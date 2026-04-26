@@ -36,6 +36,7 @@ export function ChatWindow() {
   const [error, setError] = useState<string | null>(null);
   const [voiceOut, setVoiceOut] = useState(false);
   const [handsFree, setHandsFree] = useState(false);
+  const [recording, setRecording] = useState(false);
   const endRef = useRef<HTMLDivElement>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const composerRef = useRef<ComposerHandle>(null);
@@ -79,22 +80,17 @@ export function ChatWindow() {
     }
   }
 
-  // Pause wake-word listening while the user is actually dictating, so
-  // the engine doesn't interpret his own voice as another wake.
-  const handleMicStateChange = useCallback(
-    (recording: boolean) => {
-      if (recording) wake.pause();
-      else wake.resume();
-    },
-    [wake],
-  );
-
-  // Likewise, pause while the assistant is replying out loud — Alfred
-  // saying "sir" shouldn't reflexively trigger him.
+  // Pause wake-word detection while the user is actually dictating
+  // (so we don't pick up his own voice as another wake) AND while the
+  // assistant is composing a reply (so Alfred saying "sir" doesn't
+  // reflexively re-trigger him). Both signals collapse into a single
+  // effect — having two effects independently call pause/resume creates
+  // a child-vs-parent ordering race where one overrides the other.
+  const { pause: wakePause, resume: wakeResume } = wake;
   useEffect(() => {
-    if (busy) wake.pause();
-    else wake.resume();
-  }, [busy, wake]);
+    if (recording || busy) wakePause();
+    else wakeResume();
+  }, [recording, busy, wakePause, wakeResume]);
 
   async function speak(text: string) {
     let url: string | null = null;
@@ -382,7 +378,7 @@ export function ChatWindow() {
           ref={composerRef}
           onSend={handleSend}
           disabled={busy || loadingConvo}
-          onMicStateChange={handleMicStateChange}
+          onMicStateChange={setRecording}
         />
       </div>
     </div>
