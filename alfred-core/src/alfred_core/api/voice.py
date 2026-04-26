@@ -48,13 +48,20 @@ async def speech_to_text(audio: UploadFile = File(...)) -> TranscriptOut:
 
 @router.post(
     "/tts",
-    responses={200: {"content": {"audio/wav": {}}}},
+    responses={
+        200: {
+            "content": {
+                "audio/mpeg": {},
+                "audio/wav": {},
+            }
+        }
+    },
 )
 async def text_to_speech(payload: TtsIn) -> Response:
     try:
-        wav = await tts.synthesize(payload.text)
-    except tts.PiperUnavailableError as exc:
+        audio, media_type = await tts.synthesize(payload.text)
+    except tts.TtsUnavailableError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except RuntimeError as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
-    return Response(content=wav, media_type="audio/wav")
+    return Response(content=audio, media_type=media_type)
