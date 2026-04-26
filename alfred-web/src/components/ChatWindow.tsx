@@ -65,13 +65,17 @@ export function ChatWindow() {
     onWake: () => composerRef.current?.startVoice(),
   });
 
+  // ``stopCurrentAudio`` is also invoked from inside ``speak`` right
+  // before assigning the new audio element, so it must NOT clear the
+  // ``speaking`` flag — at that point the new TTS is already on its
+  // way. Callers that want playback fully halted (toggle voice off,
+  // ChatGPT-style "stop") should call ``setSpeaking(false)`` themselves.
   function stopCurrentAudio() {
     const prev = audioRef.current;
     if (!prev) return;
     prev.pause();
     if (prev.src) URL.revokeObjectURL(prev.src);
     audioRef.current = null;
-    setSpeaking(false);
   }
 
   function setVoiceOutPersisted(enabled: boolean) {
@@ -79,7 +83,10 @@ export function ChatWindow() {
     if (typeof window !== "undefined") {
       localStorage.setItem(VOICE_OUT_KEY, enabled ? "1" : "0");
     }
-    if (!enabled) stopCurrentAudio();
+    if (!enabled) {
+      stopCurrentAudio();
+      setSpeaking(false);
+    }
   }
 
   function setHandsFreePersisted(enabled: boolean) {
@@ -104,6 +111,12 @@ export function ChatWindow() {
   }, [recording, busy, speaking, wakePause, wakeResume]);
 
   async function speak(text: string) {
+    // Set ``speaking`` synchronously, BEFORE the synthesizeSpeech await,
+    // so React batches it with the setBusy(false) that handleSend's
+    // finally block runs in the same microtask. Otherwise the wake-word
+    // pause/resume effect would briefly see all three signals false
+    // during the TTS network round-trip and resume listening.
+    setSpeaking(true);
     let url: string | null = null;
     try {
       const blob = await synthesizeSpeech(text);
@@ -125,7 +138,6 @@ export function ChatWindow() {
       };
       audio.onended = cleanup;
       audio.onerror = cleanup;
-      setSpeaking(true);
       await audio.play();
       url = null; // ownership transferred to the audio element + cleanup callbacks
     } catch {
