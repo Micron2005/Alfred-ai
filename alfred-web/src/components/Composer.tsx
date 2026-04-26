@@ -61,6 +61,14 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   // attachments so we revoke real object URLs on unmount.
   const imagesRef = useRef<AttachedImage[]>([]);
   imagesRef.current = images;
+  // Same pattern for `onSend`: when the wake word fires, recorder.onstop
+  // runs with whatever closure was captured the first time the recording
+  // started — but `handleSend` in the parent closes over `convoId`,
+  // `voiceOut`, etc. which change over the conversation's lifetime. Read
+  // through the ref so wake-word voice messages always land on the
+  // current conversation with the latest voice-out preference.
+  const onSendRef = useRef(onSend);
+  onSendRef.current = onSend;
 
   useEffect(() => {
     return () => {
@@ -256,7 +264,10 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
             setImages([]);
             setImageError(null);
             try {
-              await onSend(cleaned, payload);
+              // Read through onSendRef so wake-word triggered messages
+              // always see the current `convoId` / `voiceOut` from the
+              // parent — not whatever was captured at first render.
+              await onSendRef.current(cleaned, payload);
             } finally {
               for (const url of toRevoke) URL.revokeObjectURL(url);
             }
