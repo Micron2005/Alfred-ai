@@ -12,6 +12,11 @@ import {
   type KeyboardEvent,
 } from "react";
 import { readFileAsChatImage, transcribeAudio, type ChatImage } from "@/lib/api";
+import {
+  startSilenceDetector,
+  type SilenceDetectorHandle,
+  type SilenceReason,
+} from "@/lib/silenceDetector";
 
 interface ComposerProps {
   onSend: (text: string, images: ChatImage[]) => Promise<void> | void;
@@ -62,6 +67,12 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   const [isDragging, setIsDragging] = useState(false);
   const recorderRef = useRef<MediaRecorder | null>(null);
   const chunksRef = useRef<Blob[]>([]);
+  const silenceDetectorRef = useRef<SilenceDetectorHandle | null>(null);
+  // Reason the recorder stopped, captured from the silence detector so
+  // the ``onstop`` handler can tailor the user-facing error (e.g. show
+  // a "didn't hear anything" message on a no-speech timeout, but
+  // proceed to transcription on a normal trailing-silence stop).
+  const stopReasonRef = useRef<SilenceReason | "manual" | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   // Mirror of `images` state for the unmount cleanup. The cleanup runs
   // exactly once with the dependency-array-captured value, which would be
@@ -244,6 +255,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     if (startingRef.current) return;
     startingRef.current = true;
     setMicError(null);
+    stopReasonRef.current = null;
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       const recorder = new MediaRecorder(stream);
@@ -251,12 +263,45 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
       recorder.ondataavailable = (ev) => {
         if (ev.data.size > 0) chunksRef.current.push(ev.data);
       };
+      // Auto-stop on silence: monitor the live RMS of the same stream
+      // we're recording from. The detector only signals once; ``stop``
+      // is also called from the recorder's ``onstop`` handler below as
+      // belt-and-braces in case the manual stop button is clicked.
+      silenceDetectorRef.current = startSilenceDetector({
+        stream,
+        onSilence: (reason) => {
+          // ``stop`` may already have been called from elsewhere (the
+          // manual button, or this very callback running after the
+          // recorder transitioned to inactive). Guard so we don't
+          // double-fire.
+          if (stopReasonRef.current === null) {
+            stopReasonRef.current = reason;
+          }
+          const rec = recorderRef.current;
+          if (rec && rec.state !== "inactive") rec.stop();
+        },
+      });
       recorder.onstop = async () => {
         stream.getTracks().forEach((t) => t.stop());
+        if (silenceDetectorRef.current) {
+          silenceDetectorRef.current.stop();
+          silenceDetectorRef.current = null;
+        }
         const blob = new Blob(chunksRef.current, {
           type: recorder.mimeType || "audio/webm",
         });
         chunksRef.current = [];
+        const stopReason = stopReasonRef.current;
+        stopReasonRef.current = null;
+        if (stopReason === "no_speech") {
+          // Silence detector gave up before hearing any speech. Don't
+          // bother transcribing an empty buffer.
+          setMicError(
+            "I didn't hear anything. Try again, a touch closer to the mic.",
+          );
+          setMic("idle");
+          return;
+        }
         if (blob.size === 0) {
           setMicError(
             "I didn't pick up any audio. Check that your microphone is selected in Windows Sound settings.",
@@ -303,6 +348,13 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
       recorder.start();
       setMic("recording");
     } catch (err) {
+      // If we set up the silence detector before the throw (e.g. an
+      // exception inside ``recorder.start()``), make sure we tear it
+      // down so its AudioContext doesn't leak.
+      if (silenceDetectorRef.current) {
+        silenceDetectorRef.current.stop();
+        silenceDetectorRef.current = null;
+      }
       setMicError(
         err instanceof Error
           ? `Microphone unavailable: ${err.message}`
@@ -316,7 +368,18 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
 
   function stopRecording() {
     const rec = recorderRef.current;
-    if (rec && rec.state !== "inactive") rec.stop();
+    if (!rec || rec.state === "inactive") return;
+    if (stopReasonRef.current === null) {
+      stopReasonRef.current = "manual";
+    }
+    // Tear down the silence detector eagerly so it doesn't fire a
+    // spurious "trailing_silence" between this call and the recorder's
+    // onstop handler running.
+    if (silenceDetectorRef.current) {
+      silenceDetectorRef.current.stop();
+      silenceDetectorRef.current = null;
+    }
+    rec.stop();
   }
 
   function toggleMic() {
