@@ -41,6 +41,7 @@ export function ChatWindow() {
   const [voiceOut, setVoiceOut] = useState(false);
   const [handsFree, setHandsFree] = useState(false);
   const [recording, setRecording] = useState(false);
+  const [speaking, setSpeaking] = useState(false);
   const endRef = useRef<HTMLDivElement>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const composerRef = useRef<ComposerHandle>(null);
@@ -66,6 +67,7 @@ export function ChatWindow() {
     prev.pause();
     if (prev.src) URL.revokeObjectURL(prev.src);
     audioRef.current = null;
+    setSpeaking(false);
   }
 
   function setVoiceOutPersisted(enabled: boolean) {
@@ -84,16 +86,18 @@ export function ChatWindow() {
   }
 
   // Pause wake-word detection while the user is actually dictating
-  // (so we don't pick up his own voice as another wake) AND while the
-  // assistant is composing a reply (so Alfred saying "sir" doesn't
-  // reflexively re-trigger him). Both signals collapse into a single
-  // effect — having two effects independently call pause/resume creates
-  // a child-vs-parent ordering race where one overrides the other.
+  // (so we don't pick up his own voice as another wake), while the
+  // assistant is composing a reply, AND while Alfred's TTS is still
+  // playing through the speakers (so Alfred saying "sir" doesn't
+  // reflexively re-trigger him via the laptop mic). All three signals
+  // collapse into a single effect — having multiple effects
+  // independently call pause/resume creates a child-vs-parent ordering
+  // race where one overrides the other.
   const { pause: wakePause, resume: wakeResume } = wake;
   useEffect(() => {
-    if (recording || busy) wakePause();
+    if (recording || busy || speaking) wakePause();
     else wakeResume();
-  }, [recording, busy, wakePause, wakeResume]);
+  }, [recording, busy, speaking, wakePause, wakeResume]);
 
   async function speak(text: string) {
     let url: string | null = null;
@@ -104,18 +108,27 @@ export function ChatWindow() {
       stopCurrentAudio();
       audioRef.current = audio;
       const objectUrl = url;
+      // ``speaking`` is what gates the wake-word resume; clear it the
+      // moment playback ends or errors so the next idle window resumes.
+      // Guard the setter so a stale ended/error from a previous play
+      // doesn't clobber the flag for a newer one already in flight.
       const cleanup = () => {
         URL.revokeObjectURL(objectUrl);
-        if (audioRef.current === audio) audioRef.current = null;
+        if (audioRef.current === audio) {
+          audioRef.current = null;
+          setSpeaking(false);
+        }
       };
       audio.onended = cleanup;
       audio.onerror = cleanup;
+      setSpeaking(true);
       await audio.play();
       url = null; // ownership transferred to the audio element + cleanup callbacks
     } catch {
       // TTS is best-effort; if anything went wrong (network, autoplay
       // policy, decode error) free the URL we never managed to attach.
       if (url) URL.revokeObjectURL(url);
+      setSpeaking(false);
     }
   }
 
