@@ -76,7 +76,7 @@ def test_persona_injects_time_and_facts() -> None:
         ),
     )
     persona = build_persona(Mode.STANDARD, _settings(), context)
-    assert "CURRENT CONTEXT" in persona.system_prompt
+    assert "CURRENT CONTEXT (refreshed each turn)" in persona.system_prompt
     assert "2026" in persona.system_prompt
     assert "Friday" in persona.system_prompt
     assert "America/New_York" in persona.system_prompt
@@ -87,9 +87,35 @@ def test_persona_injects_time_and_facts() -> None:
 
 def test_persona_without_context_omits_block() -> None:
     persona = build_persona(Mode.STANDARD, _settings(), None)
-    assert "CURRENT CONTEXT" not in persona.system_prompt
+    assert "CURRENT CONTEXT (refreshed each turn)" not in persona.system_prompt
 
 
 def test_persona_with_empty_context_omits_block() -> None:
     persona = build_persona(Mode.STANDARD, _settings(), ContextBundle())
-    assert "CURRENT CONTEXT" not in persona.system_prompt
+    assert "CURRENT CONTEXT (refreshed each turn)" not in persona.system_prompt
+
+
+def test_persona_renders_presence_when_camera_is_on() -> None:
+    persona_alone = build_persona(
+        Mode.STANDARD, _settings(), ContextBundle(faces_visible=1)
+    )
+    assert "you can currently see one person" in persona_alone.system_prompt
+
+    persona_company = build_persona(
+        Mode.STANDARD, _settings(), ContextBundle(faces_visible=3)
+    )
+    assert "you can currently see 3 people" in persona_company.system_prompt
+
+    persona_empty = build_persona(
+        Mode.STANDARD, _settings(), ContextBundle(faces_visible=0)
+    )
+    assert "no one" in persona_empty.system_prompt
+
+
+def test_persona_omits_presence_when_camera_is_off() -> None:
+    """When ``faces_visible`` is None, the dynamic presence line must NOT appear."""
+    persona = build_persona(Mode.STANDARD, _settings(), ContextBundle())
+    # These phrases only appear in the dynamic CURRENT CONTEXT block,
+    # not in the static persona body.
+    assert "Through the laptop camera you can currently see" not in persona.system_prompt
+    assert "presumably him" not in persona.system_prompt

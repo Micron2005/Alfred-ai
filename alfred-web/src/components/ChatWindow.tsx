@@ -17,10 +17,12 @@ import {
   synthesizeSpeech,
 } from "@/lib/api";
 import { useWakeWord } from "@/lib/useWakeWord";
+import { useCamera } from "@/lib/useCamera";
 
 const ACTIVE_CONVO_KEY = "alfred.activeConversationId";
 const VOICE_OUT_KEY = "alfred.voiceOutEnabled";
 const HANDS_FREE_KEY = "alfred.handsFreeEnabled";
+const CAMERA_KEY = "alfred.cameraEnabled";
 
 // Use ``||`` (not ``??``) so an empty-string value from Docker Compose
 // — which is what `${NEXT_PUBLIC_WAKE_KEYWORD}` expands to when the
@@ -44,19 +46,21 @@ export function ChatWindow() {
   const [error, setError] = useState<string | null>(null);
   const [voiceOut, setVoiceOut] = useState(false);
   const [handsFree, setHandsFree] = useState(false);
+  const [cameraOn, setCameraOn] = useState(false);
   const [recording, setRecording] = useState(false);
   const [speaking, setSpeaking] = useState(false);
   const endRef = useRef<HTMLDivElement>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const composerRef = useRef<ComposerHandle>(null);
 
-  // Restore the user's voice-out + hands-free preferences. Both default to
-  // off so a fresh install doesn't surprise the user with audio or a mic
-  // permission prompt.
+  // Restore the user's voice-out + hands-free + camera preferences. All
+  // default to off so a fresh install doesn't surprise the user with
+  // audio or a permission prompt.
   useEffect(() => {
     if (typeof window === "undefined") return;
     setVoiceOut(localStorage.getItem(VOICE_OUT_KEY) === "1");
     setHandsFree(localStorage.getItem(HANDS_FREE_KEY) === "1");
+    setCameraOn(localStorage.getItem(CAMERA_KEY) === "1");
   }, []);
 
   const wake = useWakeWord({
@@ -64,6 +68,8 @@ export function ChatWindow() {
     keyword: WAKE_KEYWORD,
     onWake: () => composerRef.current?.startVoice(),
   });
+
+  const camera = useCamera({ enabled: cameraOn });
 
   // ``stopCurrentAudio`` is also invoked from inside ``speak`` right
   // before assigning the new audio element, so it must NOT clear the
@@ -93,6 +99,35 @@ export function ChatWindow() {
     setHandsFree(enabled);
     if (typeof window !== "undefined") {
       localStorage.setItem(HANDS_FREE_KEY, enabled ? "1" : "0");
+    }
+  }
+
+  function setCameraPersisted(enabled: boolean) {
+    setCameraOn(enabled);
+    if (typeof window !== "undefined") {
+      localStorage.setItem(CAMERA_KEY, enabled ? "1" : "0");
+    }
+  }
+
+  // Capture the current frame and slot it into the composer's pending
+  // attachments so the user can ask a question about it.
+  async function handleLook() {
+    setError(null);
+    try {
+      const frame = await camera.captureFrame();
+      if (!frame) {
+        setError(
+          "Couldn't capture a frame — give the camera a moment to warm up and try again.",
+        );
+        return;
+      }
+      composerRef.current?.attachImage({
+        data: frame.data,
+        mime_type: frame.mimeType,
+        label: "Webcam snapshot",
+      });
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Couldn't capture a frame.");
     }
   }
 
@@ -220,8 +255,15 @@ export function ChatWindow() {
     };
     setMessages((prev) => [...prev, userMsg]);
     setBusy(true);
+    // Snapshot presence at send time. Only forward when the camera is
+    // actually ready — "starting" / "error" states would mislead Alfred
+    // into thinking he saw zero people when he saw nothing at all.
+    const presence =
+      cameraOn && camera.status === "ready"
+        ? { faces_visible: camera.faceCount }
+        : null;
     try {
-      const reply = await sendMessage(text, convoId, images);
+      const reply = await sendMessage(text, convoId, images, presence);
       setConvoId(reply.conversation_id);
       localStorage.setItem(ACTIVE_CONVO_KEY, reply.conversation_id);
       setMode(reply.mode);
@@ -348,6 +390,60 @@ export function ChatWindow() {
             >
               {voiceOut ? "🔊 Voice on" : "🔇 Voice off"}
             </button>
+            <button
+              type="button"
+              onClick={() => setCameraPersisted(!cameraOn)}
+              aria-pressed={cameraOn}
+              title={
+                cameraOn
+                  ? `Camera is on — Alfred can see ${
+                      camera.faceCount === 1
+                        ? "1 face"
+                        : `${camera.faceCount} faces`
+                    }`
+                  : "Turn on the camera so Alfred can see who's in the room"
+              }
+              style={{
+                padding: "6px 10px",
+                borderRadius: 6,
+                border: "1px solid var(--border)",
+                background: cameraOn ? "var(--accent)" : "transparent",
+                color: cameraOn ? "#fff" : "var(--muted)",
+                cursor: "pointer",
+                fontSize: 13,
+              }}
+            >
+              {cameraOn
+                ? camera.status === "ready"
+                  ? `📷 Camera on — ${camera.faceCount} ${
+                      camera.faceCount === 1 ? "face" : "faces"
+                    }`
+                  : camera.status === "starting"
+                    ? "📷 Starting…"
+                    : camera.status === "error"
+                      ? "📷 Camera error"
+                      : "📷 Camera on"
+                : "📷 Camera off"}
+            </button>
+            {cameraOn && camera.status === "ready" ? (
+              <button
+                type="button"
+                onClick={() => void handleLook()}
+                disabled={busy}
+                title="Capture the current frame and attach it to your next message so Alfred can see what you're looking at."
+                style={{
+                  padding: "6px 10px",
+                  borderRadius: 6,
+                  border: "1px solid var(--border)",
+                  background: "transparent",
+                  color: "var(--muted)",
+                  cursor: busy ? "not-allowed" : "pointer",
+                  fontSize: 13,
+                }}
+              >
+                👁 Look
+              </button>
+            ) : null}
             <ModeIndicator mode={mode} />
           </div>
         </header>
@@ -406,11 +502,46 @@ export function ChatWindow() {
           </p>
         ) : null}
 
+        {cameraOn && camera.error ? (
+          <p
+            style={{
+              color: "#b33",
+              fontSize: 12,
+              background: "rgba(179, 51, 51, 0.08)",
+              padding: 8,
+              borderRadius: 6,
+              margin: "0 0 8px 0",
+            }}
+          >
+            {camera.error}
+          </p>
+        ) : null}
+
         <Composer
           ref={composerRef}
           onSend={handleSend}
           disabled={busy || loadingConvo}
           onMicStateChange={setRecording}
+        />
+
+        {/*
+          Hidden <video> for the camera feed. We don't render the live
+          preview to the user — the chat header's face count is enough
+          ambient feedback. Keep ``playsInline`` + ``muted`` so iOS
+          Safari and Chrome let it autoplay without user gesture once the
+          stream is attached. ``aria-hidden`` so screen readers ignore it.
+        */}
+        <video
+          // useRef<T>(null) yields RefObject<T | null>, which the
+          // installed @types/react (v18 against a v19-rc react) refuses
+          // to accept as a video element ref. The runtime contract is
+          // identical — a current that may be null until mount — so
+          // cast it through the type the JSX prop expects.
+          ref={camera.videoRef as React.RefObject<HTMLVideoElement>}
+          playsInline
+          muted
+          aria-hidden
+          style={{ display: "none" }}
         />
       </div>
     </div>
