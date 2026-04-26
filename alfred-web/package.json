@@ -11,6 +11,8 @@
   },
   "dependencies": {
     "next": "15.0.3",
+    "onnxruntime-web": "^1.24.3",
+    "openwakeword-wasm-browser": "^0.1.1",
     "react": "19.0.0-rc-66855b96-20241106",
     "react-dom": "19.0.0-rc-66855b96-20241106"
   },

@@ -1,7 +1,9 @@
 "use client";
 
 import {
+  forwardRef,
   useEffect,
+  useImperativeHandle,
   useRef,
   useState,
   type ClipboardEvent,
@@ -14,6 +16,15 @@ import { readFileAsChatImage, transcribeAudio, type ChatImage } from "@/lib/api"
 interface ComposerProps {
   onSend: (text: string, images: ChatImage[]) => Promise<void> | void;
   disabled?: boolean;
+  /** Notified whenever mic recording starts/stops. Used by ChatWindow to
+   *  pause the wake-word engine while the user is dictating. */
+  onMicStateChange?: (recording: boolean) => void;
+}
+
+export interface ComposerHandle {
+  /** Programmatically start the voice-recording flow (e.g. from a wake
+   *  word). No-op if already recording, transcribing, or disabled. */
+  startVoice: () => void;
 }
 
 type MicState = "idle" | "recording" | "transcribing";
@@ -31,7 +42,10 @@ const ALLOWED_MIME = /^image\/(png|jpe?g|gif|webp)$/;
 const MAX_BYTES = 5 * 1024 * 1024;
 const MAX_IMAGES = 6;
 
-export function Composer({ onSend, disabled }: ComposerProps) {
+export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Composer(
+  { onSend, disabled, onMicStateChange },
+  ref,
+) {
   const [text, setText] = useState("");
   const [mic, setMic] = useState<MicState>("idle");
   const [micError, setMicError] = useState<string | null>(null);
@@ -47,6 +61,14 @@ export function Composer({ onSend, disabled }: ComposerProps) {
   // attachments so we revoke real object URLs on unmount.
   const imagesRef = useRef<AttachedImage[]>([]);
   imagesRef.current = images;
+  // Same pattern for `onSend`: when the wake word fires, recorder.onstop
+  // runs with whatever closure was captured the first time the recording
+  // started — but `handleSend` in the parent closes over `convoId`,
+  // `voiceOut`, etc. which change over the conversation's lifetime. Read
+  // through the ref so wake-word voice messages always land on the
+  // current conversation with the latest voice-out preference.
+  const onSendRef = useRef(onSend);
+  onSendRef.current = onSend;
 
   useEffect(() => {
     return () => {
@@ -189,7 +211,30 @@ export function Composer({ onSend, disabled }: ComposerProps) {
     if (files && files.length > 0) void ingestFiles(files, "drop");
   }
 
+  // Mirror the latest mic state for the imperative startVoice handler.
+  // Without this, the closure baked into useImperativeHandle would always
+  // see "idle" even after the user starts a recording from the wake word.
+  const micRef = useRef<MicState>(mic);
+  micRef.current = mic;
+  const disabledRef = useRef<boolean>(Boolean(disabled));
+  disabledRef.current = Boolean(disabled);
+  // Synchronous lock for the async window inside startRecording: between
+  // the call to startRecording() and `await getUserMedia()` resolving,
+  // micRef is still "idle". Without this, two wake-word firings in quick
+  // succession (e.g. while the mic-permission prompt is open) would each
+  // pass the micRef guard, spawning two MediaRecorder instances and
+  // orphaning the first one's stream.
+  const startingRef = useRef<boolean>(false);
+
+  // Notify the parent whenever recording starts or stops so it can pause
+  // wake-word listening (otherwise we'd race the user's own voice).
+  useEffect(() => {
+    onMicStateChange?.(mic === "recording");
+  }, [mic, onMicStateChange]);
+
   async function startRecording() {
+    if (startingRef.current) return;
+    startingRef.current = true;
     setMicError(null);
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
@@ -228,7 +273,10 @@ export function Composer({ onSend, disabled }: ComposerProps) {
             setImages([]);
             setImageError(null);
             try {
-              await onSend(cleaned, payload);
+              // Read through onSendRef so wake-word triggered messages
+              // always see the current `convoId` / `voiceOut` from the
+              // parent — not whatever was captured at first render.
+              await onSendRef.current(cleaned, payload);
             } finally {
               for (const url of toRevoke) URL.revokeObjectURL(url);
             }
@@ -253,6 +301,8 @@ export function Composer({ onSend, disabled }: ComposerProps) {
           : "Microphone unavailable",
       );
       setMic("idle");
+    } finally {
+      startingRef.current = false;
     }
   }
 
@@ -265,6 +315,25 @@ export function Composer({ onSend, disabled }: ComposerProps) {
     if (mic === "recording") stopRecording();
     else if (mic === "idle") void startRecording();
   }
+
+  // We deliberately don't list `startRecording` in the dependency array.
+  // It's a stable closure within this component and the imperative handle
+  // gates on `disabledRef` and `micRef`, both of which read live values.
+  // Recreating the handle on every render would needlessly rebuild it for
+  // every parent state change.
+  useImperativeHandle(
+    ref,
+    () => ({
+      startVoice: () => {
+        if (disabledRef.current) return;
+        if (micRef.current !== "idle") return;
+        if (startingRef.current) return;
+        void startRecording();
+      },
+    }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [],
+  );
 
   const micBusy = mic !== "idle";
   const micLabel =
@@ -455,4 +524,4 @@ export function Composer({ onSend, disabled }: ComposerProps) {
       )}
     </form>
   );
-}
+});

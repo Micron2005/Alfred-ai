@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ModeIndicator } from "@/components/ModeIndicator";
 import { Message } from "@/components/Message";
-import { Composer } from "@/components/Composer";
+import { Composer, type ComposerHandle } from "@/components/Composer";
 import { ConversationSidebar } from "@/components/ConversationSidebar";
 import {
   type ChatImage,
@@ -16,9 +16,23 @@ import {
   sendMessage,
   synthesizeSpeech,
 } from "@/lib/api";
+import { useWakeWord } from "@/lib/useWakeWord";
 
 const ACTIVE_CONVO_KEY = "alfred.activeConversationId";
 const VOICE_OUT_KEY = "alfred.voiceOutEnabled";
+const HANDS_FREE_KEY = "alfred.handsFreeEnabled";
+
+// Use ``||`` (not ``??``) so an empty-string value from Docker Compose
+// — which is what `${NEXT_PUBLIC_WAKE_KEYWORD}` expands to when the
+// user upgrades from a pre-PR `.env` that lacks the var — falls back to
+// the default instead of being inlined as `""` into the bundle.
+const WAKE_KEYWORD = process.env.NEXT_PUBLIC_WAKE_KEYWORD || "hey_alfred";
+
+// Pretty label for status text — "hey_jarvis" → "Hey Jarvis".
+const WAKE_LABEL = WAKE_KEYWORD.replace(/_/g, " ").replace(
+  /\b\w/g,
+  (c) => c.toUpperCase(),
+);
 
 export function ChatWindow() {
   const [messages, setMessages] = useState<ChatMessageOut[]>([]);
@@ -29,16 +43,33 @@ export function ChatWindow() {
   const [loadingConvo, setLoadingConvo] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [voiceOut, setVoiceOut] = useState(false);
+  const [handsFree, setHandsFree] = useState(false);
+  const [recording, setRecording] = useState(false);
+  const [speaking, setSpeaking] = useState(false);
   const endRef = useRef<HTMLDivElement>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  const composerRef = useRef<ComposerHandle>(null);
 
-  // Restore the user's voice-out preference. Defaults to off so a fresh
-  // install doesn't surprise the user with audio.
+  // Restore the user's voice-out + hands-free preferences. Both default to
+  // off so a fresh install doesn't surprise the user with audio or a mic
+  // permission prompt.
   useEffect(() => {
     if (typeof window === "undefined") return;
     setVoiceOut(localStorage.getItem(VOICE_OUT_KEY) === "1");
+    setHandsFree(localStorage.getItem(HANDS_FREE_KEY) === "1");
   }, []);
 
+  const wake = useWakeWord({
+    enabled: handsFree,
+    keyword: WAKE_KEYWORD,
+    onWake: () => composerRef.current?.startVoice(),
+  });
+
+  // ``stopCurrentAudio`` is also invoked from inside ``speak`` right
+  // before assigning the new audio element, so it must NOT clear the
+  // ``speaking`` flag — at that point the new TTS is already on its
+  // way. Callers that want playback fully halted (toggle voice off,
+  // ChatGPT-style "stop") should call ``setSpeaking(false)`` themselves.
   function stopCurrentAudio() {
     const prev = audioRef.current;
     if (!prev) return;
@@ -52,10 +83,40 @@ export function ChatWindow() {
     if (typeof window !== "undefined") {
       localStorage.setItem(VOICE_OUT_KEY, enabled ? "1" : "0");
     }
-    if (!enabled) stopCurrentAudio();
+    if (!enabled) {
+      stopCurrentAudio();
+      setSpeaking(false);
+    }
   }
 
+  function setHandsFreePersisted(enabled: boolean) {
+    setHandsFree(enabled);
+    if (typeof window !== "undefined") {
+      localStorage.setItem(HANDS_FREE_KEY, enabled ? "1" : "0");
+    }
+  }
+
+  // Pause wake-word detection while the user is actually dictating
+  // (so we don't pick up his own voice as another wake), while the
+  // assistant is composing a reply, AND while Alfred's TTS is still
+  // playing through the speakers (so Alfred saying "sir" doesn't
+  // reflexively re-trigger him via the laptop mic). All three signals
+  // collapse into a single effect — having multiple effects
+  // independently call pause/resume creates a child-vs-parent ordering
+  // race where one overrides the other.
+  const { pause: wakePause, resume: wakeResume } = wake;
+  useEffect(() => {
+    if (recording || busy || speaking) wakePause();
+    else wakeResume();
+  }, [recording, busy, speaking, wakePause, wakeResume]);
+
   async function speak(text: string) {
+    // Set ``speaking`` synchronously, BEFORE the synthesizeSpeech await,
+    // so React batches it with the setBusy(false) that handleSend's
+    // finally block runs in the same microtask. Otherwise the wake-word
+    // pause/resume effect would briefly see all three signals false
+    // during the TTS network round-trip and resume listening.
+    setSpeaking(true);
     let url: string | null = null;
     try {
       const blob = await synthesizeSpeech(text);
@@ -64,9 +125,16 @@ export function ChatWindow() {
       stopCurrentAudio();
       audioRef.current = audio;
       const objectUrl = url;
+      // ``speaking`` is what gates the wake-word resume; clear it the
+      // moment playback ends or errors so the next idle window resumes.
+      // Guard the setter so a stale ended/error from a previous play
+      // doesn't clobber the flag for a newer one already in flight.
       const cleanup = () => {
         URL.revokeObjectURL(objectUrl);
-        if (audioRef.current === audio) audioRef.current = null;
+        if (audioRef.current === audio) {
+          audioRef.current = null;
+          setSpeaking(false);
+        }
       };
       audio.onended = cleanup;
       audio.onerror = cleanup;
@@ -76,6 +144,7 @@ export function ChatWindow() {
       // TTS is best-effort; if anything went wrong (network, autoplay
       // policy, decode error) free the URL we never managed to attach.
       if (url) URL.revokeObjectURL(url);
+      setSpeaking(false);
     }
   }
 
@@ -233,6 +302,37 @@ export function ChatWindow() {
           <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
             <button
               type="button"
+              onClick={() => setHandsFreePersisted(!handsFree)}
+              aria-pressed={handsFree}
+              title={
+                handsFree
+                  ? `Hands-free is on — say "${WAKE_LABEL}" to start a message`
+                  : `Turn on hands-free (wake word: "${WAKE_LABEL}")`
+              }
+              style={{
+                padding: "6px 10px",
+                borderRadius: 6,
+                border: "1px solid var(--border)",
+                background: handsFree ? "var(--accent)" : "transparent",
+                color: handsFree ? "#fff" : "var(--muted)",
+                cursor: "pointer",
+                fontSize: 13,
+              }}
+            >
+              {handsFree
+                ? wake.status === "listening"
+                  ? `🎙️ "${WAKE_LABEL}" — listening`
+                  : wake.status === "paused"
+                    ? `🎙️ "${WAKE_LABEL}" — paused`
+                    : wake.status === "starting"
+                      ? "🎙️ Starting…"
+                      : wake.status === "error"
+                        ? "🎙️ Wake-word error"
+                        : `🎙️ Hands-free on`
+                : "🎙️ Hands-free off"}
+            </button>
+            <button
+              type="button"
               onClick={() => setVoiceOutPersisted(!voiceOut)}
               aria-pressed={voiceOut}
               title={voiceOut ? "Mute Alfred's voice" : "Unmute Alfred's voice"}
@@ -291,7 +391,27 @@ export function ChatWindow() {
           <div ref={endRef} />
         </main>
 
-        <Composer onSend={handleSend} disabled={busy || loadingConvo} />
+        {handsFree && wake.error ? (
+          <p
+            style={{
+              color: "#b33",
+              fontSize: 12,
+              background: "rgba(179, 51, 51, 0.08)",
+              padding: 8,
+              borderRadius: 6,
+              margin: "0 0 8px 0",
+            }}
+          >
+            {wake.error}
+          </p>
+        ) : null}
+
+        <Composer
+          ref={composerRef}
+          onSend={handleSend}
+          disabled={busy || loadingConvo}
+          onMicStateChange={setRecording}
+        />
       </div>
     </div>
   );
