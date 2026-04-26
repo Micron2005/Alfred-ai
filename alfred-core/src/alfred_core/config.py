@@ -54,6 +54,13 @@ class Settings(BaseSettings):
     alfred_gmail_app_password: str = Field(default="")
     alfred_gmail_display_name: str = Field(default="Alfred (for Mukarram)")
 
+    # ─── Web search (Tavily) ────────────────────────────────────────────
+    # Free tier at https://tavily.com gives 1,000 searches per month —
+    # plenty for a single-user assistant. If unset, web search is
+    # silently disabled and Alfred will tell the user it isn't wired up
+    # rather than crashing.
+    alfred_tavily_api_key: str = Field(default="")
+
     # ─── Voice (TTS) ────────────────────────────────────────────────────
     # `edge` uses Microsoft's Edge Read-Aloud neural voices (free, online,
     # noticeably more natural). `piper` uses the offline Piper binary baked
@@ -75,6 +82,11 @@ class Settings(BaseSettings):
         return bool(
             self.alfred_gmail_address.strip() and self.alfred_gmail_app_password.strip()
         )
+
+    @property
+    def has_tavily(self) -> bool:
+        """Whether a Tavily API key is configured for web search."""
+        return bool(self.alfred_tavily_api_key and self.alfred_tavily_api_key.strip())
 
 
 @lru_cache(maxsize=1)

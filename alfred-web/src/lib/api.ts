@@ -10,6 +10,16 @@ export interface ChatImage {
   mime_type: string;
 }
 
+export interface ChatSource {
+  /** Human-readable title of the page (or "Search summary" for Tavily's
+   * synthetic top entry). */
+  title: string;
+  /** Empty string for synthetic entries; otherwise a real http(s) URL. */
+  url: string;
+  /** Short snippet rendered beneath the title in the UI. */
+  snippet: string;
+}
+
 export interface ChatMessageOut {
   id: string;
   role: "user" | "assistant";
@@ -17,6 +27,8 @@ export interface ChatMessageOut {
   backend?: string | null;
   model?: string | null;
   images?: ChatImage[];
+  /** Web pages Alfred consulted while answering this turn, if any. */
+  sources?: ChatSource[];
   created_at?: string;
 }
 

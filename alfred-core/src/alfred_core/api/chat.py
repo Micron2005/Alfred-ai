@@ -15,6 +15,7 @@ Flow for each user message:
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass
 from datetime import datetime
 from uuid import UUID
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -37,6 +38,18 @@ from alfred_core.tools.images import (
     ImagePayload,
     ImageValidationError,
     validate_images,
+)
+from alfred_core.tools.search_marker import (
+    SearchInvocation,
+    extract_invocations,
+    strip_markers,
+)
+from alfred_core.tools.web_search import (
+    SearchResult,
+    WebSearchError,
+    WebSearchUnconfiguredError,
+    format_for_prompt,
+    web_search,
 )
 from alfred_core.wake import analyze
 from alfred_core.weather import WeatherService
@@ -82,6 +95,20 @@ class ImageOut(BaseModel):
     mime_type: str
 
 
+class SourceOut(BaseModel):
+    """A single web result Alfred consulted while answering this turn.
+
+    Surfaced in the UI as a small "sources" footer beneath the
+    message so the user can verify what Alfred actually read.
+    """
+
+    title: str
+    url: str
+    # Snippet is intentionally short — the UI shows a compact line, not
+    # the full body of each page.
+    snippet: str
+
+
 class ChatMessageOut(BaseModel):
     id: UUID
     role: str
@@ -89,6 +116,7 @@ class ChatMessageOut(BaseModel):
     backend: str | None = None
     model: str | None = None
     images: list[ImageOut] = []
+    sources: list[SourceOut] = []
 
 
 class ChatReply(BaseModel):
@@ -171,6 +199,132 @@ def _send_one(draft: EmailDraft, settings: Settings) -> str:
     except EmailError as exc:
         return f"_(I couldn't send that email — {exc})_"
     return f"_(Email sent to {result.to} — subject: \"{result.subject}\")_"
+
+
+# Hard cap on tool-use iterations per turn. Two is generous: one
+# initial reply with a [SEARCH:] marker, one re-prompt with results
+# yielding the final answer. We stop after that even if the model
+# keeps emitting markers — running away from a search loop is far
+# worse than telling the user we couldn't find something.
+_MAX_SEARCH_ITERATIONS = 2
+
+
+@dataclass
+class _SearchLoopOutcome:
+    """Result of the LLM ↔ search loop for a single chat turn."""
+
+    visible_reply: str
+    backend: str | None
+    model: str | None
+    sources: list[SearchResult]
+
+
+async def _run_search_loop(
+    msgs: list[ChatMessage],
+    settings: Settings,
+) -> _SearchLoopOutcome:
+    """Drive the LLM ↔ search-tool loop until we have a final reply.
+
+    Returns the final visible reply (with ``[SEARCH:]`` markers
+    stripped), the backend/model that produced it, and the
+    deduplicated list of results we consulted along the way (for the
+    UI's "sources" footer).
+    """
+    collected_sources: list[SearchResult] = []
+    seen_urls: set[str] = set()
+    iteration = 0
+    final_text = ""
+    final_backend: str | None = None
+    final_model: str | None = None
+
+    while True:
+        reply = await _llm_router.complete(msgs)
+        final_text = reply.content
+        final_backend = reply.backend
+        final_model = reply.model
+
+        invocations = extract_invocations(reply.content)
+        if not invocations or iteration >= _MAX_SEARCH_ITERATIONS:
+            break
+
+        # Cap to one search per iteration even if the model emitted
+        # several markers in the same turn — otherwise a model that
+        # fires off five queries in one shot can chew through the
+        # monthly Tavily quota in a single message.
+        invocation = invocations[0]
+        try:
+            results = await web_search(invocation.query, settings)
+        except WebSearchUnconfiguredError as exc:
+            results = _synthetic_unconfigured_results(invocation, exc)
+        except WebSearchError as exc:
+            results = _synthetic_error_results(invocation, exc)
+
+        for r in results:
+            # Deduplicate by URL across multiple searches in the same
+            # turn so the UI doesn't show the same page twice.
+            key = r.url or f"{r.title}:{r.snippet[:40]}"
+            if key in seen_urls:
+                continue
+            seen_urls.add(key)
+            collected_sources.append(r)
+
+        # Append the model's tool-call turn (verbatim, marker and all)
+        # so its own conversation history makes sense to it on the
+        # follow-up. Then append the synthetic results as a user-role
+        # turn so the model sees them as new input rather than its
+        # own thinking.
+        msgs.append(ChatMessage(role="assistant", content=reply.content))
+        msgs.append(
+            ChatMessage(
+                role="user",
+                content=format_for_prompt(invocation.query, results),
+            )
+        )
+        iteration += 1
+
+    return _SearchLoopOutcome(
+        visible_reply=strip_markers(final_text),
+        backend=final_backend,
+        model=final_model,
+        sources=collected_sources,
+    )
+
+
+def _synthetic_unconfigured_results(
+    invocation: SearchInvocation,
+    exc: WebSearchUnconfiguredError,
+) -> list[SearchResult]:
+    """Build a single 'tool unavailable' result the model can read.
+
+    We turn the misconfiguration into a tool result rather than
+    throwing, so Alfred can compose a graceful 'I'd love to look that
+    up but search isn't wired up yet' reply instead of the chat 503ing.
+    """
+    return [
+        SearchResult(
+            title="Search unavailable",
+            url="",
+            snippet=str(exc),
+        )
+    ]
+
+
+def _synthetic_error_results(
+    invocation: SearchInvocation,
+    exc: WebSearchError,
+) -> list[SearchResult]:
+    """Same idea for transient errors (network, 5xx, etc.)."""
+    return [
+        SearchResult(
+            title="Search failed",
+            url="",
+            snippet=(
+                f"The search service couldn't be reached for "
+                f"{invocation.query!r}: {exc}. Tell him plainly that "
+                f"you tried but couldn't reach the web; offer to retry."
+            ),
+        )
+    ]
 
 
 async def _build_context(
@@ -269,7 +423,7 @@ async def chat(req: ChatRequest, session: AsyncSession = Depends(get_session)) -
         convo.title = _derive_title(user_text) if user_text else "New conversation"
 
     try:
-        reply = await _llm_router.complete(msgs)
+        outcome = await _run_search_loop(msgs, settings)
     except VisionUnavailableError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except Exception as exc:
@@ -282,18 +436,31 @@ async def chat(req: ChatRequest, session: AsyncSession = Depends(get_session)) -
             ),
         ) from exc
 
-    visible_reply, new_facts = extract_and_strip(reply.content)
+    visible_reply, new_facts = extract_and_strip(outcome.visible_reply)
     if new_facts:
         await save_facts(session, new_facts)
 
     visible_reply = await _process_email_drafts(visible_reply, settings)
 
+    # Persist any sources Alfred consulted in the message metadata so
+    # they survive a page reload — the chat history endpoint lifts
+    # them back out into the same `sources` field on each turn.
+    assistant_metadata: dict[str, object] | None = None
+    if outcome.sources:
+        assistant_metadata = {
+            "sources": [
+                {"title": r.title, "url": r.url, "snippet": r.snippet}
+                for r in outcome.sources
+            ]
+        }
+
     assistant_msg = Message(
         conversation_id=convo.id,
         role="assistant",
         content=visible_reply,
-        backend=reply.backend,
-        model=reply.model,
+        backend=outcome.backend,
+        model=outcome.model,
+        metadata_json=assistant_metadata,
     )
     session.add(assistant_msg)
 
@@ -311,5 +478,9 @@ async def chat(req: ChatRequest, session: AsyncSession = Depends(get_session)) -
             content=assistant_msg.content,
             backend=assistant_msg.backend,
             model=assistant_msg.model,
+            sources=[
+                SourceOut(title=r.title, url=r.url, snippet=r.snippet)
+                for r in outcome.sources
+            ],
         ),
     )
