@@ -216,11 +216,14 @@ export function Composer({ onSend, disabled }: ComposerProps) {
           const transcript = await transcribeAudio(blob);
           const cleaned = transcript.trim();
           if (cleaned) {
-            const payload: ChatImage[] = images.map(({ data, mime_type }) => ({
+            // Read from the ref, not the captured `images` state — the
+            // user may have added or removed attachments while recording.
+            const live = imagesRef.current;
+            const payload: ChatImage[] = live.map(({ data, mime_type }) => ({
               data,
               mime_type,
             }));
-            const toRevoke = images.map((img) => img.previewUrl);
+            const toRevoke = live.map((img) => img.previewUrl);
             setText("");
             setImages([]);
             setImageError(null);
