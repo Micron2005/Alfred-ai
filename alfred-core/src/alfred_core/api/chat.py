@@ -217,6 +217,14 @@ class _SearchLoopOutcome:
     backend: str | None
     model: str | None
     sources: list[SearchResult]
+    # Facts harvested from ``[REMEMBER: ...]`` markers across **every**
+    # turn the model produced this round, not just the last one. If
+    # an intermediate tool-call reply contained a fact (e.g. the user
+    # said "I'm switching to Swift, what's the latest version?" and
+    # the model emitted both [REMEMBER: ...] and [SEARCH: ...]), it
+    # would otherwise be silently dropped because the chat handler
+    # only strips the final reply.
+    collected_facts: list[str]
 
 
 async def _run_search_loop(
@@ -226,11 +234,13 @@ async def _run_search_loop(
     """Drive the LLM ↔ search-tool loop until we have a final reply.
 
     Returns the final visible reply (with ``[SEARCH:]`` markers
-    stripped), the backend/model that produced it, and the
-    deduplicated list of results we consulted along the way (for the
-    UI's "sources" footer).
+    stripped), the backend/model that produced it, the deduplicated
+    list of results we consulted along the way (for the UI's
+    "sources" footer), and any ``[REMEMBER:]`` facts harvested from
+    intermediate replies.
     """
     collected_sources: list[SearchResult] = []
+    collected_facts: list[str] = []
     seen_urls: set[str] = set()
     iteration = 0
     final_text = ""
@@ -268,12 +278,22 @@ async def _run_search_loop(
             seen_urls.add(key)
             collected_sources.append(r)
 
-        # Append the model's tool-call turn (verbatim, marker and all)
-        # so its own conversation history makes sense to it on the
-        # follow-up. Then append the synthetic results as a user-role
-        # turn so the model sees them as new input rather than its
-        # own thinking.
-        msgs.append(ChatMessage(role="assistant", content=reply.content))
+        # Strip both [REMEMBER:] and [SEARCH:] markers before feeding
+        # the intermediate reply back into the conversation. The
+        # remember-extraction protects facts that would otherwise be
+        # lost (the chat handler only strips the *final* reply); the
+        # search-marker strip keeps the model from re-running the
+        # same query when it sees its own past output.
+        intermediate_clean, intermediate_facts = extract_and_strip(reply.content)
+        collected_facts.extend(intermediate_facts)
+        intermediate_clean = strip_markers(intermediate_clean)
+
+        # Append the model's (cleaned) tool-call turn so its own
+        # conversation history makes sense to it on the follow-up,
+        # then append the synthetic results as a user-role turn so
+        # the model sees them as new input rather than its own
+        # thinking.
+        msgs.append(ChatMessage(role="assistant", content=intermediate_clean))
         msgs.append(
             ChatMessage(
                 role="user",
@@ -287,6 +307,7 @@ async def _run_search_loop(
         backend=final_backend,
         model=final_model,
         sources=collected_sources,
+        collected_facts=collected_facts,
     )
 
 
@@ -436,7 +457,12 @@ async def chat(req: ChatRequest, session: AsyncSession = Depends(get_session)) -
             ),
         ) from exc
 
-    visible_reply, new_facts = extract_and_strip(outcome.visible_reply)
+    visible_reply, final_facts = extract_and_strip(outcome.visible_reply)
+    # Merge facts from intermediate search-loop turns (collected during
+    # the loop) with facts from the final reply. Without this, any
+    # [REMEMBER: ...] the model emitted alongside a [SEARCH: ...] in
+    # the same turn would be silently dropped.
+    new_facts = outcome.collected_facts + final_facts
     if new_facts:
         await save_facts(session, new_facts)
 
