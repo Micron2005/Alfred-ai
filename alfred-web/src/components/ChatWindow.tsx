@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ModeIndicator } from "@/components/ModeIndicator";
 import { Message } from "@/components/Message";
-import { Composer } from "@/components/Composer";
+import { Composer, type ComposerHandle } from "@/components/Composer";
 import { ConversationSidebar } from "@/components/ConversationSidebar";
 import {
   type ChatImage,
@@ -16,9 +16,15 @@ import {
   sendMessage,
   synthesizeSpeech,
 } from "@/lib/api";
+import { useWakeWord } from "@/lib/useWakeWord";
 
 const ACTIVE_CONVO_KEY = "alfred.activeConversationId";
 const VOICE_OUT_KEY = "alfred.voiceOutEnabled";
+const HANDS_FREE_KEY = "alfred.handsFreeEnabled";
+
+const PICOVOICE_ACCESS_KEY =
+  process.env.NEXT_PUBLIC_PICOVOICE_ACCESS_KEY ?? "";
+const WAKE_KEYWORD = process.env.NEXT_PUBLIC_WAKE_KEYWORD ?? "Jarvis";
 
 export function ChatWindow() {
   const [messages, setMessages] = useState<ChatMessageOut[]>([]);
@@ -29,15 +35,26 @@ export function ChatWindow() {
   const [loadingConvo, setLoadingConvo] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [voiceOut, setVoiceOut] = useState(false);
+  const [handsFree, setHandsFree] = useState(false);
   const endRef = useRef<HTMLDivElement>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  const composerRef = useRef<ComposerHandle>(null);
 
-  // Restore the user's voice-out preference. Defaults to off so a fresh
-  // install doesn't surprise the user with audio.
+  // Restore the user's voice-out + hands-free preferences. Both default to
+  // off so a fresh install doesn't surprise the user with audio or a mic
+  // permission prompt.
   useEffect(() => {
     if (typeof window === "undefined") return;
     setVoiceOut(localStorage.getItem(VOICE_OUT_KEY) === "1");
+    setHandsFree(localStorage.getItem(HANDS_FREE_KEY) === "1");
   }, []);
+
+  const wake = useWakeWord({
+    enabled: handsFree,
+    accessKey: PICOVOICE_ACCESS_KEY,
+    keyword: WAKE_KEYWORD,
+    onWake: () => composerRef.current?.startVoice(),
+  });
 
   function stopCurrentAudio() {
     const prev = audioRef.current;
@@ -54,6 +71,30 @@ export function ChatWindow() {
     }
     if (!enabled) stopCurrentAudio();
   }
+
+  function setHandsFreePersisted(enabled: boolean) {
+    setHandsFree(enabled);
+    if (typeof window !== "undefined") {
+      localStorage.setItem(HANDS_FREE_KEY, enabled ? "1" : "0");
+    }
+  }
+
+  // Pause wake-word listening while the user is actually dictating, so
+  // the engine doesn't interpret his own voice as another wake.
+  const handleMicStateChange = useCallback(
+    (recording: boolean) => {
+      if (recording) wake.pause();
+      else wake.resume();
+    },
+    [wake],
+  );
+
+  // Likewise, pause while the assistant is replying out loud — Alfred
+  // saying "sir" shouldn't reflexively trigger him.
+  useEffect(() => {
+    if (busy) wake.pause();
+    else wake.resume();
+  }, [busy, wake]);
 
   async function speak(text: string) {
     let url: string | null = null;
@@ -233,6 +274,37 @@ export function ChatWindow() {
           <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
             <button
               type="button"
+              onClick={() => setHandsFreePersisted(!handsFree)}
+              aria-pressed={handsFree}
+              title={
+                handsFree
+                  ? `Hands-free is on — say "${WAKE_KEYWORD}" to start a message`
+                  : `Turn on hands-free (wake word: "${WAKE_KEYWORD}")`
+              }
+              style={{
+                padding: "6px 10px",
+                borderRadius: 6,
+                border: "1px solid var(--border)",
+                background: handsFree ? "var(--accent)" : "transparent",
+                color: handsFree ? "#fff" : "var(--muted)",
+                cursor: "pointer",
+                fontSize: 13,
+              }}
+            >
+              {handsFree
+                ? wake.status === "listening"
+                  ? `🎙️ "${WAKE_KEYWORD}" — listening`
+                  : wake.status === "paused"
+                    ? `🎙️ "${WAKE_KEYWORD}" — paused`
+                    : wake.status === "starting"
+                      ? "🎙️ Starting…"
+                      : wake.status === "error"
+                        ? "🎙️ Wake-word error"
+                        : `🎙️ Hands-free on`
+                : "🎙️ Hands-free off"}
+            </button>
+            <button
+              type="button"
               onClick={() => setVoiceOutPersisted(!voiceOut)}
               aria-pressed={voiceOut}
               title={voiceOut ? "Mute Alfred's voice" : "Unmute Alfred's voice"}
@@ -291,7 +363,27 @@ export function ChatWindow() {
           <div ref={endRef} />
         </main>
 
-        <Composer onSend={handleSend} disabled={busy || loadingConvo} />
+        {handsFree && wake.error ? (
+          <p
+            style={{
+              color: "#b33",
+              fontSize: 12,
+              background: "rgba(179, 51, 51, 0.08)",
+              padding: 8,
+              borderRadius: 6,
+              margin: "0 0 8px 0",
+            }}
+          >
+            {wake.error}
+          </p>
+        ) : null}
+
+        <Composer
+          ref={composerRef}
+          onSend={handleSend}
+          disabled={busy || loadingConvo}
+          onMicStateChange={handleMicStateChange}
+        />
       </div>
     </div>
   );

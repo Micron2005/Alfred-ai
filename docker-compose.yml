@@ -36,6 +36,13 @@ services:
     build:
       context: ./alfred-web
       dockerfile: Dockerfile
+      args:
+        # NEXT_PUBLIC_* are inlined into the JS bundle at build time,
+        # so they're forwarded as build args (not runtime env). To
+        # change them, run `docker compose up --build`.
+        NEXT_PUBLIC_API_BASE: ${NEXT_PUBLIC_API_BASE}
+        NEXT_PUBLIC_PICOVOICE_ACCESS_KEY: ${NEXT_PUBLIC_PICOVOICE_ACCESS_KEY}
+        NEXT_PUBLIC_WAKE_KEYWORD: ${NEXT_PUBLIC_WAKE_KEYWORD}
     restart: unless-stopped
     environment:
       NEXT_PUBLIC_API_BASE: ${NEXT_PUBLIC_API_BASE}

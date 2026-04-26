@@ -1,7 +1,9 @@
 "use client";
 
 import {
+  forwardRef,
   useEffect,
+  useImperativeHandle,
   useRef,
   useState,
   type ClipboardEvent,
@@ -14,6 +16,15 @@ import { readFileAsChatImage, transcribeAudio, type ChatImage } from "@/lib/api"
 interface ComposerProps {
   onSend: (text: string, images: ChatImage[]) => Promise<void> | void;
   disabled?: boolean;
+  /** Notified whenever mic recording starts/stops. Used by ChatWindow to
+   *  pause the wake-word engine while the user is dictating. */
+  onMicStateChange?: (recording: boolean) => void;
+}
+
+export interface ComposerHandle {
+  /** Programmatically start the voice-recording flow (e.g. from a wake
+   *  word). No-op if already recording, transcribing, or disabled. */
+  startVoice: () => void;
 }
 
 type MicState = "idle" | "recording" | "transcribing";
@@ -31,7 +42,10 @@ const ALLOWED_MIME = /^image\/(png|jpe?g|gif|webp)$/;
 const MAX_BYTES = 5 * 1024 * 1024;
 const MAX_IMAGES = 6;
 
-export function Composer({ onSend, disabled }: ComposerProps) {
+export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Composer(
+  { onSend, disabled, onMicStateChange },
+  ref,
+) {
   const [text, setText] = useState("");
   const [mic, setMic] = useState<MicState>("idle");
   const [micError, setMicError] = useState<string | null>(null);
@@ -189,6 +203,20 @@ export function Composer({ onSend, disabled }: ComposerProps) {
     if (files && files.length > 0) void ingestFiles(files, "drop");
   }
 
+  // Mirror the latest mic state for the imperative startVoice handler.
+  // Without this, the closure baked into useImperativeHandle would always
+  // see "idle" even after the user starts a recording from the wake word.
+  const micRef = useRef<MicState>(mic);
+  micRef.current = mic;
+  const disabledRef = useRef<boolean>(Boolean(disabled));
+  disabledRef.current = Boolean(disabled);
+
+  // Notify the parent whenever recording starts or stops so it can pause
+  // wake-word listening (otherwise we'd race the user's own voice).
+  useEffect(() => {
+    onMicStateChange?.(mic === "recording");
+  }, [mic, onMicStateChange]);
+
   async function startRecording() {
     setMicError(null);
     try {
@@ -265,6 +293,24 @@ export function Composer({ onSend, disabled }: ComposerProps) {
     if (mic === "recording") stopRecording();
     else if (mic === "idle") void startRecording();
   }
+
+  // We deliberately don't list `startRecording` in the dependency array.
+  // It's a stable closure within this component and the imperative handle
+  // gates on `disabledRef` and `micRef`, both of which read live values.
+  // Recreating the handle on every render would needlessly rebuild it for
+  // every parent state change.
+  useImperativeHandle(
+    ref,
+    () => ({
+      startVoice: () => {
+        if (disabledRef.current) return;
+        if (micRef.current !== "idle") return;
+        void startRecording();
+      },
+    }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [],
+  );
 
   const micBusy = mic !== "idle";
   const micLabel =
@@ -455,4 +501,4 @@ export function Composer({ onSend, disabled }: ComposerProps) {
       )}
     </form>
   );
-}
+});
