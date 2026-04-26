@@ -23,29 +23,44 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
  */
 
 /**
- * Built-in openWakeWord keywords this hook knows about. These match the
- * pre-trained ONNX models we ship under
- * ``/public/openwakeword/models/<name>_v0.1.onnx``.
+ * Wake-word keyword → ONNX model filename map. Files live under
+ * ``/public/openwakeword/models/`` and are served as static assets.
+ *
+ * - ``hey_alfred`` is a community-trained model from
+ *   https://github.com/The-Blackstone/HeyAlfredWakeWord (originally a
+ *   .tflite for Wyoming, converted to ONNX with `tf2onnx`). Same
+ *   [1, 16, 96] embedding-window architecture as the official models.
+ * - The other five are the official pre-trained models from
+ *   https://github.com/dscripka/openWakeWord, bundled by the
+ *   ``openwakeword-wasm-browser`` package.
  */
-export const BUILT_IN_KEYWORDS = [
-  "hey_jarvis",
-  "alexa",
-  "hey_mycroft",
-  "hey_rhasspy",
-  "timer",
-  "weather",
-] as const;
+export const KEYWORD_MODEL_FILES = {
+  hey_alfred: "hey_alfred_v0.1.onnx",
+  hey_jarvis: "hey_jarvis_v0.1.onnx",
+  alexa: "alexa_v0.1.onnx",
+  hey_mycroft: "hey_mycroft_v0.1.onnx",
+  hey_rhasspy: "hey_rhasspy_v0.1.onnx",
+  timer: "timer_v0.1.onnx",
+  weather: "weather_v0.1.onnx",
+} as const;
 
-export type BuiltInKeyword = (typeof BUILT_IN_KEYWORDS)[number];
+export type BuiltInKeyword = keyof typeof KEYWORD_MODEL_FILES;
 
 export interface UseWakeWordOptions {
   /** Whether the user has turned on hands-free mode. */
   enabled: boolean;
   /**
-   * Built-in openWakeWord keyword to listen for. Defaults to
-   * ``"hey_jarvis"`` — the closest pre-trained model to "Hey Alfred".
+   * openWakeWord keyword to listen for. Defaults to ``"hey_alfred"``.
+   * Must be a key of ``KEYWORD_MODEL_FILES`` (or any other entry the
+   * caller provides via ``modelFiles``).
    */
   keyword?: BuiltInKeyword | string;
+  /**
+   * Optional override for the keyword → filename map. Useful when the
+   * caller drops in a custom ``my_alfred.onnx`` and wants to reference
+   * it as ``my_alfred``. Merged on top of ``KEYWORD_MODEL_FILES``.
+   */
+  modelFiles?: Record<string, string>;
   /** Callback fired on wake-word detection. */
   onWake: () => void;
   /**
@@ -89,10 +104,11 @@ interface WakeWordEngineLike {
 export function useWakeWord(opts: UseWakeWordOptions): UseWakeWordReturn {
   const {
     enabled,
-    keyword = "hey_jarvis",
+    keyword = "hey_alfred",
     onWake,
     baseAssetUrl = "/openwakeword/models",
     detectionThreshold = 0.5,
+    modelFiles,
   } = opts;
 
   const [status, setStatus] = useState<WakeStatus>("off");
@@ -162,6 +178,11 @@ export function useWakeWord(opts: UseWakeWordOptions): UseWakeWordReturn {
         const engine = new Engine({
           baseAssetUrl,
           keywords: [keyword],
+          // Merge the caller's overrides on top of the built-in map so
+          // ``hey_alfred`` and any future custom keywords resolve to the
+          // right ONNX file. The engine reads from this map when it
+          // creates the per-keyword session.
+          modelFiles: { ...KEYWORD_MODEL_FILES, ...(modelFiles ?? {}) },
           detectionThreshold,
           cooldownMs: 2000,
         });
@@ -213,6 +234,10 @@ export function useWakeWord(opts: UseWakeWordOptions): UseWakeWordReturn {
       cancelled = true;
       void teardown();
     };
+    // ``modelFiles`` is intentionally omitted from deps: it's snapshotted
+    // by the engine at construction and a re-mount is the wrong reaction
+    // if the caller passes a fresh object literal each render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [enabled, keyword, baseAssetUrl, detectionThreshold, teardown]);
 
   const pause = useCallback(() => {

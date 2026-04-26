@@ -22,7 +22,7 @@ const ACTIVE_CONVO_KEY = "alfred.activeConversationId";
 const VOICE_OUT_KEY = "alfred.voiceOutEnabled";
 const HANDS_FREE_KEY = "alfred.handsFreeEnabled";
 
-const WAKE_KEYWORD = process.env.NEXT_PUBLIC_WAKE_KEYWORD ?? "hey_jarvis";
+const WAKE_KEYWORD = process.env.NEXT_PUBLIC_WAKE_KEYWORD ?? "hey_alfred";
 
 // Pretty label for status text — "hey_jarvis" → "Hey Jarvis".
 const WAKE_LABEL = WAKE_KEYWORD.replace(/_/g, " ").replace(
