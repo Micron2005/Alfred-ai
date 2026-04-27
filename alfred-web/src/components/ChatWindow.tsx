@@ -760,29 +760,15 @@ export function ChatWindow() {
             <button
               type="button"
               className="hud-button"
-              onClick={() => {
-                if (!hud.customEnabled) {
-                  // First click on a fresh install — enable custom
-                  // mode AND open the editor immediately so the user
-                  // sees the handles. Otherwise the button looks
-                  // broken (toggling a hidden bit with no visible
-                  // change).
-                  hud.setCustomEnabled(true);
-                  hud.setEditMode(true);
-                } else {
-                  // Already in custom mode — the button is a plain
-                  // edit-mode toggle (DONE ↔ CUSTOMIZE).
-                  hud.setEditMode(!hud.editMode);
-                }
-              }}
-              aria-pressed={hud.editMode}
+              onClick={() => hud.setCustomEnabled(!hud.customEnabled)}
+              aria-pressed={hud.customEnabled}
               title={
-                hud.editMode
-                  ? "Lock the HUD layout"
-                  : "Drag, resize, or hide HUD widgets"
+                hud.customEnabled
+                  ? "Lock the HUD layout and return to the default flow"
+                  : "Free the HUD widgets so you can drag, resize, or hide them"
               }
             >
-              {hud.editMode ? "🎛 DONE" : "🎛 CUSTOMIZE"}
+              {hud.customEnabled ? "🎛 CUSTOM · ON" : "🎛 CUSTOMIZE"}
             </button>
             <ModeIndicator mode={mode} />
           </div>
@@ -807,7 +793,7 @@ export function ChatWindow() {
           handles in Spotify, MediaPipe detectors in CameraPreview,
           etc.).
         */}
-        {hud.editMode ? (
+        {hud.customEnabled ? (
           <HudCustomizeToolbar
             layout={hud.layout}
             showWidget={hud.showWidget}
@@ -817,119 +803,111 @@ export function ChatWindow() {
         ) : null}
 
         {hud.customEnabled ? (
-          // Absolute-canvas mode — the main pane becomes a free
-          // surface where each widget is positioned at its saved
-          // {x, y, w, h}. ``minHeight`` keeps the canvas tall enough
-          // that even after the user drags everything to the bottom
-          // there's still room.
-          <div
-            style={{
-              position: "relative",
-              flex: 1,
-              minHeight: 720,
-              marginTop: 16,
-            }}
-          >
-            <HudWidget
-              id="clock"
-              label={WIDGET_LABELS.clock}
-              layout={hud.layout.clock}
-              customEnabled
-              editMode={hud.editMode}
-              onMove={(p) => hud.updateWidget("clock", p)}
-              onHide={() => hud.hideWidget("clock")}
-              hidden={!hud.layout.clock.visible}
-            >
-              <Clock />
-            </HudWidget>
-            <HudWidget
-              id="weather-current"
-              label={WIDGET_LABELS["weather-current"]}
-              layout={hud.layout["weather-current"]}
-              customEnabled
-              editMode={hud.editMode}
-              onMove={(p) => hud.updateWidget("weather-current", p)}
-              onHide={() => hud.hideWidget("weather-current")}
-              hidden={!hud.layout["weather-current"].visible}
-            >
-              <WeatherWidget variant="current" />
-            </HudWidget>
-            <HudWidget
-              id="weather-strip"
-              label={WIDGET_LABELS["weather-strip"]}
-              layout={hud.layout["weather-strip"]}
-              customEnabled
-              editMode={hud.editMode}
-              onMove={(p) => hud.updateWidget("weather-strip", p)}
-              onHide={() => hud.hideWidget("weather-strip")}
-              hidden={!hud.layout["weather-strip"].visible}
-            >
-              <WeatherWidget variant="strip" />
-            </HudWidget>
-            <HudWidget
-              id="orb"
-              label={WIDGET_LABELS.orb}
-              layout={hud.layout.orb}
-              customEnabled
-              editMode={hud.editMode}
-              onMove={(p) => hud.updateWidget("orb", p)}
-              onHide={() => hud.hideWidget("orb")}
-              hidden={!hud.layout.orb.visible}
-            >
-              <div
-                style={{
-                  width: "100%",
-                  height: "100%",
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "center",
-                }}
-              >
-                <Orb
-                  size={Math.max(
-                    80,
-                    Math.min(
-                      typeof hud.layout.orb.w === "number"
-                        ? hud.layout.orb.w
-                        : 360,
-                      typeof hud.layout.orb.h === "number"
-                        ? hud.layout.orb.h
-                        : 200,
-                    ) - 20,
-                  )}
-                  caption={orbCaption}
-                />
-              </div>
-            </HudWidget>
-            <HudWidget
-              id="spotify"
-              label={WIDGET_LABELS.spotify}
-              layout={hud.layout.spotify}
-              customEnabled
-              editMode={hud.editMode}
-              onMove={(p) => hud.updateWidget("spotify", p)}
-              onHide={() => hud.hideWidget("spotify")}
-              hidden={!hud.layout.spotify.visible}
-            >
-              <SpotifyPlayer nightfall={mode === "nightfall"} />
-            </HudWidget>
-            <HudWidget
-              id="camera"
-              label={WIDGET_LABELS.camera}
-              layout={hud.layout.camera}
-              customEnabled
-              editMode={hud.editMode}
-              onMove={(p) => hud.updateWidget("camera", p)}
-              onHide={() => hud.hideWidget("camera")}
-              hidden={!hud.layout.camera.visible || !cameraOn}
-            >
-              <CameraPreview
-                status={camera.status}
-                faceCount={camera.faceCount}
-                streamRef={camera.streamRef}
-              />
-            </HudWidget>
-          </div>
+          <ResponsiveHudCanvas>
+            {(scale) => (
+              <>
+                <HudWidget
+                  id="clock"
+                  label={WIDGET_LABELS.clock}
+                  layout={hud.layout.clock}
+                  customEnabled
+                  scale={scale}
+                  onMove={(p) => hud.updateWidget("clock", p)}
+                  onHide={() => hud.hideWidget("clock")}
+                  hidden={!hud.layout.clock.visible}
+                >
+                  <Clock />
+                </HudWidget>
+                <HudWidget
+                  id="weather-current"
+                  label={WIDGET_LABELS["weather-current"]}
+                  layout={hud.layout["weather-current"]}
+                  customEnabled
+                  scale={scale}
+                  onMove={(p) => hud.updateWidget("weather-current", p)}
+                  onHide={() => hud.hideWidget("weather-current")}
+                  hidden={!hud.layout["weather-current"].visible}
+                >
+                  <WeatherWidget variant="current" />
+                </HudWidget>
+                <HudWidget
+                  id="weather-strip"
+                  label={WIDGET_LABELS["weather-strip"]}
+                  layout={hud.layout["weather-strip"]}
+                  customEnabled
+                  scale={scale}
+                  onMove={(p) => hud.updateWidget("weather-strip", p)}
+                  onHide={() => hud.hideWidget("weather-strip")}
+                  hidden={!hud.layout["weather-strip"].visible}
+                >
+                  <WeatherWidget variant="strip" />
+                </HudWidget>
+                <HudWidget
+                  id="orb"
+                  label={WIDGET_LABELS.orb}
+                  layout={hud.layout.orb}
+                  customEnabled
+                  scale={scale}
+                  onMove={(p) => hud.updateWidget("orb", p)}
+                  onHide={() => hud.hideWidget("orb")}
+                  hidden={!hud.layout.orb.visible}
+                >
+                  <div
+                    style={{
+                      width: "100%",
+                      height: "100%",
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                    }}
+                  >
+                    <Orb
+                      size={Math.max(
+                        80,
+                        Math.min(
+                          typeof hud.layout.orb.w === "number"
+                            ? hud.layout.orb.w
+                            : 360,
+                          typeof hud.layout.orb.h === "number"
+                            ? hud.layout.orb.h
+                            : 200,
+                        ) - 20,
+                      )}
+                      caption={orbCaption}
+                    />
+                  </div>
+                </HudWidget>
+                <HudWidget
+                  id="spotify"
+                  label={WIDGET_LABELS.spotify}
+                  layout={hud.layout.spotify}
+                  customEnabled
+                  scale={scale}
+                  onMove={(p) => hud.updateWidget("spotify", p)}
+                  onHide={() => hud.hideWidget("spotify")}
+                  hidden={!hud.layout.spotify.visible}
+                >
+                  <SpotifyPlayer nightfall={mode === "nightfall"} />
+                </HudWidget>
+                <HudWidget
+                  id="camera"
+                  label={WIDGET_LABELS.camera}
+                  layout={hud.layout.camera}
+                  customEnabled
+                  scale={scale}
+                  onMove={(p) => hud.updateWidget("camera", p)}
+                  onHide={() => hud.hideWidget("camera")}
+                  hidden={!hud.layout.camera.visible || !cameraOn}
+                >
+                  <CameraPreview
+                    status={camera.status}
+                    faceCount={camera.faceCount}
+                    streamRef={camera.streamRef}
+                  />
+                </HudWidget>
+              </>
+            )}
+          </ResponsiveHudCanvas>
         ) : (
           // Default flow layout — the original out-of-the-box JARVIS
           // arrangement. Untouched except that the camera preview is
@@ -1132,6 +1110,85 @@ function HudCustomizeToolbar({
       >
         ⏏ EXIT
       </button>
+    </div>
+  );
+}
+
+/**
+ * Responsive wrapper for the absolute-positioned HUD canvas.
+ *
+ * The canvas has a logical baseline width (1100 px) — every widget's
+ * saved ``{x, y, w, h}`` is in that coordinate system. When the
+ * sidebar is open the actual pane width drops below 1100, so we
+ * apply a CSS ``transform: scale()`` to the canvas to make
+ * everything shrink proportionally rather than overflow / clip on
+ * the right edge (the user's complaint after v1).
+ *
+ * The wrapper measures its own width with a ResizeObserver and
+ * computes the scale factor on every resize. The scale is passed to
+ * each ``HudWidget`` via the render-prop so its drag/resize handlers
+ * can divide pointer-event deltas by the scale (otherwise widgets
+ * would lag behind the user's finger).
+ *
+ * Outer-wrapper height is locked to ``BASELINE_HEIGHT * scale`` so
+ * the rest of the page (composer slot, sidebar) doesn't end up with
+ * a giant unscaled void below the canvas.
+ */
+const HUD_CANVAS_BASELINE_WIDTH = 1100;
+const HUD_CANVAS_BASELINE_HEIGHT = 720;
+
+function ResponsiveHudCanvas({
+  children,
+}: {
+  children: (scale: number) => React.ReactNode;
+}) {
+  const wrapperRef = useRef<HTMLDivElement>(null);
+  const [scale, setScale] = useState(1);
+
+  useEffect(() => {
+    const el = wrapperRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver(([entry]) => {
+      const w = entry.contentRect.width;
+      // Cap at 1.0 — we never *upscale* beyond the design size,
+      // because the widget contents (text, icons) lose crispness
+      // when CSS-scaled larger than 1×. Floor at 0.45 so widgets
+      // are still readable on extremely narrow viewports.
+      setScale(Math.max(0.45, Math.min(1, w / HUD_CANVAS_BASELINE_WIDTH)));
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
+  return (
+    <div
+      ref={wrapperRef}
+      style={{
+        position: "relative",
+        flex: 1,
+        marginTop: 16,
+        // The outer box reserves the *scaled* height so layout below
+        // (anything after the HUD canvas) sits at the right Y.
+        height: HUD_CANVAS_BASELINE_HEIGHT * scale,
+        // A scaled child can over-paint its parent on the right
+        // edge; ``overflow: hidden`` keeps the hud-canvas sub-pixel
+        // precise within the visible pane.
+        overflow: "hidden",
+      }}
+    >
+      <div
+        style={{
+          width: HUD_CANVAS_BASELINE_WIDTH,
+          height: HUD_CANVAS_BASELINE_HEIGHT,
+          position: "absolute",
+          top: 0,
+          left: 0,
+          transform: `scale(${scale})`,
+          transformOrigin: "top left",
+        }}
+      >
+        {children(scale)}
+      </div>
     </div>
   );
 }
