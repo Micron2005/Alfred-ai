@@ -14,13 +14,19 @@ interface Props {
   onDelete: (id: string) => void;
   busy?: boolean;
   /** When ``true`` the sidebar collapses to a thin rail with just an
-   * expand button — gives the chat the full window width. */
+   * expand button — gives the HUD the full window width. The chat
+   * pane is still mounted (hidden via CSS) so that
+   * ``composerRef``/``cameraRef`` and any in-flight recording stay
+   * alive across collapse/expand cycles. */
   collapsed?: boolean;
   onToggleCollapsed?: () => void;
   /** The active conversation pane (messages + composer + error
-   * banners + hidden camera <video>). The sidebar mounts this in the
-   * "CONVERSATION" tab so the chat lives in the side panel and the
-   * main pane is left to the JARVIS HUD. */
+   * banners). The sidebar mounts this in the "CONVERSATION" tab so
+   * the chat lives in the side panel and the main pane is left to
+   * the JARVIS HUD. The element is **always** rendered (just hidden
+   * with ``display:none`` when not in the conversation tab or when
+   * the sidebar is collapsed) so refs into the Composer / wake-word
+   * pipeline don't get nulled out by tab switches or collapses. */
   chatPane: React.ReactNode;
 }
 
@@ -67,11 +73,50 @@ export function ConversationSidebar({
     }
   };
 
+  // The chat pane (Composer, message list, etc.) is mounted
+  // unconditionally so refs/recording state survive collapse + tab
+  // switches. We just hide it via CSS when it shouldn't be on
+  // screen. ``visibility:hidden + position:absolute`` is intentional
+  // (rather than plain ``display:none``) — it keeps Composer's
+  // layout calculations sane (textarea autosize, focus rings) while
+  // still being inert and invisible.
+  const chatVisible = !collapsed && tab === "conversation";
+  const chatPaneSlot = (
+    <div
+      aria-hidden={!chatVisible}
+      style={
+        chatVisible
+          ? {
+              flex: 1,
+              display: "flex",
+              flexDirection: "column",
+              minHeight: 0, // critical so inner ``overflow:auto`` works
+            }
+          : {
+              // Mounted but hidden — keeps Composer's ref / hands-free
+              // pipeline / mic recording alive when the user
+              // collapses the sidebar or flips to the archives tab.
+              position: "absolute",
+              left: -99999,
+              top: 0,
+              width: 1,
+              height: 1,
+              overflow: "hidden",
+              pointerEvents: "none",
+            }
+      }
+    >
+      {chatPane}
+    </div>
+  );
+
   if (collapsed) {
     // Thin rail mode — only the expand chevron + a quick "+ NEW"
     // shortcut so the user can still start a new conversation
     // without first re-opening the panel. Designed to be ~32 px wide
-    // so the chat reclaims essentially the whole window.
+    // so the HUD reclaims essentially the whole window. The chat
+    // pane is still mounted (off-screen) so wake word + LOOK button
+    // continue to work.
     return (
       <aside
         style={{
@@ -110,6 +155,7 @@ export function ConversationSidebar({
         >
           +
         </button>
+        {chatPaneSlot}
       </aside>
     );
   }
@@ -184,21 +230,15 @@ export function ConversationSidebar({
         </button>
       </div>
 
-      {tab === "conversation" ? (
-        // The chat pane already provides its own scroll container +
-        // composer at the bottom, so we just give it a fill-the-rest
-        // flex column and let it manage itself.
-        <div
-          style={{
-            flex: 1,
-            display: "flex",
-            flexDirection: "column",
-            minHeight: 0, // critical so inner ``overflow:auto`` works
-          }}
-        >
-          {chatPane}
-        </div>
-      ) : (
+      {/*
+        Always render the chat pane (visible when CONVERSATION tab is
+        active; off-screen but mounted otherwise). Refs into the
+        Composer + the in-flight recording state stay alive across
+        tab switches.
+      */}
+      {chatPaneSlot}
+
+      {tab === "archives" ? (
         <div style={{ flex: 1, overflowY: "auto", padding: "8px 0" }}>
           {conversations.length === 0 ? (
             <p
@@ -321,7 +361,7 @@ export function ConversationSidebar({
             })
           )}
         </div>
-      )}
+      ) : null}
     </aside>
   );
 }
