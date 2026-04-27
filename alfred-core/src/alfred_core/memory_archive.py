@@ -39,7 +39,7 @@ import logging
 import os
 import re
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID
 
@@ -323,7 +323,7 @@ def _slugify(value: str, *, max_length: int = 60) -> str:
 
 
 def _build_filename(note: MemoryNote) -> str:
-    stamp = (note.created_at or datetime.utcnow()).strftime("%Y-%m-%d")
+    stamp = (note.created_at or datetime.now(UTC)).strftime("%Y-%m-%d")
     return f"{stamp}_{_slugify(note.title)}.md"
 
 
@@ -471,6 +471,55 @@ async def summarise_and_persist_conversation(
 # ─── Token-pressure rollup ──────────────────────────────────────────────
 
 
+_ROLLUP_COVERED_KEY = "last_covered_message_at"
+
+
+def _rollup_covered_until(note: MemoryNote) -> datetime | None:
+    """Read the high-water mark of messages already archived by a rollup.
+
+    Stored as an ISO-8601 string in ``MemoryNote.structured`` so we can
+    skip past it next time and avoid re-archiving the same prefix.
+    """
+    structured = note.structured or {}
+    if not isinstance(structured, dict):
+        return None
+    raw = structured.get(_ROLLUP_COVERED_KEY)
+    if not isinstance(raw, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed
+
+
+async def _latest_rollup_covered_until(
+    session: AsyncSession, conversation_id: UUID
+) -> datetime | None:
+    """Return the latest ``last_covered_message_at`` across all rollup
+    notes for a conversation, or ``None`` if no rollup exists yet."""
+    result = await session.execute(
+        select(MemoryNote)
+        .where(
+            MemoryNote.source_conversation_id == conversation_id,
+            MemoryNote.source == "rolling_context",
+        )
+        .order_by(MemoryNote.created_at.desc())
+        .limit(8)
+    )
+    notes = list(result.scalars().all())
+    high_water: datetime | None = None
+    for note in notes:
+        covered = _rollup_covered_until(note)
+        if covered is None:
+            continue
+        if high_water is None or covered > high_water:
+            high_water = covered
+    return high_water
+
+
 async def rollup_if_pressured(
     *,
     session: AsyncSession,
@@ -479,35 +528,63 @@ async def rollup_if_pressured(
     conversation_id: UUID,
     history: list[Message],
 ) -> list[Message]:
-    """If the conversation is over the size threshold, archive the oldest
-    half into a memory note and return the survivors. Otherwise return
-    the input list unchanged.
+    """Archive the oldest portion of a long conversation into a memory
+    note and return only the messages that should remain in active LLM
+    context.
 
-    The dropped messages are only removed from the *active history*
-    Alfred sees this turn — the underlying ``messages`` table is
-    untouched, so the conversation transcript still reads in full when
-    the user opens the past conversation in the sidebar. The summary
-    is what enters Alfred's working memory; the raw rows stay as a
-    record.
+    Idempotence: any prior rollup writes its coverage high-water mark
+    (``last_covered_message_at``) into the note's ``structured`` JSON.
+    On subsequent turns we slice ``history`` to messages strictly
+    after that timestamp, and only re-fire the rollup if the *new
+    uncovered window* exceeds the threshold. Without this guard, a
+    conversation past the threshold would create a near-duplicate
+    rollup note on every turn (the DB messages aren't deleted, so a
+    naive length-check sees the same overflow each time).
+
+    The DB ``messages`` table is intentionally untouched — the full
+    transcript still reads in the sidebar; only the live LLM context
+    is shrunk.
     """
     threshold = max(20, settings.alfred_memory_token_pressure_messages)
-    if len(history) <= threshold:
-        return history
-    half = len(history) // 2
-    older = history[:half]
-    survivors = history[half:]
+    covered_until = await _latest_rollup_covered_until(
+        session, conversation_id
+    )
+    if covered_until is not None:
+        uncovered = [
+            m for m in history if m.created_at > covered_until
+        ]
+    else:
+        uncovered = list(history)
+
+    if len(uncovered) <= threshold:
+        # Either nothing to roll up, or a previous rollup already
+        # trimmed enough that the live window is back under the
+        # threshold. Either way, return only the uncovered window so
+        # already-archived messages stop being re-fed to the LLM.
+        return uncovered
+
+    half = len(uncovered) // 2
+    older = uncovered[:half]
+    survivors = uncovered[half:]
+    if not older:
+        return uncovered
     summary = await summarise_messages(older, llm_router=llm_router)
     if summary is None:
-        # Couldn't summarise — leave the history alone rather than silently
-        # dropping context. We'll try again next turn.
-        return history
-    await persist_summary(
+        # Summariser failed — keep the uncovered window intact rather
+        # than silently dropping context. Next turn will retry.
+        return uncovered
+    note = await persist_summary(
         session=session,
         settings=settings,
         summary=summary,
         source_conversation_id=conversation_id,
         source="rolling_context",
     )
+    # Stamp the high-water mark so the next call skips this prefix.
+    last_covered = older[-1].created_at
+    structured = dict(note.structured or {})
+    structured[_ROLLUP_COVERED_KEY] = last_covered.isoformat()
+    note.structured = structured
     return survivors
 
 
