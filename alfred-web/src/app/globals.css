@@ -1,23 +1,72 @@
+/*
+ * JARVIS-HUD-meets-Wayne-Manor design system.
+ *
+ * Two themes share the same geometry, typography, and animations —
+ * only the colours change between them:
+ *
+ *   :root        — Standard. Deep navy-black, cyan "live" accents,
+ *                  warm gold "decorative" accents (corner brackets,
+ *                  source links, persona indicator). The "JARVIS panel
+ *                  installed in the Wayne Manor study" feel.
+ *
+ *   .nightfall   — Nightfall Protocol. Even darker base, ice-white
+ *                  cyan "live" accents, deep amber "decorative". Cold
+ *                  Batcomputer feel.
+ *
+ * Variable conventions:
+ *   --bg / --bg-elev          base + raised surfaces
+ *   --fg / --muted            primary + secondary text
+ *   --accent / --accent-soft  WARM decorative (gold / amber)
+ *   --hud / --hud-soft        COOL live (cyan / ice white)
+ *   --orb / --orb-soft / --orb-glow  the centre orb specifically
+ *   --bubble-user / --bubble-assistant
+ *   --border                  HUD-line stroke
+ *   --shadow                  card-level dropshadow
+ *   --grid                    subtle bg grid colour
+ */
+
 :root {
-  --bg: #f6f4ef;
-  --fg: #1a1a1a;
-  --accent: #6d5b3d;
-  --muted: #7a7366;
-  --bubble-user: #e6e1d6;
-  --bubble-assistant: #ffffff;
-  --border: #d9d2c4;
-  --shadow: 0 1px 3px rgba(0, 0, 0, 0.06);
+  /* Standard — JARVIS in the Wayne Manor study */
+  --bg: #060912;
+  --bg-elev: #0c1220;
+  --fg: #e6ecf5;
+  --muted: #8a96ad;
+  --accent: #d6a85a;        /* warm gold */
+  --accent-soft: #8a6f3a;
+  --hud: #6cd6ff;           /* cyan "live" */
+  --hud-soft: #2c6c8a;
+  --orb: #6cd6ff;
+  --orb-soft: #1f6e8c;
+  --orb-glow: rgba(108, 214, 255, 0.45);
+  --bubble-user: rgba(108, 214, 255, 0.07);
+  --bubble-assistant: rgba(214, 168, 90, 0.05);
+  --border: rgba(108, 214, 255, 0.18);
+  --border-warm: rgba(214, 168, 90, 0.28);
+  --shadow: 0 1px 24px rgba(0, 0, 0, 0.45);
+  --grid: rgba(108, 214, 255, 0.05);
+  --danger: #ff7b7b;
 }
 
 .nightfall {
-  --bg: #0a0a0c;
-  --fg: #d8d8e0;
-  --accent: #e4b63a;
-  --muted: #6f6f7a;
-  --bubble-user: #181822;
-  --bubble-assistant: #101015;
-  --border: #1f1f28;
-  --shadow: 0 1px 3px rgba(228, 182, 58, 0.08);
+  /* Nightfall — Batcomputer */
+  --bg: #03050a;
+  --bg-elev: #07090f;
+  --fg: #d6dde9;
+  --muted: #6a7184;
+  --accent: #c2451f;        /* deep amber/red — Batman emergency */
+  --accent-soft: #6a2a14;
+  --hud: #d8ecff;           /* ice white */
+  --hud-soft: #5b6a82;
+  --orb: #d8ecff;
+  --orb-soft: #5b6a82;
+  --orb-glow: rgba(216, 236, 255, 0.4);
+  --bubble-user: rgba(216, 236, 255, 0.05);
+  --bubble-assistant: rgba(194, 69, 31, 0.05);
+  --border: rgba(216, 236, 255, 0.12);
+  --border-warm: rgba(194, 69, 31, 0.32);
+  --shadow: 0 1px 24px rgba(0, 0, 0, 0.7);
+  --grid: rgba(216, 236, 255, 0.03);
+  --danger: #ff5757;
 }
 
 * {
@@ -30,15 +79,242 @@ body {
   padding: 0;
   background: var(--bg);
   color: var(--fg);
-  font-family: ui-serif, Georgia, "Times New Roman", serif;
-  transition: background 300ms ease, color 300ms ease;
+  font-family: ui-serif, Georgia, "Iowan Old Style", "Times New Roman", serif;
+  transition: background 400ms ease, color 400ms ease;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+/*
+ * The whole window gets a faint circuit-board grid + a soft radial
+ * vignette so the centre orb feels lit. ``::before`` on body so it
+ * ignores scrolling and doesn't get clipped by overflow.
+ */
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+  background-image:
+    linear-gradient(var(--grid) 1px, transparent 1px),
+    linear-gradient(90deg, var(--grid) 1px, transparent 1px),
+    radial-gradient(
+      circle at 50% 30%,
+      var(--orb-glow) 0%,
+      transparent 60%
+    );
+  background-size: 48px 48px, 48px 48px, 100% 100%;
+  background-position: -1px -1px, -1px -1px, center;
+  opacity: 0.6;
+  transition: opacity 400ms ease;
+}
+
+.nightfall body::before {
+  opacity: 0.45;
+}
+
+/* Make sure app content sits above the grid layer */
+#__next, body > div {
+  position: relative;
+  z-index: 1;
 }
 
 button {
   font-family: inherit;
+  letter-spacing: 0.3px;
 }
 
 textarea,
 input {
   font-family: inherit;
+}
+
+/* Monospace utility — telemetry labels, status text. */
+.mono {
+  font-family:
+    ui-monospace, SFMono-Regular, "JetBrains Mono", "Fira Code",
+    Menlo, Consolas, monospace;
+  letter-spacing: 1.5px;
+  text-transform: uppercase;
+}
+
+/* Generic HUD panel: dark surface, thin cyan border, glowing inner shadow. */
+.hud-panel {
+  background:
+    linear-gradient(
+      180deg,
+      rgba(255, 255, 255, 0.015) 0%,
+      transparent 100%
+    ),
+    var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  position: relative;
+  box-shadow:
+    inset 0 0 0 1px rgba(255, 255, 255, 0.02),
+    0 1px 3px rgba(0, 0, 0, 0.4);
+}
+
+/* Decorative HUD corner brackets in the warm accent (gold/amber). */
+.hud-corners::before,
+.hud-corners::after,
+.hud-corners > .hud-corner-bl,
+.hud-corners > .hud-corner-br {
+  content: "";
+  position: absolute;
+  width: 10px;
+  height: 10px;
+  border: 1px solid var(--accent);
+  pointer-events: none;
+  opacity: 0.7;
+}
+.hud-corners {
+  position: relative;
+}
+.hud-corners::before {
+  top: -1px;
+  left: -1px;
+  border-right: none;
+  border-bottom: none;
+}
+.hud-corners::after {
+  top: -1px;
+  right: -1px;
+  border-left: none;
+  border-bottom: none;
+}
+.hud-corners > .hud-corner-bl {
+  bottom: -1px;
+  left: -1px;
+  border-right: none;
+  border-top: none;
+}
+.hud-corners > .hud-corner-br {
+  bottom: -1px;
+  right: -1px;
+  border-left: none;
+  border-top: none;
+}
+
+/* HUD button: dark, cyan border, glow on hover/focus. */
+.hud-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  background: rgba(108, 214, 255, 0.04);
+  color: var(--muted);
+  border-radius: 3px;
+  font-family:
+    ui-monospace, SFMono-Regular, "JetBrains Mono", "Fira Code", monospace;
+  font-size: 11px;
+  letter-spacing: 1.2px;
+  text-transform: uppercase;
+  cursor: pointer;
+  transition: color 160ms ease, border-color 160ms ease,
+    background 160ms ease, box-shadow 160ms ease;
+}
+.nightfall .hud-button {
+  background: rgba(216, 236, 255, 0.03);
+}
+.hud-button:hover:not(:disabled),
+.hud-button:focus-visible {
+  color: var(--hud);
+  border-color: var(--hud);
+  box-shadow: 0 0 0 1px var(--hud), 0 0 12px var(--orb-glow);
+  outline: none;
+}
+.hud-button[aria-pressed="true"],
+.hud-button.is-active {
+  color: var(--hud);
+  border-color: var(--hud);
+  background: rgba(108, 214, 255, 0.1);
+  box-shadow:
+    inset 0 0 12px var(--orb-glow),
+    0 0 0 1px var(--hud);
+}
+.nightfall .hud-button[aria-pressed="true"],
+.nightfall .hud-button.is-active {
+  background: rgba(216, 236, 255, 0.08);
+}
+.hud-button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* Primary action — uses the warm accent (gold/amber). */
+.hud-button--primary {
+  color: var(--accent);
+  border-color: var(--border-warm);
+  background: rgba(214, 168, 90, 0.08);
+}
+.nightfall .hud-button--primary {
+  background: rgba(194, 69, 31, 0.08);
+}
+.hud-button--primary:hover:not(:disabled),
+.hud-button--primary:focus-visible {
+  color: var(--accent);
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent), 0 0 14px var(--accent-soft);
+}
+
+/* Recording-active mic button — bright red, pulsing. */
+.hud-button--recording {
+  color: var(--danger);
+  border-color: var(--danger);
+  background: rgba(255, 80, 80, 0.12);
+  box-shadow: 0 0 14px rgba(255, 80, 80, 0.35);
+  animation: hud-recording-pulse 1.2s ease-in-out infinite;
+}
+@keyframes hud-recording-pulse {
+  0%, 100% { box-shadow: 0 0 14px rgba(255, 80, 80, 0.35); }
+  50%      { box-shadow: 0 0 22px rgba(255, 80, 80, 0.55); }
+}
+
+/* Orb ring rotations + tick orbit — pure CSS so React doesn't re-render.
+ *
+ * The orb SVG uses ``viewBox="-100 -100 200 200"``, so (0,0) in the
+ * user coordinate system is the centre. We need the rotation to
+ * happen around (0,0) of that user coordinate system — NOT the
+ * top-left of each <g>'s fill bounding box. The default CSS
+ * ``transform-origin`` on an SVG <g> resolves through the user
+ * coord system already, so we just leave it alone (the previous
+ * ``transform-box: fill-box`` was the bug — it remapped the origin
+ * to the bbox corner, making the rings orbit instead of spin in
+ * place).
+ */
+.orb-ring--outer { animation: orb-spin-slow 22s linear infinite; }
+.orb-ring--middle { animation: orb-spin-rev 9s linear infinite; }
+.orb-ring--inner { animation: orb-spin-slow 14s linear infinite; }
+.orb-ticks      { animation: orb-spin-rev 18s linear infinite; }
+
+@keyframes orb-spin-slow {
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(360deg); }
+}
+@keyframes orb-spin-rev {
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(-360deg); }
+}
+
+/* Custom scrollbar that fits the HUD aesthetic. */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 0;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--hud-soft);
+  background-clip: padding-box;
+  border: 2px solid transparent;
 }

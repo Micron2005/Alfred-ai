@@ -40,16 +40,19 @@ export function ConversationSidebar({
       style={{
         width: 260,
         borderRight: "1px solid var(--border)",
+        background:
+          "linear-gradient(180deg, rgba(255,255,255,0.015) 0%, transparent 30%), var(--bg-elev)",
         display: "flex",
         flexDirection: "column",
         height: "100vh",
         position: "sticky",
         top: 0,
+        boxShadow: "inset -1px 0 0 rgba(108, 214, 255, 0.04)",
       }}
     >
       <div
         style={{
-          padding: 16,
+          padding: "16px 16px 12px",
           borderBottom: "1px solid var(--border)",
           display: "flex",
           alignItems: "center",
@@ -58,31 +61,27 @@ export function ConversationSidebar({
         }}
       >
         <span
+          className="mono"
           style={{
-            fontSize: 12,
-            letterSpacing: 0.8,
-            textTransform: "uppercase",
+            fontSize: 10,
             color: "var(--muted)",
+            opacity: 0.85,
           }}
         >
-          Conversations
+          ⟢ ARCHIVES
         </span>
         <button
+          type="button"
+          className="hud-button hud-button--primary"
           onClick={onNewChat}
           disabled={busy}
           title="Start a new conversation"
           style={{
-            border: "1px solid var(--border)",
-            background: "var(--accent)",
-            color: "#fff",
             padding: "4px 10px",
-            borderRadius: 6,
-            cursor: busy ? "wait" : "pointer",
-            fontSize: 12,
-            letterSpacing: 0.3,
+            fontSize: 10,
           }}
         >
-          + New
+          + NEW
         </button>
       </div>
 
@@ -107,22 +106,31 @@ export function ConversationSidebar({
                 key={c.id}
                 onClick={() => onSelect(c.id)}
                 style={{
-                  padding: "10px 14px",
+                  padding: "10px 12px 10px 14px",
                   margin: "2px 8px",
-                  borderRadius: 6,
+                  borderRadius: 3,
                   cursor: "pointer",
-                  background: isActive ? "var(--bubble-user)" : "transparent",
-                  border: `1px solid ${isActive ? "var(--border)" : "transparent"}`,
+                  background: isActive
+                    ? "rgba(108, 214, 255, 0.08)"
+                    : "transparent",
+                  border: `1px solid ${
+                    isActive ? "var(--hud)" : "transparent"
+                  }`,
+                  boxShadow: isActive
+                    ? "0 0 0 1px var(--hud), 0 0 14px var(--orb-glow)"
+                    : "none",
                   display: "flex",
                   flexDirection: "column",
                   gap: 2,
                   position: "relative",
+                  transition: "background 160ms ease, border-color 160ms ease",
                 }}
               >
                 <div
                   style={{
                     fontSize: 13,
                     fontWeight: isActive ? 600 : 500,
+                    color: isActive ? "var(--fg)" : "var(--fg)",
                     overflow: "hidden",
                     textOverflow: "ellipsis",
                     whiteSpace: "nowrap",
@@ -133,15 +141,24 @@ export function ConversationSidebar({
                 </div>
                 <div
                   style={{
-                    fontSize: 11,
+                    fontSize: 10,
                     color: "var(--muted)",
                     display: "flex",
                     justifyContent: "space-between",
+                    fontFamily:
+                      'ui-monospace, SFMono-Regular, "JetBrains Mono", monospace',
+                    letterSpacing: 1,
                   }}
                 >
                   <span>{formatWhen(c.last_message_at ?? c.created_at)}</span>
                   {c.mode === "nightfall" ? (
-                    <span style={{ color: "var(--accent)", letterSpacing: 0.5 }}>
+                    <span
+                      style={{
+                        color: "var(--accent)",
+                        letterSpacing: 1.5,
+                        textShadow: "0 0 6px var(--accent-soft)",
+                      }}
+                    >
                       NIGHTFALL
                     </span>
                   ) : null}
@@ -159,8 +176,8 @@ export function ConversationSidebar({
                   title="Delete"
                   style={{
                     position: "absolute",
-                    right: 6,
-                    top: 6,
+                    right: 4,
+                    top: 4,
                     background: "transparent",
                     border: "none",
                     color: "var(--muted)",
@@ -168,7 +185,14 @@ export function ConversationSidebar({
                     fontSize: 14,
                     lineHeight: 1,
                     padding: "2px 6px",
-                    borderRadius: 4,
+                    borderRadius: 3,
+                    transition: "color 160ms ease",
+                  }}
+                  onMouseEnter={(e) => {
+                    e.currentTarget.style.color = "var(--danger)";
+                  }}
+                  onMouseLeave={(e) => {
+                    e.currentTarget.style.color = "var(--muted)";
                   }}
                 >
                   ×

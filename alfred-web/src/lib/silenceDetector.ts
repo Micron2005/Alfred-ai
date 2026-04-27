@@ -36,6 +36,13 @@ export interface SilenceDetectorOptions {
   /** Called once when silence has been detected long enough to stop. */
   onSilence: (reason: SilenceReason) => void;
   /**
+   * Optional: called every poll interval with the current RMS level
+   * (0..1). Lets a UI component (e.g. the JARVIS orb) react to mic
+   * amplitude without standing up its own AnalyserNode and racing
+   * for the same MediaStream. Cheap — just a function call per poll.
+   */
+  onLevel?: (rms: number) => void;
+  /**
    * RMS amplitude (0..1) below which a frame is considered silent.
    * Empirically ~0.012-0.020 for built-in laptop mics in a quiet room;
    * default 0.015 works well across the laptops we've tested on.
@@ -87,6 +94,7 @@ export function startSilenceDetector(
   const {
     stream,
     onSilence,
+    onLevel,
     silenceThreshold = 0.015,
     warmupMs = 500,
     trailingSilenceMs = 1500,
@@ -151,6 +159,7 @@ export function startSilenceDetector(
       sumSquares += buf[i] * buf[i];
     }
     const rms = Math.sqrt(sumSquares / buf.length);
+    if (onLevel) onLevel(rms);
     const elapsed = performance.now() - startedAt;
 
     // Hard cap always wins.

@@ -15,91 +15,144 @@ export function Message({ msg }: { msg: ChatMessageOut }) {
       style={{
         display: "flex",
         justifyContent: isUser ? "flex-end" : "flex-start",
-        marginBottom: 12,
+        marginBottom: 14,
       }}
     >
+      {/*
+        Wrapper holds the bubble + the four HUD corner brackets that
+        only appear on assistant turns (a touch of the Wayne Manor
+        warmth — drawn in the gold/amber accent). User turns get a
+        plainer cyan border to keep them visually subordinate.
+      */}
       <div
+        className={isUser ? undefined : "hud-corners"}
         style={{
           maxWidth: "80%",
-          padding: "10px 14px",
-          borderRadius: 12,
-          background: isUser ? "var(--bubble-user)" : "var(--bubble-assistant)",
-          border: "1px solid var(--border)",
-          boxShadow: "var(--shadow)",
-          whiteSpace: "pre-wrap",
-          lineHeight: 1.5,
-          display: "flex",
-          flexDirection: "column",
-          gap: images.length > 0 && msg.content ? 8 : 0,
+          position: "relative",
         }}
       >
-        {images.length > 0 && (
-          <div
-            style={{
-              display: "flex",
-              flexWrap: "wrap",
-              gap: 6,
-              maxWidth: "100%",
-            }}
-          >
-            {images.map((img, idx) => {
-              const src = `data:${img.mime_type};base64,${img.data}`;
-              return (
-                // eslint-disable-next-line @next/next/no-img-element
-                <img
-                  key={idx}
-                  src={src}
-                  alt="attached"
-                  style={{
-                    maxWidth: 240,
-                    maxHeight: 240,
-                    borderRadius: 8,
-                    border: "1px solid var(--border)",
-                    objectFit: "contain",
-                  }}
-                />
-              );
-            })}
-          </div>
+        {/* Two extra spans for the bottom corners — ::before/::after
+            already cover the top two via .hud-corners. */}
+        {!isUser && (
+          <>
+            <span className="hud-corner-bl" />
+            <span className="hud-corner-br" />
+          </>
         )}
-        {msg.content && <span>{msg.content}</span>}
-        {sources.length > 0 && (
+        <div
+          style={{
+            padding: "12px 16px",
+            borderRadius: 3,
+            background: isUser
+              ? "var(--bubble-user)"
+              : "var(--bubble-assistant)",
+            border: `1px solid ${
+              isUser ? "var(--border)" : "var(--border-warm)"
+            }`,
+            boxShadow: "var(--shadow)",
+            whiteSpace: "pre-wrap",
+            lineHeight: 1.55,
+            display: "flex",
+            flexDirection: "column",
+            gap: images.length > 0 && msg.content ? 8 : 0,
+            color: "var(--fg)",
+          }}
+        >
+          {/* Tiny role label in monospace */}
           <div
+            className="mono"
             style={{
-              marginTop: 8,
-              paddingTop: 8,
-              borderTop: "1px dashed var(--border)",
-              display: "flex",
-              flexDirection: "column",
-              gap: 4,
-              fontSize: 12,
-              opacity: 0.85,
+              fontSize: 9,
+              color: isUser ? "var(--hud)" : "var(--accent)",
+              opacity: 0.7,
+              marginBottom: 4,
+              letterSpacing: 2,
             }}
           >
-            <div style={{ fontWeight: 600, opacity: 0.7 }}>
-              🔎 Sources
+            {isUser ? "▸ YOU" : "◂ ALFRED"}
+          </div>
+          {images.length > 0 && (
+            <div
+              style={{
+                display: "flex",
+                flexWrap: "wrap",
+                gap: 6,
+                maxWidth: "100%",
+              }}
+            >
+              {images.map((img, idx) => {
+                const src = `data:${img.mime_type};base64,${img.data}`;
+                return (
+                  // eslint-disable-next-line @next/next/no-img-element
+                  <img
+                    key={idx}
+                    src={src}
+                    alt="attached"
+                    style={{
+                      maxWidth: 240,
+                      maxHeight: 240,
+                      borderRadius: 3,
+                      border: "1px solid var(--border)",
+                      objectFit: "contain",
+                    }}
+                  />
+                );
+              })}
             </div>
-            {sources.map((s, idx) => (
-              <a
-                key={`${s.url}-${idx}`}
-                href={s.url}
-                target="_blank"
-                rel="noopener noreferrer"
-                title={s.snippet}
+          )}
+          {msg.content && <span>{msg.content}</span>}
+          {sources.length > 0 && (
+            <div
+              style={{
+                marginTop: 10,
+                paddingTop: 8,
+                borderTop: "1px dashed var(--border-warm)",
+                display: "flex",
+                flexDirection: "column",
+                gap: 4,
+                fontSize: 12,
+              }}
+            >
+              <div
+                className="mono"
                 style={{
+                  fontSize: 10,
                   color: "var(--accent)",
-                  textDecoration: "none",
-                  whiteSpace: "nowrap",
-                  overflow: "hidden",
-                  textOverflow: "ellipsis",
-                  maxWidth: "100%",
+                  opacity: 0.85,
                 }}
               >
-                {s.title || s.url}
-              </a>
-            ))}
-          </div>
-        )}
+                ⟢ SOURCES
+              </div>
+              {sources.map((s, idx) => (
+                <a
+                  key={`${s.url}-${idx}`}
+                  href={s.url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  title={s.snippet}
+                  style={{
+                    color: "var(--accent)",
+                    textDecoration: "none",
+                    whiteSpace: "nowrap",
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                    maxWidth: "100%",
+                    transition: "color 160ms ease, text-shadow 160ms ease",
+                  }}
+                  onMouseEnter={(e) => {
+                    e.currentTarget.style.textShadow =
+                      "0 0 8px var(--accent-soft)";
+                  }}
+                  onMouseLeave={(e) => {
+                    e.currentTarget.style.textShadow = "none";
+                  }}
+                >
+                  {s.title || s.url}
+                </a>
+              ))}
+            </div>
+          )}
+        </div>
       </div>
     </div>
   );
