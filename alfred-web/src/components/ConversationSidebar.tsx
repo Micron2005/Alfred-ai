@@ -9,6 +9,10 @@ interface Props {
   onNewChat: () => void;
   onDelete: (id: string) => void;
   busy?: boolean;
+  /** When ``true`` the sidebar collapses to a thin rail with just an
+   * expand button — gives the chat the full window width. */
+  collapsed?: boolean;
+  onToggleCollapsed?: () => void;
 }
 
 function formatWhen(iso: string | null): string {
@@ -34,7 +38,55 @@ export function ConversationSidebar({
   onNewChat,
   onDelete,
   busy,
+  collapsed = false,
+  onToggleCollapsed,
 }: Props) {
+  if (collapsed) {
+    // Thin rail mode — only the expand chevron + a quick "+ NEW"
+    // shortcut so the user can still start a new conversation
+    // without first re-opening the panel. Designed to be ~32 px wide
+    // so the chat reclaims essentially the whole window.
+    return (
+      <aside
+        style={{
+          width: 32,
+          borderRight: "1px solid var(--border)",
+          background: "var(--bg-elev)",
+          display: "flex",
+          flexDirection: "column",
+          alignItems: "center",
+          height: "100vh",
+          position: "sticky",
+          top: 0,
+          padding: "12px 0",
+          gap: 8,
+          boxShadow: "inset -1px 0 0 rgba(108, 214, 255, 0.04)",
+        }}
+      >
+        <button
+          type="button"
+          className="hud-button hud-button--icon"
+          onClick={onToggleCollapsed}
+          title="Show conversation archive"
+          aria-label="Show conversation archive"
+          style={{ minWidth: 24, padding: "4px 6px", fontSize: 12 }}
+        >
+          ☰
+        </button>
+        <button
+          type="button"
+          className="hud-button hud-button--icon"
+          onClick={onNewChat}
+          disabled={busy}
+          title="Start a new conversation"
+          aria-label="Start a new conversation"
+          style={{ minWidth: 24, padding: "4px 6px", fontSize: 12 }}
+        >
+          +
+        </button>
+      </aside>
+    );
+  }
   return (
     <aside
       style={{
@@ -66,8 +118,23 @@ export function ConversationSidebar({
             fontSize: 10,
             color: "var(--muted)",
             opacity: 0.85,
+            display: "flex",
+            alignItems: "center",
+            gap: 6,
           }}
         >
+          {onToggleCollapsed ? (
+            <button
+              type="button"
+              className="hud-button hud-button--icon"
+              onClick={onToggleCollapsed}
+              title="Hide conversation archive"
+              aria-label="Hide conversation archive"
+              style={{ minWidth: 22, padding: "2px 5px", fontSize: 11 }}
+            >
+              ◀
+            </button>
+          ) : null}
           ⟢ ARCHIVES
         </span>
         <button

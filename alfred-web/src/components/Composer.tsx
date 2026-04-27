@@ -596,9 +596,14 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
           rows={2}
           disabled={disabled || micBusy}
           className="hud-textarea"
+          // Native vertical resize handle on the bottom-right corner
+          // — drag it to give yourself room for longer messages.
+          // Bounded so the textarea can't eat the entire viewport.
           style={{
             flex: 1,
-            resize: "none",
+            resize: "vertical",
+            minHeight: 44,
+            maxHeight: "60vh",
             padding: "10px 12px",
             borderRadius: 3,
             border: "1px solid var(--border)",

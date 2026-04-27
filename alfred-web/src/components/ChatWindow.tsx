@@ -29,6 +29,7 @@ const VOICE_OUT_KEY = "alfred.voiceOutEnabled";
 const HANDS_FREE_KEY = "alfred.handsFreeEnabled";
 const CAMERA_KEY = "alfred.cameraEnabled";
 const FULL_HUD_KEY = "alfred.fullHudEnabled";
+const SIDEBAR_COLLAPSED_KEY = "alfred.sidebarCollapsed";
 
 // Use ``||`` (not ``??``) so an empty-string value from Docker Compose
 // — which is what `${NEXT_PUBLIC_WAKE_KEYWORD}` expands to when the
@@ -54,6 +55,11 @@ export function ChatWindow() {
   const [handsFree, setHandsFree] = useState(false);
   const [cameraOn, setCameraOn] = useState(false);
   const [fullHud, setFullHud] = useState(false);
+  // Default ``true`` (collapsed) — most users with a single
+  // conversation don't need the archive panel taking up screen real
+  // estate. The toggle is sticky so anyone who wants it expanded
+  // only has to click once.
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(true);
   const [recording, setRecording] = useState(false);
   const [speaking, setSpeaking] = useState(false);
   const endRef = useRef<HTMLDivElement>(null);
@@ -75,6 +81,10 @@ export function ChatWindow() {
     setHandsFree(localStorage.getItem(HANDS_FREE_KEY) === "1");
     setCameraOn(localStorage.getItem(CAMERA_KEY) === "1");
     setFullHud(localStorage.getItem(FULL_HUD_KEY) === "1");
+    // ``null`` falls through to the default (collapsed) so first-time
+    // users get the cleaner layout out of the box.
+    const stored = localStorage.getItem(SIDEBAR_COLLAPSED_KEY);
+    if (stored !== null) setSidebarCollapsed(stored === "1");
   }, []);
 
   const wake = useWakeWord({
@@ -152,6 +162,16 @@ export function ChatWindow() {
     if (typeof window !== "undefined") {
       localStorage.setItem(FULL_HUD_KEY, enabled ? "1" : "0");
     }
+  }
+
+  function toggleSidebar() {
+    setSidebarCollapsed((prev) => {
+      const next = !prev;
+      if (typeof window !== "undefined") {
+        localStorage.setItem(SIDEBAR_COLLAPSED_KEY, next ? "1" : "0");
+      }
+      return next;
+    });
   }
 
   // Capture the current frame and slot it into the composer's pending
@@ -453,6 +473,8 @@ export function ChatWindow() {
         onNewChat={handleNewChat}
         onDelete={(id) => void handleDelete(id)}
         busy={busy || loadingConvo}
+        collapsed={sidebarCollapsed}
+        onToggleCollapsed={toggleSidebar}
       />
 
       <div
@@ -460,7 +482,10 @@ export function ChatWindow() {
           flex: 1,
           display: "flex",
           flexDirection: "column",
-          maxWidth: 920,
+          // Chat reads naturally at ~920 px wide — bump that ceiling
+          // a little when the sidebar is collapsed so the reclaimed
+          // width isn't entirely dead space on either side.
+          maxWidth: sidebarCollapsed ? 1100 : 920,
           margin: "0 auto",
           padding: "0 24px 16px",
           width: "100%",

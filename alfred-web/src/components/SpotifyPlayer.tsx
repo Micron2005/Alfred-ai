@@ -43,6 +43,13 @@ interface SpotifyPlayerProps {
  */
 export function SpotifyPlayer({ nightfall }: SpotifyPlayerProps) {
   const [status, setStatus] = useState<SpotifyStatus | null>(null);
+  // ``statusError`` is a separate state from the existing inline
+  // ``error`` so an early-stage status fetch failure can render a
+  // visible "SPOTIFY · ERROR" pill rather than leaving the widget
+  // completely invisible (the bug previously was that ``status``
+  // stayed ``null`` after a failed fetch and the early-return below
+  // unmounted the entire widget).
+  const [statusError, setStatusError] = useState<string | null>(null);
   const [track, setTrack] = useState<SpotifyTrack | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -81,9 +88,12 @@ export function SpotifyPlayer({ nightfall }: SpotifyPlayerProps) {
 
   const refreshStatus = useCallback(async () => {
     try {
-      setStatus(await getSpotifyStatus());
+      const next = await getSpotifyStatus();
+      setStatus(next);
+      setStatusError(null);
     } catch (exc) {
       const message = exc instanceof Error ? exc.message : String(exc);
+      setStatusError(message);
       setError(message);
     }
   }, []);
@@ -482,7 +492,34 @@ export function SpotifyPlayer({ nightfall }: SpotifyPlayerProps) {
   // ─── Render ──────────────────────────────────────────────────────
 
   if (!status) {
-    return null; // initial load: don't flash a Connect button before status resolves
+    if (statusError) {
+      // Failed to reach the backend — render a visible pill rather
+      // than the silent ``null`` of before. Users were ending up
+      // wondering why the Spotify widget had completely vanished.
+      return (
+        <div className="hud-spotify hud-spotify--unconfigured">
+          <span className="hud-spotify__label">
+            SPOTIFY · ERROR · {statusError}
+          </span>
+          <button
+            type="button"
+            className="hud-button hud-button--icon"
+            onClick={() => void refreshStatus()}
+            title="Retry status"
+            aria-label="Retry Spotify status"
+          >
+            ↻
+          </button>
+        </div>
+      );
+    }
+    // Brief loading window — render a placeholder pill instead of
+    // ``null`` so the column doesn't visibly collapse and reflow.
+    return (
+      <div className="hud-spotify hud-spotify--unconfigured">
+        <span className="hud-spotify__label">SPOTIFY · LOADING…</span>
+      </div>
+    );
   }
 
   if (!status.configured) {
