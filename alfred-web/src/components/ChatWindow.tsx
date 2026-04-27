@@ -87,15 +87,29 @@ export function ChatWindow() {
   function stopCurrentAudio() {
     const prev = audioRef.current;
     if (!prev) return;
+    // Detach the ended/error handlers so the cleanup we're about to
+    // fire manually doesn't get re-fired by a delayed ``ended`` event
+    // bubbling out of pause() on some browsers.
+    prev.onended = null;
+    prev.onerror = null;
     prev.pause();
-    if (prev.src) URL.revokeObjectURL(prev.src);
-    audioRef.current = null;
-    // Fire the cleanup hook installed by ``speak`` (analyser timer +
-    // AudioContext close + orb speaking-hold release). Safe to call
-    // even if no TTS is in flight — null-checked.
+    // Fire the cleanup hook installed by ``speak`` BEFORE nulling
+    // ``audioRef.current``. The cleanup closure guards its state-
+    // clearing on ``audioRef.current === audio`` to prevent stale
+    // callbacks from a previous TTS clobbering newer state — but
+    // that means we have to leave the ref pointing at the audio
+    // we're tearing down until *after* cleanup runs, otherwise the
+    // guard fails (null !== audio) and the orb's "speaking" hold
+    // never gets released → orb stuck pulsing forever.
     const cleanup = audioCleanupRef.current;
     audioCleanupRef.current = null;
     if (cleanup) cleanup();
+    // Safety net for the case where no cleanup was registered
+    // (e.g. speak() threw before ``audioCleanupRef`` was set).
+    // Cleanup itself already nulls audioRef.current on the happy
+    // path, so the ``=== prev`` check avoids stomping on a newer
+    // audio element that was assigned in the meantime.
+    if (audioRef.current === prev) audioRef.current = null;
   }
 
   function setVoiceOutPersisted(enabled: boolean) {
