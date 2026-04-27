@@ -585,26 +585,6 @@ export function ChatWindow() {
           onMicStateChange={setRecording}
         />
       </div>
-
-      {/*
-        Hidden <video> for the camera feed. We don't render the live
-        preview to the user — the chat header's face count is enough
-        ambient feedback. Keep ``playsInline`` + ``muted`` so iOS
-        Safari and Chrome let it autoplay without user gesture once the
-        stream is attached. ``aria-hidden`` so screen readers ignore it.
-      */}
-      <video
-        // useRef<T>(null) yields RefObject<T | null>, which the
-        // installed @types/react (v18 against a v19-rc react) refuses
-        // to accept as a video element ref. The runtime contract is
-        // identical — a current that may be null until mount — so
-        // cast it through the type the JSX prop expects.
-        ref={camera.videoRef as React.RefObject<HTMLVideoElement>}
-        playsInline
-        muted
-        aria-hidden
-        style={{ display: "none" }}
-      />
     </>
   );
 
@@ -816,6 +796,28 @@ export function ChatWindow() {
           <SpotifyPlayer nightfall={mode === "nightfall"} />
         </div>
 
+        {/*
+          Hidden <video> for the camera feed. Kept in the main pane
+          (always rendered) rather than inside ``chatPane`` so that
+          collapsing the sidebar or switching to the ARCHIVES tab
+          doesn't unmount the element — that would null out
+          ``camera.videoRef.current`` and silently break face
+          detection without re-running ``useCamera``'s setup effect.
+          ``display:none`` + ``aria-hidden`` keep it out of the
+          layout and out of the accessibility tree.
+        */}
+        <video
+          // useRef<T>(null) yields RefObject<T | null>, which the
+          // installed @types/react (v18 against a v19-rc react)
+          // refuses to accept as a video element ref. The runtime
+          // contract is identical — a current that may be null until
+          // mount — so cast it through the type the JSX prop expects.
+          ref={camera.videoRef as React.RefObject<HTMLVideoElement>}
+          playsInline
+          muted
+          aria-hidden
+          style={{ display: "none" }}
+        />
       </div>
     </div>
   );
