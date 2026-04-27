@@ -10,14 +10,16 @@
  * shape, the localStorage persistence, and the React hook that
  * components subscribe to.
  *
- * Two-tier model:
- * 1. ``customEnabled`` — when ``false`` (the default for everyone
- *    until they click 🎛 CUSTOMIZE), widgets render in their
- *    out-of-the-box flow positions. This keeps the HUD looking
- *    correct for users who never touch the customize feature.
- * 2. ``customEnabled = true`` — widgets render absolutely positioned
- *    at ``layout[id].{x, y, w, h}``, and ``editMode`` controls
- *    whether the drag/resize/hide handles are visible.
+ * Single-toggle model (refined per user feedback after the first
+ * customize-HUD ship): ``customEnabled`` is the only state that
+ * matters. When ``false`` (the default), widgets render in their
+ * out-of-the-box flow positions. When ``true``, widgets render
+ * absolutely positioned at ``layout[id].{x, y, w, h}`` and the
+ * drag/resize/hide affordances are *always available* — the user
+ * doesn't have to enter a separate "edit mode" to interact with
+ * them. This was the main UX gripe with v1: the user had a
+ * touchscreen and wanted to grab widgets directly with a finger
+ * without clicking a separate "Customize" button first.
  *
  * Hidden widgets (``visible: false``) reappear as small "show" chips
  * in the customize toolbar so users can re-add them without
@@ -168,13 +170,10 @@ function getServerSnapshot(): HudLayoutState {
 
 export interface HudLayoutAPI {
   /** ``true`` means widgets render at their saved {x,y,w,h}
-   *  positions; ``false`` means default flow layout. */
+   *  positions and drag/resize/hide handles are visible; ``false``
+   *  means the default flow layout with no customize affordances. */
   customEnabled: boolean;
   setCustomEnabled: (enabled: boolean) => void;
-  /** ``true`` shows the per-widget drag/resize/hide handles. Only
-   *  meaningful when ``customEnabled`` is also ``true``. */
-  editMode: boolean;
-  setEditMode: (on: boolean) => void;
   layout: HudLayoutState;
   /** Patch a single widget's layout (e.g. during a drag). */
   updateWidget: (id: HudWidgetId, patch: Partial<WidgetLayout>) => void;
@@ -191,12 +190,9 @@ export interface HudLayoutAPI {
 export function useHudLayout(): HudLayoutAPI {
   const layout = useSyncExternalStore(subscribe, getSnapshot, getServerSnapshot);
 
-  // ``customEnabled`` and ``editMode`` are component-local React
-  // state because they're cheap and don't need cross-component
-  // synchronisation. (Edit mode in particular is meant to be opened
-  // from the header button only.)
+  // ``customEnabled`` is component-local React state because it's
+  // cheap and doesn't need cross-component synchronisation.
   const [customEnabled, setCustomEnabledState] = useState(false);
-  const [editMode, setEditMode] = useState(false);
   useEffect(() => {
     setCustomEnabledState(readEnabled());
   }, []);
@@ -204,7 +200,6 @@ export function useHudLayout(): HudLayoutAPI {
   function setCustomEnabled(enabled: boolean) {
     setCustomEnabledState(enabled);
     writeEnabled(enabled);
-    if (!enabled) setEditMode(false);
   }
 
   function updateWidget(id: HudWidgetId, patch: Partial<WidgetLayout>) {
@@ -231,8 +226,6 @@ export function useHudLayout(): HudLayoutAPI {
   return {
     customEnabled,
     setCustomEnabled,
-    editMode,
-    setEditMode,
     layout,
     updateWidget,
     hideWidget,

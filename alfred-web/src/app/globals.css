@@ -632,6 +632,24 @@ input {
   color: var(--muted);
   letter-spacing: 1px;
 }
+/* "+N" overflow pill shown at the right edge when the forecast strip
+ * is too narrow to render every day in the response. Pinned over the
+ * last visible cell rather than taking its own grid column so the
+ * day cells use the full width. */
+.hud-forecast__overflow {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  font-family:
+    ui-monospace, SFMono-Regular, "JetBrains Mono", "Fira Code", monospace;
+  font-size: 9px;
+  letter-spacing: 1px;
+  padding: 2px 5px;
+  border-radius: 2px;
+  background: rgba(108, 214, 255, 0.12);
+  color: var(--hud);
+  pointer-events: none;
+}
 
 /* Compact transport buttons inside the Spotify widget. The base
  * ``.hud-button`` is wider than a glyph; the icon variant tightens
