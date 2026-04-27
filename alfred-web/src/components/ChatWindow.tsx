@@ -79,37 +79,37 @@ export function ChatWindow() {
 
   const camera = useCamera({ enabled: cameraOn });
 
-  // ``stopCurrentAudio`` is also invoked from inside ``speak`` right
-  // before assigning the new audio element, so it must NOT clear the
-  // ``speaking`` flag — at that point the new TTS is already on its
-  // way. Callers that want playback fully halted (toggle voice off,
-  // ChatGPT-style "stop") should call ``setSpeaking(false)`` themselves.
+  // Tears down the in-flight TTS pipeline (paused audio, analyser
+  // graph, object URL, RAF timer) but deliberately does NOT clear
+  // the ``speaking`` state — that's the caller's responsibility,
+  // because there are two distinct call patterns:
+  //
+  //   1. ``speak()`` calls this right before kicking off a new TTS
+  //      (replacing an in-flight one). ``speaking`` must stay true
+  //      across the swap so the wake-word effect doesn't briefly
+  //      resume the mic and self-trigger off Alfred's own voice.
+  //   2. ``setVoiceOutPersisted(false)`` calls this to fully halt
+  //      playback. ``speaking`` should drop to false; the caller
+  //      handles that explicitly below.
+  //
+  // The natural end-of-playback path doesn't go through here at all
+  // — ``audio.onended`` runs the resource cleanup and clears
+  // ``speaking`` directly.
   function stopCurrentAudio() {
     const prev = audioRef.current;
     if (!prev) return;
-    // Detach the ended/error handlers so the cleanup we're about to
-    // fire manually doesn't get re-fired by a delayed ``ended`` event
-    // bubbling out of pause() on some browsers.
+    // Detach handlers so a delayed ``ended`` from pause() on some
+    // browsers doesn't double-fire the cleanup we're about to run
+    // manually.
     prev.onended = null;
     prev.onerror = null;
     prev.pause();
-    // Fire the cleanup hook installed by ``speak`` BEFORE nulling
-    // ``audioRef.current``. The cleanup closure guards its state-
-    // clearing on ``audioRef.current === audio`` to prevent stale
-    // callbacks from a previous TTS clobbering newer state — but
-    // that means we have to leave the ref pointing at the audio
-    // we're tearing down until *after* cleanup runs, otherwise the
-    // guard fails (null !== audio) and the orb's "speaking" hold
-    // never gets released → orb stuck pulsing forever.
+    // Resource cleanup only — does not touch ``speaking`` or the
+    // orb store. See the contract comment above.
     const cleanup = audioCleanupRef.current;
     audioCleanupRef.current = null;
+    audioRef.current = null;
     if (cleanup) cleanup();
-    // Safety net for the case where no cleanup was registered
-    // (e.g. speak() threw before ``audioCleanupRef`` was set).
-    // Cleanup itself already nulls audioRef.current on the happy
-    // path, so the ``=== prev`` check avoids stomping on a newer
-    // audio element that was assigned in the meantime.
-    if (audioRef.current === prev) audioRef.current = null;
   }
 
   function setVoiceOutPersisted(enabled: boolean) {
@@ -119,7 +119,11 @@ export function ChatWindow() {
     }
     if (!enabled) {
       stopCurrentAudio();
+      // ``stopCurrentAudio`` deliberately leaves ``speaking`` alone
+      // (see its contract). Clear it here so the orb returns to idle
+      // and the wake-word effect resumes listening.
       setSpeaking(false);
+      orbStore.setHold("speaking", false);
     }
   }
 
@@ -229,16 +233,15 @@ export function ChatWindow() {
       // moment playback ends or errors so the next idle window resumes.
       // Guard the setter so a stale ended/error from a previous play
       // doesn't clobber the flag for a newer one already in flight.
+      // Resource cleanup only — does NOT clear ``speaking`` state.
+      // The end-of-playback handlers (and ``setVoiceOutPersisted``)
+      // clear ``speaking`` themselves; ``stopCurrentAudio`` calls
+      // this when chaining a new TTS and must not clear it.
       const cleanup = () => {
         URL.revokeObjectURL(objectUrl);
         if (levelTimer !== null) {
           clearInterval(levelTimer);
           levelTimer = null;
-        }
-        if (audioRef.current === audio) {
-          audioRef.current = null;
-          setSpeaking(false);
-          orbStore.setHold("speaking", false);
         }
         if (audioCtx) {
           void audioCtx.close().catch(() => {
@@ -247,8 +250,20 @@ export function ChatWindow() {
           audioCtx = null;
         }
       };
-      audio.onended = cleanup;
-      audio.onerror = cleanup;
+      // End-of-playback: free resources, then drop the speaking
+      // state. Guarded against a stale event from a replaced audio
+      // by checking ``audioRef.current === audio`` — if a newer
+      // TTS already took over, leave its state alone.
+      const finishPlayback = () => {
+        cleanup();
+        if (audioRef.current === audio) {
+          audioRef.current = null;
+          setSpeaking(false);
+          orbStore.setHold("speaking", false);
+        }
+      };
+      audio.onended = finishPlayback;
+      audio.onerror = finishPlayback;
       // Expose the cleanup hook so ``stopCurrentAudio`` (e.g. user
       // toggles voice off mid-reply) tears down the analyser graph
       // even though pause() doesn't fire ``ended``.
