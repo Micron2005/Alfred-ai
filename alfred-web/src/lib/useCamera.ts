@@ -68,6 +68,14 @@ export interface UseCameraReturn {
    */
   videoRef: React.RefObject<HTMLVideoElement | null>;
   /**
+   * The active ``MediaStream`` (or ``null`` if the camera isn't on).
+   * Exposed so a visible preview ``<video>`` can attach the same
+   * stream as ``srcObject`` without disturbing the hidden detection
+   * pipeline. Multiple ``<video>`` elements can render the same
+   * stream simultaneously.
+   */
+  streamRef: React.RefObject<MediaStream | null>;
+  /**
    * Capture the most recent frame as a JPEG. Returns ``null`` if the
    * camera isn't ready (e.g. the user hasn't toggled it on yet).
    */
@@ -264,7 +272,7 @@ export function useCamera(opts: UseCameraOptions): UseCameraReturn {
   }, [faceCount]);
 
   return useMemo(
-    () => ({ status, error, faceCount, videoRef, captureFrame }),
+    () => ({ status, error, faceCount, videoRef, streamRef, captureFrame }),
     [status, error, faceCount, captureFrame],
   );
 }
