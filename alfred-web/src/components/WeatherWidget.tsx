@@ -1,15 +1,11 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useForecast } from "@/lib/useForecast";
 import {
-  type WeatherForecast,
-  fetchForecast,
   formatForecastDay,
   localIsoDate,
   weatherIcon,
 } from "@/lib/weather";
-
-const REFRESH_MS = 60_000;
 
 // HUD-side weather widget. Two parts:
 //
@@ -18,44 +14,13 @@ const REFRESH_MS = 60_000;
 //     HUD layout.
 //   - The 7-day forecast strip rendered below the orb.
 //
-// Both share the same fetched payload — splitting the JSX rather than
-// the data lets us position the two halves independently in the HUD
-// grid without coupling them or making two HTTP requests.
+// Both variants subscribe to the shared ``useForecast`` hook, which
+// keeps a single module-level cache + polling interval no matter how
+// many <WeatherWidget> instances are mounted. So mounting both panes
+// at once is exactly one HTTP request per refresh, and the two halves
+// can never display inconsistent data.
 export function WeatherWidget({ variant }: { variant: "current" | "strip" }) {
-  const [forecast, setForecast] = useState<WeatherForecast | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  // Cache the last successful payload across refreshes so a transient
-  // Open-Meteo blip doesn't blank the widget. The error is only
-  // surfaced if we have NO data at all.
-  const lastGoodRef = useRef<WeatherForecast | null>(null);
-
-  useEffect(() => {
-    let cancelled = false;
-    const tick = async () => {
-      try {
-        const data = await fetchForecast();
-        if (cancelled) return;
-        lastGoodRef.current = data;
-        setForecast(data);
-        setError(null);
-      } catch (exc) {
-        if (cancelled) return;
-        // Keep the last-good payload visible so the HUD doesn't blank
-        // out on a transient hiccup. Only show the inline error when
-        // we've never had data to display.
-        if (!lastGoodRef.current) {
-          const message = exc instanceof Error ? exc.message : String(exc);
-          setError(message);
-        }
-      }
-    };
-    void tick();
-    const interval = setInterval(() => void tick(), REFRESH_MS);
-    return () => {
-      cancelled = true;
-      clearInterval(interval);
-    };
-  }, []);
+  const { data: forecast, error } = useForecast();
 
   if (error && !forecast) {
     return variant === "current" ? (

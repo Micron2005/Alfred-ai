@@ -4,6 +4,8 @@
 // The backend caches Open-Meteo for 10 minutes, so the widget can
 // poll once per minute or so without worry.
 
+import { API_BASE } from "@/lib/api";
+
 export interface DailyForecast {
   date: string;
   weather_code: number;
@@ -26,7 +28,7 @@ export interface WeatherForecast {
 }
 
 export async function fetchForecast(): Promise<WeatherForecast> {
-  const res = await fetch("/api/weather/forecast", {
+  const res = await fetch(`${API_BASE}/api/weather/forecast`, {
     cache: "no-store",
   });
   if (!res.ok) {
