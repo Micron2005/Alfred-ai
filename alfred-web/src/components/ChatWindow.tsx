@@ -5,6 +5,8 @@ import { ModeIndicator } from "@/components/ModeIndicator";
 import { Message } from "@/components/Message";
 import { Composer, type ComposerHandle } from "@/components/Composer";
 import { ConversationSidebar } from "@/components/ConversationSidebar";
+import { Clock } from "@/components/Clock";
+import { WeatherWidget } from "@/components/WeatherWidget";
 import {
   type ChatImage,
   type ChatMessageOut,
@@ -26,6 +28,7 @@ const ACTIVE_CONVO_KEY = "alfred.activeConversationId";
 const VOICE_OUT_KEY = "alfred.voiceOutEnabled";
 const HANDS_FREE_KEY = "alfred.handsFreeEnabled";
 const CAMERA_KEY = "alfred.cameraEnabled";
+const FULL_HUD_KEY = "alfred.fullHudEnabled";
 
 // Use ``||`` (not ``??``) so an empty-string value from Docker Compose
 // — which is what `${NEXT_PUBLIC_WAKE_KEYWORD}` expands to when the
@@ -50,6 +53,7 @@ export function ChatWindow() {
   const [voiceOut, setVoiceOut] = useState(false);
   const [handsFree, setHandsFree] = useState(false);
   const [cameraOn, setCameraOn] = useState(false);
+  const [fullHud, setFullHud] = useState(false);
   const [recording, setRecording] = useState(false);
   const [speaking, setSpeaking] = useState(false);
   const endRef = useRef<HTMLDivElement>(null);
@@ -70,6 +74,7 @@ export function ChatWindow() {
     setVoiceOut(localStorage.getItem(VOICE_OUT_KEY) === "1");
     setHandsFree(localStorage.getItem(HANDS_FREE_KEY) === "1");
     setCameraOn(localStorage.getItem(CAMERA_KEY) === "1");
+    setFullHud(localStorage.getItem(FULL_HUD_KEY) === "1");
   }, []);
 
   const wake = useWakeWord({
@@ -139,6 +144,13 @@ export function ChatWindow() {
     setCameraOn(enabled);
     if (typeof window !== "undefined") {
       localStorage.setItem(CAMERA_KEY, enabled ? "1" : "0");
+    }
+  }
+
+  function setFullHudPersisted(enabled: boolean) {
+    setFullHud(enabled);
+    if (typeof window !== "undefined") {
+      localStorage.setItem(FULL_HUD_KEY, enabled ? "1" : "0");
     }
   }
 
@@ -566,9 +578,35 @@ export function ChatWindow() {
                 👁 LOOK
               </button>
             ) : null}
+            <button
+              type="button"
+              className="hud-button"
+              onClick={() => setFullHudPersisted(!fullHud)}
+              aria-pressed={fullHud}
+              title={
+                fullHud
+                  ? "Switch to compact view"
+                  : "Switch to the full JARVIS HUD with clock + weather"
+              }
+            >
+              {fullHud ? "🛰 HUD · FULL" : "🛰 HUD · COMPACT"}
+            </button>
             <ModeIndicator mode={mode} />
           </div>
         </header>
+
+        {/*
+          Full-HUD telemetry pane. Holds the monospace clock (top-left)
+          and the current-weather card (top-right). Only mounted when
+          the user has flipped the HUD toggle on, so the polling and
+          interval timers in those widgets don't run otherwise.
+        */}
+        {fullHud ? (
+          <div className="hud-telemetry">
+            <Clock />
+            <WeatherWidget variant="current" />
+          </div>
+        ) : null}
 
         {/*
           Centerpiece: the JARVIS orb. Reacts to mode (idle / listening
@@ -583,6 +621,13 @@ export function ChatWindow() {
         >
           <Orb size={180} caption={orbCaption} />
         </div>
+
+        {/*
+          7-day forecast strip — only in full-HUD mode. Sits between the
+          orb and the Spotify widget so the JARVIS-style telemetry runs
+          continuously down the page.
+        */}
+        {fullHud ? <WeatherWidget variant="strip" /> : null}
 
         {/*
           Spotify HUD widget: spectrum visualizer + now-playing card +

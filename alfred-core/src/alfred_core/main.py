@@ -17,6 +17,7 @@ from alfred_core.api import (
     health,
     spotify,
     voice,
+    weather,
 )
 from alfred_core.db.session import init_db
 
@@ -49,6 +50,7 @@ app.include_router(conversations.router)
 app.include_router(voice.router)
 app.include_router(email.router)
 app.include_router(spotify.router)
+app.include_router(weather.router)
 
 
 @app.get("/")

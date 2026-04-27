@@ -13,6 +13,10 @@ import {
   getNowPlaying,
   getSpotifyStatus,
   loadSpotifySdk,
+  nextSpotifyTrack,
+  pauseSpotify,
+  playSpotify,
+  previousSpotifyTrack,
   startSpotifyAuth,
   transferPlayback,
 } from "@/lib/spotify";
@@ -63,6 +67,15 @@ export function SpotifyPlayer({ nightfall }: SpotifyPlayerProps) {
     capturedAt: performance.now(),
     isPlaying: false,
   });
+  // Real-audio (tab-capture) state. ``liveAnalyserRef`` is read by the
+  // RAF loop without a dep change, so storing the analyser in a ref
+  // keeps the RAF effect stable. ``liveAudioState`` is just for UI.
+  const liveAnalyserRef = useRef<AnalyserNode | null>(null);
+  const liveStreamRef = useRef<MediaStream | null>(null);
+  const liveContextRef = useRef<AudioContext | null>(null);
+  const [liveAudioState, setLiveAudioState] = useState<
+    "off" | "starting" | "live" | "denied"
+  >("off");
 
   // ─── Status + post-OAuth refresh ──────────────────────────────────
 
@@ -250,18 +263,32 @@ export function SpotifyPlayer({ nightfall }: SpotifyPlayerProps) {
 
   // ─── Visualizer RAF loop ─────────────────────────────────────────
   //
-  // Renders 12 bars driven by the current segment's pitch envelope,
-  // smoothed against the previous frame so they don't pop. When no
-  // analysis is available (or nothing is playing) the bars decay to
-  // an idle floor.
+  // Renders 12 bars from one of three sources, in priority order:
+  //
+  //   1. ``liveAnalyserRef`` — a real Web Audio analyser fed by tab-
+  //      capture. Genuinely tracks whatever Spotify is playing.
+  //   2. ``analysisRef`` — Spotify's audio-analysis API. Spotify
+  //      deprecated this endpoint for new dev apps in Nov 2024, so
+  //      this branch only fires for grandfathered apps.
+  //   3. A synthetic per-band sine envelope keyed to the current
+  //      playhead. Not actually reactive, but moves in a believably
+  //      musical shape so the widget doesn't sit dead.
+  //
+  // All three pass through the same low-pass smoother before being
+  // committed to React state.
 
   useEffect(() => {
     let raf = 0;
     let prev: Bars = Array(BAR_COUNT).fill(0.05);
     const idleFloor = 0.04;
     const smoothing = 0.6; // higher = smoother, less reactive
+    // Backed by an explicit ArrayBuffer (rather than the default
+    // ArrayBufferLike) so TS accepts it as the parameter to
+    // ``getByteFrequencyData`` under recent DOM lib types.
+    const liveBuffer = new Uint8Array(new ArrayBuffer(BAR_COUNT * 4));
     const tick = () => {
       const analysis = analysisRef.current?.data;
+      const liveAnalyser = liveAnalyserRef.current;
       const { ms, capturedAt, isPlaying } = progressRef.current;
       // Estimate current track position in seconds: snapshot ms +
       // wall-clock delta since the snapshot, but only while playing.
@@ -269,9 +296,14 @@ export function SpotifyPlayer({ nightfall }: SpotifyPlayerProps) {
         ? (ms + (performance.now() - capturedAt)) / 1000
         : ms / 1000;
       let target: Bars;
-      if (analysis && analysis.segments.length > 0 && isPlaying) {
+      if (liveAnalyser && isPlaying) {
+        target = sampleAnalyser(liveAnalyser, liveBuffer);
+      } else if (analysis && analysis.segments.length > 0 && isPlaying) {
         const seg = findSegment(analysis.segments, elapsed);
         target = pitchesToBars(seg.pitches, seg.loudness_max);
+      } else if (isPlaying) {
+        // Synthetic fallback — looks musical even though it isn't.
+        target = syntheticBars(elapsed);
       } else {
         target = Array(BAR_COUNT).fill(idleFloor);
       }
@@ -329,6 +361,124 @@ export function SpotifyPlayer({ nightfall }: SpotifyPlayerProps) {
     }
   };
 
+  // Manual transport controls. We always go through the backend so
+  // these work regardless of which Spotify Connect device is currently
+  // active (Alfred-in-browser, phone, desktop app, etc).
+  //
+  // Optimistic-update the SDK state when Alfred is the active device
+  // so the play/pause icon flips immediately rather than waiting for
+  // the SDK's player_state_changed event to fire.
+  const runTransport = useCallback(
+    async (action: () => Promise<unknown>, optimistic?: () => void) => {
+      if (busy) return;
+      setBusy(true);
+      setError(null);
+      optimistic?.();
+      try {
+        await action();
+      } catch (exc) {
+        const message = exc instanceof Error ? exc.message : String(exc);
+        setError(message);
+      } finally {
+        setBusy(false);
+      }
+    },
+    [busy],
+  );
+
+  const isPlaying = sdkState ? !sdkState.paused : !!track?.is_playing;
+
+  const onTogglePlay = () =>
+    runTransport(
+      () => (isPlaying ? pauseSpotify() : playSpotify()),
+      () => {
+        if (sdkState) {
+          setSdkState({ ...sdkState, paused: isPlaying });
+        }
+      },
+    );
+
+  const onNext = () => runTransport(() => nextSpotifyTrack());
+
+  const onPrevious = () => runTransport(() => previousSpotifyTrack());
+
+  // Stop tab-capture and tear down the analyser graph. Idempotent.
+  const stopLiveAudio = useCallback(() => {
+    if (liveStreamRef.current) {
+      for (const t of liveStreamRef.current.getTracks()) t.stop();
+      liveStreamRef.current = null;
+    }
+    if (liveContextRef.current) {
+      void liveContextRef.current.close().catch(() => {});
+      liveContextRef.current = null;
+    }
+    liveAnalyserRef.current = null;
+    setLiveAudioState("off");
+  }, []);
+
+  // Request tab-audio capture and wire it into a Web Audio analyser.
+  // The user picks the tab; if they pick one without audio (or click
+  // Cancel) we surface a hint instead of an error toast.
+  const startLiveAudio = useCallback(async () => {
+    if (liveAudioState === "starting" || liveAudioState === "live") return;
+    setLiveAudioState("starting");
+    try {
+      // ``getDisplayMedia`` always asks for video too; we discard the
+      // video track immediately and keep only the audio one.
+      const stream = await navigator.mediaDevices.getDisplayMedia({
+        video: true,
+        audio: true,
+      });
+      const audioTracks = stream.getAudioTracks();
+      if (audioTracks.length === 0) {
+        for (const t of stream.getTracks()) t.stop();
+        setLiveAudioState("off");
+        setError(
+          "Tab capture started without audio — when the picker pops up, " +
+            "tick the 'Share tab audio' box.",
+        );
+        return;
+      }
+      // Drop video tracks to free GPU + reduce permission scope.
+      for (const t of stream.getVideoTracks()) t.stop();
+      const audioOnly = new MediaStream(audioTracks);
+      const ctx = new AudioContext();
+      const source = ctx.createMediaStreamSource(audioOnly);
+      const analyser = ctx.createAnalyser();
+      analyser.fftSize = 64; // 32 frequency bins, plenty for 12 bars
+      analyser.smoothingTimeConstant = 0.7;
+      source.connect(analyser);
+      // Important: we deliberately do NOT connect the analyser to
+      // ``ctx.destination`` — that would re-emit the captured tab
+      // audio through the default output, causing a feedback echo
+      // for the user.
+      liveStreamRef.current = audioOnly;
+      liveContextRef.current = ctx;
+      liveAnalyserRef.current = analyser;
+      setLiveAudioState("live");
+      // If the user revokes tab-capture from the browser's "Stop
+      // sharing" bar, the audio track ends — clean up so the bars
+      // fall back to synthetic.
+      audioTracks[0].addEventListener("ended", stopLiveAudio);
+    } catch (exc) {
+      // ``NotAllowedError`` (denied) and ``AbortError`` (cancel) both
+      // land here. Keep this quiet — the user just declined.
+      const name =
+        exc instanceof Error && exc.name ? exc.name : String(exc);
+      if (name === "NotAllowedError" || name === "AbortError") {
+        setLiveAudioState("off");
+      } else {
+        setLiveAudioState("denied");
+        const message = exc instanceof Error ? exc.message : String(exc);
+        setError(`Couldn't capture tab audio: ${message}`);
+      }
+    }
+  }, [liveAudioState, stopLiveAudio]);
+
+  // Tear down on unmount so the analyser graph + tab-capture sharing
+  // banner don't outlive the widget.
+  useEffect(() => stopLiveAudio, [stopLiveAudio]);
+
   // ─── Render ──────────────────────────────────────────────────────
 
   if (!status) {
@@ -367,6 +517,13 @@ export function SpotifyPlayer({ nightfall }: SpotifyPlayerProps) {
             onDisconnect={onDisconnect}
             displayName={status.display_name}
             busy={busy}
+            isPlaying={isPlaying}
+            onTogglePlay={onTogglePlay}
+            onNext={onNext}
+            onPrevious={onPrevious}
+            liveAudioState={liveAudioState}
+            onStartLiveAudio={() => void startLiveAudio()}
+            onStopLiveAudio={stopLiveAudio}
           />
         )}
       </div>
@@ -424,6 +581,13 @@ interface NowPlayingProps {
   onDisconnect: () => void;
   displayName: string;
   busy: boolean;
+  isPlaying: boolean;
+  onTogglePlay: () => void;
+  onNext: () => void;
+  onPrevious: () => void;
+  liveAudioState: "off" | "starting" | "live" | "denied";
+  onStartLiveAudio: () => void;
+  onStopLiveAudio: () => void;
 }
 
 function NowPlaying({
@@ -434,6 +598,13 @@ function NowPlaying({
   onDisconnect,
   displayName,
   busy,
+  isPlaying,
+  onTogglePlay,
+  onNext,
+  onPrevious,
+  liveAudioState,
+  onStartLiveAudio,
+  onStopLiveAudio,
 }: NowPlayingProps) {
   // Prefer SDK state when Alfred is active (it updates in real time);
   // fall back to the polled now-playing for cross-device awareness.
@@ -485,6 +656,58 @@ function NowPlaying({
         </div>
       )}
       <div className="hud-spotify__controls">
+        <button
+          type="button"
+          className="hud-button hud-button--icon"
+          onClick={onPrevious}
+          disabled={busy}
+          title="Previous track"
+          aria-label="Previous track"
+        >
+          ⏮
+        </button>
+        <button
+          type="button"
+          className="hud-button hud-button--icon hud-button--primary"
+          onClick={onTogglePlay}
+          disabled={busy}
+          title={isPlaying ? "Pause" : "Play"}
+          aria-label={isPlaying ? "Pause" : "Play"}
+        >
+          {isPlaying ? "⏸" : "▶"}
+        </button>
+        <button
+          type="button"
+          className="hud-button hud-button--icon"
+          onClick={onNext}
+          disabled={busy}
+          title="Next track"
+          aria-label="Next track"
+        >
+          ⏭
+        </button>
+        <button
+          type="button"
+          className={
+            liveAudioState === "live"
+              ? "hud-button hud-button--icon is-active"
+              : "hud-button hud-button--icon"
+          }
+          onClick={
+            liveAudioState === "live" ? onStopLiveAudio : onStartLiveAudio
+          }
+          disabled={liveAudioState === "starting"}
+          title={
+            liveAudioState === "live"
+              ? "Real-audio visualizer on. Click to stop."
+              : "Make the bars react to actual sound. " +
+                "Asks to share a tab — pick this one and tick 'Share tab audio'."
+          }
+          aria-pressed={liveAudioState === "live"}
+          aria-label="Toggle live audio visualizer"
+        >
+          {liveAudioState === "live" ? "🎚 LIVE" : "🎚"}
+        </button>
         {!isAlfredDevice ? (
           <button
             type="button"
@@ -493,15 +716,16 @@ function NowPlaying({
             disabled={busy}
             title="Play through Alfred's in-browser device"
           >
-            ▶ Here
+            HERE
           </button>
         ) : null}
         <button
           type="button"
-          className="hud-button"
+          className="hud-button hud-button--icon"
           onClick={onDisconnect}
           disabled={busy}
           title="Forget this Spotify account"
+          aria-label="Disconnect Spotify"
         >
           ⨯
         </button>
@@ -532,6 +756,88 @@ function findSegment(
     }
   }
   return segments[lo] ?? segments[0];
+}
+
+// Per-bar phase + tempo offsets for the synthetic envelope. Picked
+// once at module-load so each instance of the widget breathes in the
+// same pattern — keeps the visualizer consistent without storing this
+// in state.
+const SYNTH_PHASES: number[] = Array.from(
+  { length: BAR_COUNT },
+  (_, i) => i * 0.71,
+);
+const SYNTH_TEMPOS: number[] = Array.from(
+  { length: BAR_COUNT },
+  // Bass on the left (slow), treble on the right (fast). The 1.4
+  // ratio gives a roughly logarithmic spread.
+  (_, i) => 1.2 + (i / (BAR_COUNT - 1)) * 4.5,
+);
+const SYNTH_AMPS: number[] = Array.from(
+  { length: BAR_COUNT },
+  // Bass bars get more headroom than treble — same shape as a real
+  // EQ readout for typical music.
+  (_, i) => 0.55 + 0.35 * (1 - i / (BAR_COUNT - 1)),
+);
+
+/**
+ * Synthesize 12 plausibly-musical bar heights from the current track
+ * playhead. Two layered sines per bar produce a non-repeating,
+ * non-uniform envelope that *looks* like a real spectrum without ever
+ * touching audio. Used as the fallback when neither tab-capture nor
+ * Spotify's deprecated audio-analysis are available.
+ */
+function syntheticBars(elapsed: number): Bars {
+  const out: Bars = [];
+  // Slow global modulation so the whole bank breathes in unison once
+  // every ~6 seconds — keeps the eye moving even when individual
+  // bars are mid-sway.
+  const breath = 0.7 + 0.3 * Math.sin(elapsed * 0.45);
+  for (let i = 0; i < BAR_COUNT; i += 1) {
+    const t = SYNTH_TEMPOS[i];
+    const phase = SYNTH_PHASES[i];
+    const a = SYNTH_AMPS[i];
+    const slow = 0.5 + 0.5 * Math.sin(elapsed * t + phase);
+    const fast = 0.5 + 0.5 * Math.sin(elapsed * t * 2.3 + phase * 1.7);
+    const v = a * slow * (0.55 + 0.45 * fast) * breath;
+    out.push(Math.max(0.06, Math.min(1, v)));
+  }
+  return out;
+}
+
+/**
+ * Sample a Web Audio AnalyserNode into 12 bar heights. We average
+ * adjacent FFT bins so each bar covers a roughly equal frequency
+ * range; the AnalyserNode returns 0..255 byte amplitudes which we
+ * normalize to 0..1.
+ */
+function sampleAnalyser(
+  analyser: AnalyserNode,
+  scratch: Uint8Array<ArrayBuffer>,
+): Bars {
+  const binCount = analyser.frequencyBinCount;
+  if (scratch.length !== binCount) {
+    // Reallocate the scratch buffer if the analyser was reconfigured.
+    scratch = new Uint8Array(new ArrayBuffer(binCount));
+  }
+  analyser.getByteFrequencyData(scratch);
+  const out: Bars = [];
+  const perBar = Math.max(1, Math.floor(binCount / BAR_COUNT));
+  for (let i = 0; i < BAR_COUNT; i += 1) {
+    let sum = 0;
+    let count = 0;
+    for (let j = 0; j < perBar; j += 1) {
+      const idx = i * perBar + j;
+      if (idx >= binCount) break;
+      sum += scratch[idx];
+      count += 1;
+    }
+    const avg = count === 0 ? 0 : sum / count / 255;
+    // Scale up because typical music produces 0.1..0.4 byte amplitudes
+    // — multiplying by ~2.2 gives a satisfying full-range readout
+    // without clipping at 1.
+    out.push(Math.max(0.04, Math.min(1, avg * 2.2)));
+  }
+  return out;
 }
 
 /**
