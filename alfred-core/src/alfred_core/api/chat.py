@@ -30,6 +30,14 @@ from alfred_core.db.models import Conversation, Message
 from alfred_core.db.session import get_session
 from alfred_core.llm.base import ChatImage, ChatMessage
 from alfred_core.memory import extract_and_strip, recent_facts, save_facts
+from alfred_core.memory_archive import (
+    MemoryHit,
+    extract_remember_conversation,
+    format_notes_for_prompt,
+    rollup_if_pressured,
+    search_relevant_notes,
+    summarise_and_persist_conversation,
+)
 from alfred_core.persona import ContextBundle, Mode, build_persona
 from alfred_core.router import Router, VisionUnavailableError
 from alfred_core.tools.email import EmailError, send_email
@@ -184,6 +192,29 @@ async def _history(session: AsyncSession, conversation_id: UUID) -> list[Message
         .order_by(Message.created_at.asc())
     )
     return list(result.scalars().all())
+
+
+def _build_memory_query(history: list[Message], user_text: str) -> str:
+    """Build the text we use to vector-search the memory archive.
+
+    The user's current message plus the last few user turns gives a
+    much better retrieval signal than the bare incoming message alone
+    — pronouns and partial phrasing land their referents in the recent
+    context.
+    """
+    recent_user_turns: list[str] = []
+    for m in reversed(history):
+        if m.role != "user":
+            continue
+        body = (m.content or "").strip()
+        if body:
+            recent_user_turns.append(body)
+        if len(recent_user_turns) >= 3:
+            break
+    parts: list[str] = list(reversed(recent_user_turns))
+    if user_text.strip():
+        parts.append(user_text.strip())
+    return "\n".join(parts).strip()
 
 
 async def _process_email_drafts(reply: str, settings: Settings) -> str:
@@ -516,7 +547,30 @@ async def chat(req: ChatRequest, session: AsyncSession = Depends(get_session)) -
     persona = build_persona(current_mode, settings, context)
 
     history = await _history(session, convo.id)
-    msgs: list[ChatMessage] = [ChatMessage(role="system", content=persona.system_prompt)]
+
+    # Token-pressure: if the conversation has grown past the configured
+    # threshold, summarise the oldest half into a long-term memory note
+    # and trim the active window. The note stays retrievable below.
+    history = await rollup_if_pressured(
+        session=session,
+        settings=settings,
+        llm_router=_llm_router,
+        conversation_id=convo.id,
+        history=history,
+    )
+
+    # Long-term memory retrieval — semantic search over past memory notes
+    # for anything relevant to the current user message + recent context.
+    # The hits are appended to the system prompt so Alfred can recall
+    # past conversations without us shipping the full transcripts every
+    # turn.
+    memory_query = _build_memory_query(history, user_text)
+    memory_hits: list[MemoryHit] = await search_relevant_notes(
+        session, settings=settings, query_text=memory_query
+    )
+    system_prompt = persona.system_prompt + format_notes_for_prompt(memory_hits)
+
+    msgs: list[ChatMessage] = [ChatMessage(role="system", content=system_prompt)]
     for m in history:
         if m.role in ("user", "assistant"):
             msgs.append(ChatMessage(role=m.role, content=m.content))
@@ -570,6 +624,29 @@ async def chat(req: ChatRequest, session: AsyncSession = Depends(get_session)) -
     new_facts = outcome.collected_facts + final_facts
     if new_facts:
         await save_facts(session, new_facts)
+
+    # ``[REMEMBER_CONVERSATION]`` marker — explicit user-or-Alfred
+    # request to commit the active conversation to long-term memory.
+    # Strip the marker out of the visible reply, and surface a short
+    # confirmation in its place so the user knows it was archived.
+    visible_reply, conversation_titles = extract_remember_conversation(
+        visible_reply
+    )
+    if conversation_titles:
+        suggested_title = conversation_titles[0] or None
+        archived = await summarise_and_persist_conversation(
+            session=session,
+            settings=settings,
+            llm_router=_llm_router,
+            conversation_id=convo.id,
+            suggested_title=suggested_title,
+        )
+        if archived is not None:
+            confirmation = (
+                f"\n\n_(Archived this conversation to memory: "
+                f"{archived.title}.)_"
+            )
+            visible_reply = (visible_reply + confirmation).strip()
 
     visible_reply = await _process_email_drafts(visible_reply, settings)
     visible_reply = await _process_spotify_invocations(

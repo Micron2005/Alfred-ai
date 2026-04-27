@@ -2,9 +2,10 @@
 
 import { useEffect, useState } from "react";
 import type { ConversationSummary } from "@/lib/api";
+import { MemoryPanel } from "./MemoryPanel";
 
 const TAB_KEY = "alfred.sidebarTab";
-type Tab = "conversation" | "archives";
+type Tab = "conversation" | "archives" | "memory";
 
 interface Props {
   conversations: ConversationSummary[];
@@ -65,7 +66,13 @@ export function ConversationSidebar({
   useEffect(() => {
     if (typeof window === "undefined") return;
     const stored = window.localStorage.getItem(TAB_KEY);
-    if (stored === "archives" || stored === "conversation") setTabState(stored);
+    if (
+      stored === "archives" ||
+      stored === "conversation" ||
+      stored === "memory"
+    ) {
+      setTabState(stored);
+    }
   }, []);
   const setTab = (next: Tab) => {
     setTabState(next);
@@ -98,7 +105,11 @@ export function ConversationSidebar({
       // styled inline so the element keeps the same identity across
       // collapse toggles — no remount.
       style={{
-        width: collapsed ? 32 : 420,
+        // Three tabs (CHAT / ARCHIVES / MEMORY) need a touch more
+        // horizontal room than the original two so the labels don't
+        // wrap. The HUD scales to fit the remaining width via the
+        // responsive ``HudCanvas`` (Phase 12a tweaks PR #21).
+        width: collapsed ? 32 : 440,
         borderRight: "1px solid var(--border)",
         background: collapsed
           ? "var(--bg-elev)"
@@ -178,14 +189,20 @@ export function ConversationSidebar({
           <SidebarTab
             active={tab === "conversation"}
             onClick={() => setTab("conversation")}
-            label="◇ CONVERSATION"
-            title="Active chat"
+            label="◇ CHAT"
+            title="Active conversation"
           />
           <SidebarTab
             active={tab === "archives"}
             onClick={() => setTab("archives")}
             label="⟢ ARCHIVES"
             title="Saved conversations"
+          />
+          <SidebarTab
+            active={tab === "memory"}
+            onClick={() => setTab("memory")}
+            label="◈ MEMORY"
+            title="Long-term memory archive"
           />
           <span style={{ flex: 1 }} />
           <button
@@ -363,6 +380,16 @@ export function ConversationSidebar({
             })
           )}
         </div>
+      ) : null}
+
+      {/*
+        Memory tab — long-term memory archive (Phase 12b). Like the
+        archives panel, this is fine to mount/unmount on tab switch
+        because nothing in the panel holds a long-lived ref or
+        recording that has to survive a remount.
+      */}
+      {!collapsed && tab === "memory" ? (
+        <MemoryPanel activeConversationId={activeId} />
       ) : null}
     </aside>
   );

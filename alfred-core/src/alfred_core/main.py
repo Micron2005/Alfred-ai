@@ -15,6 +15,7 @@ from alfred_core.api import (
     email,
     facts,
     health,
+    memory,
     spotify,
     voice,
     weather,
@@ -51,6 +52,7 @@ app.include_router(voice.router)
 app.include_router(email.router)
 app.include_router(spotify.router)
 app.include_router(weather.router)
+app.include_router(memory.router)
 
 
 @app.get("/")

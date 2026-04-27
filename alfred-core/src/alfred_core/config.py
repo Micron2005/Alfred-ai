@@ -93,6 +93,38 @@ class Settings(BaseSettings):
         default="http://127.0.0.1:8000/api/spotify/callback"
     )
 
+    # ─── Long-term memory archive (Phase 12b) ───────────────────────────
+    # Container-side directory where Alfred mirrors each memory note as
+    # a Markdown file. Mounted from the host via docker-compose so the
+    # user can browse / grep / edit the notes outside Alfred. Default
+    # is ``/app/alfred-memory`` inside the container; the host mount
+    # point is controlled by ``ALFRED_MEMORY_HOST_PATH`` in
+    # ``docker-compose.yml`` and defaults to ``./alfred-memory`` next
+    # to the repo on Linux dev boxes (Windows users typically point it
+    # at ``C:\Users\<them>\Documents\Alfred Memory``).
+    alfred_memory_dir: str = Field(default="/app/alfred-memory")
+    # Embedding model name used against Ollama's ``/api/embed`` endpoint.
+    # ``nomic-embed-text`` is 768-dim and ships with most stock Ollama
+    # installs (``ollama pull nomic-embed-text``). If embeddings can't
+    # be produced the note still saves; vector search just won't surface
+    # it until it's re-embedded.
+    alfred_memory_embedding_model: str = Field(default="nomic-embed-text")
+    # When the active conversation grows beyond this many user/assistant
+    # messages we roll the oldest 50% into a memory note and drop them
+    # from the live history. The summary stays retrievable via vector
+    # search, but the active context shrinks back so we never run out
+    # of tokens.
+    alfred_memory_token_pressure_messages: int = Field(default=80)
+    # Top-K notes to inject into the system prompt at chat-start time.
+    # Below ~3 ignores too much; above ~6 starts to crowd the prompt.
+    alfred_memory_retrieval_top_k: int = Field(default=4)
+    # Minimum cosine similarity (0..1) for a memory note to count as
+    # "relevant" enough to inject into the prompt. 0.0 disables the
+    # threshold (always inject the top-K). Vector search returns
+    # similarity, not just rank, so we filter junk matches that would
+    # otherwise dilute the context.
+    alfred_memory_retrieval_min_similarity: float = Field(default=0.35)
+
     @property
     def has_cloud(self) -> bool:
         """Whether a real Anthropic key has been configured."""
