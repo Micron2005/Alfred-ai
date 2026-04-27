@@ -22,6 +22,13 @@ import { useWakeWord } from "@/lib/useWakeWord";
 import { useCamera } from "@/lib/useCamera";
 import { Orb } from "@/components/Orb";
 import { SpotifyPlayer } from "@/components/SpotifyPlayer";
+import { CameraPreview } from "@/components/CameraPreview";
+import { HudWidget } from "@/components/HudWidget";
+import {
+  useHudLayout,
+  WIDGET_LABELS,
+  type HudWidgetId,
+} from "@/lib/hudLayout";
 import { orbStore } from "@/lib/orbState";
 
 const ACTIVE_CONVO_KEY = "alfred.activeConversationId";
@@ -103,6 +110,13 @@ export function ChatWindow() {
   });
 
   const camera = useCamera({ enabled: cameraOn });
+
+  // Customizable-HUD state. ``customEnabled`` is the user-facing
+  // "is the HUD freely arrangeable?" switch (off by default — most
+  // users will use the default layout). ``editMode`` controls
+  // whether widget drag/resize/hide handles are shown. See
+  // ``lib/hudLayout.ts`` for the localStorage shape.
+  const hud = useHudLayout();
 
   // Tears down the in-flight TTS pipeline (paused audio, analyser
   // graph, object URL, RAF timer) but deliberately does NOT clear
@@ -743,58 +757,244 @@ export function ChatWindow() {
             >
               {fullHud ? "🛰 HUD · FULL" : "🛰 HUD · COMPACT"}
             </button>
+            <button
+              type="button"
+              className="hud-button"
+              onClick={() => {
+                if (!hud.customEnabled) {
+                  // First click on a fresh install — enable custom
+                  // mode AND open the editor immediately so the user
+                  // sees the handles. Otherwise the button looks
+                  // broken (toggling a hidden bit with no visible
+                  // change).
+                  hud.setCustomEnabled(true);
+                  hud.setEditMode(true);
+                } else {
+                  // Already in custom mode — the button is a plain
+                  // edit-mode toggle (DONE ↔ CUSTOMIZE).
+                  hud.setEditMode(!hud.editMode);
+                }
+              }}
+              aria-pressed={hud.editMode}
+              title={
+                hud.editMode
+                  ? "Lock the HUD layout"
+                  : "Drag, resize, or hide HUD widgets"
+              }
+            >
+              {hud.editMode ? "🎛 DONE" : "🎛 CUSTOMIZE"}
+            </button>
             <ModeIndicator mode={mode} />
           </div>
         </header>
 
         {/*
-          Full-HUD telemetry pane. Holds the monospace clock (top-left)
-          and the current-weather card (top-right). Only mounted when
-          the user has flipped the HUD toggle on, so the polling and
-          interval timers in those widgets don't run otherwise.
+          ============================================================
+          HUD WIDGET CANVAS
+          ============================================================
+          Two layout modes share the same widget set:
+            - Default flow: stacked top-to-bottom (header → telemetry
+              row → orb → forecast strip → camera preview → Spotify).
+              Used by every user out of the box.
+            - Custom (absolute): each widget is a draggable, resizable,
+              hide-able card the user has placed wherever they like.
+              Activated via the "🎛 CUSTOMIZE" header button.
+          The widget contents (Clock, WeatherWidget, Orb, etc.) are
+          identical in both modes — only the surrounding container and
+          positioning differ. Each widget is wrapped in
+          ``<HudWidget>`` so individual remounts (e.g. layout
+          changes) don't tear down the inner state (audio analyser
+          handles in Spotify, MediaPipe detectors in CameraPreview,
+          etc.).
         */}
-        {fullHud ? (
-          <div className="hud-telemetry">
-            <Clock />
-            <WeatherWidget variant="current" />
-          </div>
+        {hud.editMode ? (
+          <HudCustomizeToolbar
+            layout={hud.layout}
+            showWidget={hud.showWidget}
+            resetLayout={hud.resetLayout}
+            disableCustom={() => hud.setCustomEnabled(false)}
+          />
         ) : null}
 
-        {/*
-          Centerpiece: the JARVIS orb. Reacts to mode (idle / listening
-          / thinking / speaking) and amplitude (mic RMS or TTS amplitude).
-        */}
-        <div
-          style={{
-            display: "flex",
-            justifyContent: "center",
-            padding: "18px 0 8px",
-          }}
-        >
-          <Orb size={180} caption={orbCaption} />
-        </div>
+        {hud.customEnabled ? (
+          // Absolute-canvas mode — the main pane becomes a free
+          // surface where each widget is positioned at its saved
+          // {x, y, w, h}. ``minHeight`` keeps the canvas tall enough
+          // that even after the user drags everything to the bottom
+          // there's still room.
+          <div
+            style={{
+              position: "relative",
+              flex: 1,
+              minHeight: 720,
+              marginTop: 16,
+            }}
+          >
+            <HudWidget
+              id="clock"
+              label={WIDGET_LABELS.clock}
+              layout={hud.layout.clock}
+              customEnabled
+              editMode={hud.editMode}
+              onMove={(p) => hud.updateWidget("clock", p)}
+              onHide={() => hud.hideWidget("clock")}
+              hidden={!hud.layout.clock.visible}
+            >
+              <Clock />
+            </HudWidget>
+            <HudWidget
+              id="weather-current"
+              label={WIDGET_LABELS["weather-current"]}
+              layout={hud.layout["weather-current"]}
+              customEnabled
+              editMode={hud.editMode}
+              onMove={(p) => hud.updateWidget("weather-current", p)}
+              onHide={() => hud.hideWidget("weather-current")}
+              hidden={!hud.layout["weather-current"].visible}
+            >
+              <WeatherWidget variant="current" />
+            </HudWidget>
+            <HudWidget
+              id="weather-strip"
+              label={WIDGET_LABELS["weather-strip"]}
+              layout={hud.layout["weather-strip"]}
+              customEnabled
+              editMode={hud.editMode}
+              onMove={(p) => hud.updateWidget("weather-strip", p)}
+              onHide={() => hud.hideWidget("weather-strip")}
+              hidden={!hud.layout["weather-strip"].visible}
+            >
+              <WeatherWidget variant="strip" />
+            </HudWidget>
+            <HudWidget
+              id="orb"
+              label={WIDGET_LABELS.orb}
+              layout={hud.layout.orb}
+              customEnabled
+              editMode={hud.editMode}
+              onMove={(p) => hud.updateWidget("orb", p)}
+              onHide={() => hud.hideWidget("orb")}
+              hidden={!hud.layout.orb.visible}
+            >
+              <div
+                style={{
+                  width: "100%",
+                  height: "100%",
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                }}
+              >
+                <Orb
+                  size={Math.max(
+                    80,
+                    Math.min(
+                      typeof hud.layout.orb.w === "number"
+                        ? hud.layout.orb.w
+                        : 360,
+                      typeof hud.layout.orb.h === "number"
+                        ? hud.layout.orb.h
+                        : 200,
+                    ) - 20,
+                  )}
+                  caption={orbCaption}
+                />
+              </div>
+            </HudWidget>
+            <HudWidget
+              id="spotify"
+              label={WIDGET_LABELS.spotify}
+              layout={hud.layout.spotify}
+              customEnabled
+              editMode={hud.editMode}
+              onMove={(p) => hud.updateWidget("spotify", p)}
+              onHide={() => hud.hideWidget("spotify")}
+              hidden={!hud.layout.spotify.visible}
+            >
+              <SpotifyPlayer nightfall={mode === "nightfall"} />
+            </HudWidget>
+            <HudWidget
+              id="camera"
+              label={WIDGET_LABELS.camera}
+              layout={hud.layout.camera}
+              customEnabled
+              editMode={hud.editMode}
+              onMove={(p) => hud.updateWidget("camera", p)}
+              onHide={() => hud.hideWidget("camera")}
+              hidden={!hud.layout.camera.visible || !cameraOn}
+            >
+              <CameraPreview
+                status={camera.status}
+                faceCount={camera.faceCount}
+                streamRef={camera.streamRef}
+              />
+            </HudWidget>
+          </div>
+        ) : (
+          // Default flow layout — the original out-of-the-box JARVIS
+          // arrangement. Untouched except that the camera preview is
+          // now part of the flow whenever the camera is on.
+          <>
+            {fullHud ? (
+              <div className="hud-telemetry">
+                <Clock />
+                <WeatherWidget variant="current" />
+              </div>
+            ) : null}
 
-        {/*
-          7-day forecast strip — only in full-HUD mode. Sits between the
-          orb and the Spotify widget so the JARVIS-style telemetry runs
-          continuously down the page.
-        */}
-        {fullHud ? <WeatherWidget variant="strip" /> : null}
+            <div
+              style={{
+                display: "flex",
+                justifyContent: "center",
+                padding: "18px 0 8px",
+              }}
+            >
+              <Orb size={180} caption={orbCaption} />
+            </div>
 
-        {/*
-          Spotify HUD widget: spectrum visualizer + now-playing card +
-          connect/disconnect controls. Renders nothing when Spotify
-          isn't configured server-side.
-        */}
-        <div
-          style={{
-            display: "flex",
-            justifyContent: "center",
-            padding: "0 12px 8px",
-          }}
-        >
-          <SpotifyPlayer nightfall={mode === "nightfall"} />
-        </div>
+            {fullHud ? <WeatherWidget variant="strip" /> : null}
+
+            {/*
+              Live camera preview — visible whenever the camera is on,
+              so the user can see what Alfred sees without opening a
+              separate window. Uses a sibling ``<video>`` that shares
+              the existing MediaStream (see CameraPreview.tsx) — the
+              hidden detection ``<video>`` below is unaffected.
+            */}
+            {cameraOn ? (
+              <div
+                style={{
+                  display: "flex",
+                  justifyContent: "center",
+                  padding: "0 12px 12px",
+                }}
+              >
+                <div
+                  style={{
+                    width: "min(480px, 100%)",
+                    aspectRatio: "16 / 9",
+                  }}
+                >
+                  <CameraPreview
+                    status={camera.status}
+                    faceCount={camera.faceCount}
+                    streamRef={camera.streamRef}
+                  />
+                </div>
+              </div>
+            ) : null}
+
+            <div
+              style={{
+                display: "flex",
+                justifyContent: "center",
+                padding: "0 12px 8px",
+              }}
+            >
+              <SpotifyPlayer nightfall={mode === "nightfall"} />
+            </div>
+          </>
+        )}
 
         {/*
           Hidden <video> for the camera feed. Kept in the main pane
@@ -819,6 +1019,119 @@ export function ChatWindow() {
           style={{ display: "none" }}
         />
       </div>
+    </div>
+  );
+}
+
+/**
+ * Toolbar that appears above the HUD canvas when the user enters
+ * customize mode. Lists hidden widgets as clickable "show" chips,
+ * provides a reset-to-defaults button, and a "lock layout & exit
+ * custom mode" escape hatch.
+ */
+function HudCustomizeToolbar({
+  layout,
+  showWidget,
+  resetLayout,
+  disableCustom,
+}: {
+  layout: ReturnType<typeof useHudLayout>["layout"];
+  showWidget: (id: HudWidgetId) => void;
+  resetLayout: () => void;
+  disableCustom: () => void;
+}) {
+  const hidden = (Object.keys(layout) as HudWidgetId[]).filter(
+    (id) => !layout[id].visible,
+  );
+  return (
+    <div
+      style={{
+        margin: "12px 0 0",
+        padding: "8px 12px",
+        display: "flex",
+        alignItems: "center",
+        gap: 8,
+        flexWrap: "wrap",
+        background: "rgba(108, 214, 255, 0.04)",
+        border: "1px solid var(--border)",
+        borderRadius: 4,
+      }}
+    >
+      <span
+        className="mono"
+        style={{
+          fontSize: 10,
+          letterSpacing: 1.5,
+          color: "var(--hud)",
+          textShadow: "0 0 6px var(--orb-glow)",
+        }}
+      >
+        🎛 CUSTOMIZING HUD
+      </span>
+      <span style={{ color: "var(--muted)", fontSize: 11 }}>
+        Drag widgets to move. Drag the corner to resize. × to hide.
+      </span>
+      <span style={{ flex: 1 }} />
+      {hidden.length > 0 ? (
+        <>
+          <span
+            className="mono"
+            style={{
+              fontSize: 9,
+              letterSpacing: 1.5,
+              color: "var(--muted)",
+            }}
+          >
+            SHOW:
+          </span>
+          {hidden.map((id) => (
+            <button
+              key={id}
+              type="button"
+              className="hud-button"
+              onClick={() => showWidget(id)}
+              title={`Show ${WIDGET_LABELS[id]}`}
+              style={{ padding: "3px 8px", fontSize: 10 }}
+            >
+              + {WIDGET_LABELS[id].toUpperCase()}
+            </button>
+          ))}
+        </>
+      ) : null}
+      <button
+        type="button"
+        className="hud-button"
+        onClick={() => {
+          if (
+            window.confirm(
+              "Reset HUD layout to default positions and visibility?",
+            )
+          ) {
+            resetLayout();
+          }
+        }}
+        title="Reset all widgets to default positions, sizes, and visibility"
+        style={{ padding: "3px 10px", fontSize: 10 }}
+      >
+        ↺ RESET
+      </button>
+      <button
+        type="button"
+        className="hud-button"
+        onClick={() => {
+          if (
+            window.confirm(
+              "Turn off custom layout? Widgets will return to the default flow layout. (Your custom positions are saved and will be restored if you turn it back on.)",
+            )
+          ) {
+            disableCustom();
+          }
+        }}
+        title="Disable custom layout and return to the default flow layout"
+        style={{ padding: "3px 10px", fontSize: 10 }}
+      >
+        ⏏ EXIT
+      </button>
     </div>
   );
 }
