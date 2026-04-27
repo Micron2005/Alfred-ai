@@ -17,6 +17,7 @@ import {
   type SilenceDetectorHandle,
   type SilenceReason,
 } from "@/lib/silenceDetector";
+import { orbStore } from "@/lib/orbState";
 
 interface ComposerProps {
   onSend: (text: string, images: ChatImage[]) => Promise<void> | void;
@@ -247,8 +248,16 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
 
   // Notify the parent whenever recording starts or stops so it can pause
   // wake-word listening (otherwise we'd race the user's own voice).
+  // Also publishes mic-recording state to the orb store so the JARVIS
+  // orb pulses with mic RMS while the user is dictating.
   useEffect(() => {
     onMicStateChange?.(mic === "recording");
+    orbStore.setHold("listening", mic === "recording");
+    return () => {
+      // If the component unmounts mid-recording, make sure the orb
+      // store doesn't get stuck in "listening" forever.
+      orbStore.setHold("listening", false);
+    };
   }, [mic, onMicStateChange]);
 
   async function startRecording() {
@@ -269,6 +278,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
       // belt-and-braces in case the manual stop button is clicked.
       silenceDetectorRef.current = startSilenceDetector({
         stream,
+        onLevel: (rms) => orbStore.pushLevel(rms),
         onSilence: (reason) => {
           // ``stop`` may already have been called from elsewhere (the
           // manual button, or this very callback running after the
@@ -440,6 +450,13 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
 
   const canSubmit = !disabled && !micBusy && (text.trim().length > 0 || images.length > 0);
 
+  // Visual state for the mic button: solid red+pulsing when actively
+  // recording, plain HUD when idle/transcribing.
+  const micBtnClass =
+    mic === "recording"
+      ? "hud-button hud-button--recording"
+      : "hud-button";
+
   return (
     <form
       onSubmit={submit}
@@ -449,10 +466,12 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
       style={{
         display: "flex",
         flexDirection: "column",
-        gap: 6,
-        padding: 12,
+        gap: 8,
+        padding: "12px 0",
         borderTop: "1px solid var(--border)",
-        background: isDragging ? "var(--bubble-user)" : "var(--bg)",
+        background: isDragging
+          ? "rgba(108, 214, 255, 0.05)"
+          : "transparent",
         transition: "background 120ms ease",
       }}
     >
@@ -472,10 +491,11 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
                 position: "relative",
                 width: 64,
                 height: 64,
-                borderRadius: 8,
+                borderRadius: 3,
                 overflow: "hidden",
                 border: "1px solid var(--border)",
-                background: "var(--bubble-assistant)",
+                background: "var(--bg-elev)",
+                boxShadow: "inset 0 0 0 1px rgba(255,255,255,0.02)",
               }}
             >
               {/* eslint-disable-next-line @next/next/no-img-element */}
@@ -497,7 +517,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
                   height: 20,
                   borderRadius: 10,
                   border: "none",
-                  background: "rgba(0, 0, 0, 0.6)",
+                  background: "rgba(0, 0, 0, 0.7)",
                   color: "#fff",
                   fontSize: 12,
                   lineHeight: 1,
@@ -512,23 +532,19 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
         </div>
       )}
 
-      <div style={{ display: "flex", gap: 8 }}>
+      <div style={{ display: "flex", gap: 8, alignItems: "stretch" }}>
         <button
           type="button"
+          className={micBtnClass}
           onClick={toggleMic}
           disabled={disabled || mic === "transcribing"}
           aria-label={micLabel}
           title={micLabel}
           style={{
-            padding: "10px 14px",
-            borderRadius: 8,
-            border: "1px solid var(--border)",
-            background:
-              mic === "recording" ? "#b91c1c" : "var(--bubble-assistant)",
-            color: mic === "recording" ? "#fff" : "var(--fg)",
-            cursor: disabled || mic === "transcribing" ? "wait" : "pointer",
+            minWidth: 52,
+            justifyContent: "center",
             fontSize: 16,
-            minWidth: 48,
+            letterSpacing: 0,
           }}
         >
           {micGlyph}
@@ -536,19 +552,16 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
 
         <button
           type="button"
+          className="hud-button"
           onClick={() => fileInputRef.current?.click()}
           disabled={disabled || micBusy || images.length >= MAX_IMAGES}
           aria-label="Attach an image"
           title="Attach an image (or paste / drop one)"
           style={{
-            padding: "10px 14px",
-            borderRadius: 8,
-            border: "1px solid var(--border)",
-            background: "var(--bubble-assistant)",
-            color: "var(--fg)",
-            cursor: disabled || micBusy ? "wait" : "pointer",
+            minWidth: 52,
+            justifyContent: "center",
             fontSize: 16,
-            minWidth: 48,
+            letterSpacing: 0,
           }}
         >
           📎
@@ -582,39 +595,48 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
           }
           rows={2}
           disabled={disabled || micBusy}
+          className="hud-textarea"
           style={{
             flex: 1,
             resize: "none",
-            padding: 10,
-            borderRadius: 8,
+            padding: "10px 12px",
+            borderRadius: 3,
             border: "1px solid var(--border)",
-            background: "var(--bubble-assistant)",
+            background: "var(--bg-elev)",
             color: "var(--fg)",
             fontSize: 15,
+            fontFamily: "inherit",
+            outline: "none",
+            transition: "border-color 160ms ease, box-shadow 160ms ease",
+          }}
+          onFocus={(e) => {
+            e.currentTarget.style.borderColor = "var(--hud)";
+            e.currentTarget.style.boxShadow =
+              "0 0 0 1px var(--hud), 0 0 14px var(--orb-glow)";
+          }}
+          onBlur={(e) => {
+            e.currentTarget.style.borderColor = "var(--border)";
+            e.currentTarget.style.boxShadow = "none";
           }}
         />
         <button
           type="submit"
+          className="hud-button hud-button--primary"
           disabled={!canSubmit}
           style={{
-            padding: "10px 18px",
-            borderRadius: 8,
-            border: "1px solid var(--border)",
-            background: "var(--accent)",
-            color: "#fff",
-            cursor: disabled ? "wait" : "pointer",
-            fontSize: 14,
-            letterSpacing: 0.3,
+            minWidth: 86,
+            justifyContent: "center",
+            fontSize: 12,
           }}
         >
-          Send
+          SEND ▸
         </button>
       </div>
       {micError && (
-        <div style={{ color: "#b91c1c", fontSize: 12 }}>{micError}</div>
+        <div style={{ color: "var(--danger)", fontSize: 12 }}>{micError}</div>
       )}
       {imageError && (
-        <div style={{ color: "#b91c1c", fontSize: 12 }}>{imageError}</div>
+        <div style={{ color: "var(--danger)", fontSize: 12 }}>{imageError}</div>
       )}
     </form>
   );

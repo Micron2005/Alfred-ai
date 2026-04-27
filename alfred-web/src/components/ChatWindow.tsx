@@ -18,6 +18,8 @@ import {
 } from "@/lib/api";
 import { useWakeWord } from "@/lib/useWakeWord";
 import { useCamera } from "@/lib/useCamera";
+import { Orb } from "@/components/Orb";
+import { orbStore } from "@/lib/orbState";
 
 const ACTIVE_CONVO_KEY = "alfred.activeConversationId";
 const VOICE_OUT_KEY = "alfred.voiceOutEnabled";
@@ -51,6 +53,12 @@ export function ChatWindow() {
   const [speaking, setSpeaking] = useState(false);
   const endRef = useRef<HTMLDivElement>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  // Cleanup hook for the in-flight TTS pipeline (analyser timer +
+  // AudioContext). ``stopCurrentAudio`` invokes it so a "voice off"
+  // toggle mid-reply also tears down the analyser graph and clears the
+  // orb's "speaking" hold — pause() alone doesn't fire onended, so
+  // without this the orb would stay pulsing forever on a silent track.
+  const audioCleanupRef = useRef<(() => void) | null>(null);
   const composerRef = useRef<ComposerHandle>(null);
 
   // Restore the user's voice-out + hands-free + camera preferences. All
@@ -82,6 +90,12 @@ export function ChatWindow() {
     prev.pause();
     if (prev.src) URL.revokeObjectURL(prev.src);
     audioRef.current = null;
+    // Fire the cleanup hook installed by ``speak`` (analyser timer +
+    // AudioContext close + orb speaking-hold release). Safe to call
+    // even if no TTS is in flight — null-checked.
+    const cleanup = audioCleanupRef.current;
+    audioCleanupRef.current = null;
+    if (cleanup) cleanup();
   }
 
   function setVoiceOutPersisted(enabled: boolean) {
@@ -145,6 +159,14 @@ export function ChatWindow() {
     else wakeResume();
   }, [recording, busy, speaking, wakePause, wakeResume]);
 
+  // Mirror ``busy`` onto the orb store as the "thinking" hold so the
+  // JARVIS orb spins faster while Alfred composes a reply. Listening
+  // and speaking holds are managed by Composer + ``speak`` directly.
+  useEffect(() => {
+    orbStore.setHold("thinking", busy);
+    return () => orbStore.setHold("thinking", false);
+  }, [busy]);
+
   async function speak(text: string) {
     // Set ``speaking`` synchronously, BEFORE the synthesizeSpeech await,
     // so React batches it with the setBusy(false) that handleSend's
@@ -152,11 +174,40 @@ export function ChatWindow() {
     // pause/resume effect would briefly see all three signals false
     // during the TTS network round-trip and resume listening.
     setSpeaking(true);
+    orbStore.setHold("speaking", true);
     let url: string | null = null;
+    let audioCtx: AudioContext | null = null;
+    let levelTimer: number | null = null;
     try {
       const blob = await synthesizeSpeech(text);
       url = URL.createObjectURL(blob);
       const audio = new Audio(url);
+      // Route TTS through a Web Audio analyser so the JARVIS orb can
+      // heartbeat in sync with Alfred's voice. ``createMediaElementSource``
+      // takes ownership of the audio output, so we still have to connect
+      // back to ``destination`` for the user to actually hear it.
+      // AudioContexts are heavyweight but we tear it down on the same
+      // ``cleanup`` path as the audio element so we don't leak.
+      const ctxCtor =
+        typeof AudioContext !== "undefined" ? AudioContext : undefined;
+      let analyser: AnalyserNode | null = null;
+      // Backed by a plain ArrayBuffer (not ArrayBufferLike) so the
+      // strict typing of getFloatTimeDomainData on newer lib.dom.d.ts
+      // accepts it. ``new Float32Array(N)`` already gives ArrayBuffer
+      // backing, but we have to spell it out for the type checker.
+      let analyserBuf: Float32Array<ArrayBuffer> | null = null;
+      if (ctxCtor) {
+        audioCtx = new ctxCtor();
+        const src = audioCtx.createMediaElementSource(audio);
+        analyser = audioCtx.createAnalyser();
+        analyser.fftSize = 1024;
+        analyser.smoothingTimeConstant = 0.4;
+        analyserBuf = new Float32Array(
+          new ArrayBuffer(analyser.fftSize * 4),
+        ) as Float32Array<ArrayBuffer>;
+        src.connect(analyser);
+        analyser.connect(audioCtx.destination);
+      }
       stopCurrentAudio();
       audioRef.current = audio;
       const objectUrl = url;
@@ -166,20 +217,56 @@ export function ChatWindow() {
       // doesn't clobber the flag for a newer one already in flight.
       const cleanup = () => {
         URL.revokeObjectURL(objectUrl);
+        if (levelTimer !== null) {
+          clearInterval(levelTimer);
+          levelTimer = null;
+        }
         if (audioRef.current === audio) {
           audioRef.current = null;
           setSpeaking(false);
+          orbStore.setHold("speaking", false);
+        }
+        if (audioCtx) {
+          void audioCtx.close().catch(() => {
+            /* already closed */
+          });
+          audioCtx = null;
         }
       };
       audio.onended = cleanup;
       audio.onerror = cleanup;
+      // Expose the cleanup hook so ``stopCurrentAudio`` (e.g. user
+      // toggles voice off mid-reply) tears down the analyser graph
+      // even though pause() doesn't fire ``ended``.
+      audioCleanupRef.current = cleanup;
+      // Start sampling amplitude at ~30 fps so the orb has fresh data.
+      // Cheaper than RAF here because we don't need per-frame precision —
+      // the orb's own RAF loop smooths the values further.
+      if (analyser && analyserBuf) {
+        const a = analyser;
+        const b = analyserBuf;
+        levelTimer = window.setInterval(() => {
+          a.getFloatTimeDomainData(b);
+          let sumSquares = 0;
+          for (let i = 0; i < b.length; i++) sumSquares += b[i] * b[i];
+          const rms = Math.sqrt(sumSquares / b.length);
+          orbStore.pushLevel(rms);
+        }, 33);
+      }
       await audio.play();
       url = null; // ownership transferred to the audio element + cleanup callbacks
     } catch {
       // TTS is best-effort; if anything went wrong (network, autoplay
       // policy, decode error) free the URL we never managed to attach.
       if (url) URL.revokeObjectURL(url);
+      if (levelTimer !== null) clearInterval(levelTimer);
+      if (audioCtx) {
+        void audioCtx.close().catch(() => {
+          /* already closed */
+        });
+      }
       setSpeaking(false);
+      orbStore.setHold("speaking", false);
     }
   }
 
@@ -301,6 +388,17 @@ export function ChatWindow() {
 
   const greeting =
     mode === "nightfall" ? "At your service, Batman." : "At your service, sir.";
+  // Status caption beneath the orb — reflects what Alfred is currently
+  // doing so the user always knows the system state at a glance.
+  const orbCaption = busy
+    ? "Composing…"
+    : speaking
+      ? "Transmitting"
+      : recording
+        ? "Listening"
+        : handsFree && wake.status === "listening"
+          ? `Standing by · ${WAKE_LABEL}`
+          : "Standing by";
 
   return (
     <div style={{ display: "flex", minHeight: "100vh" }}>
@@ -320,9 +418,9 @@ export function ChatWindow() {
           flex: 1,
           display: "flex",
           flexDirection: "column",
-          maxWidth: 820,
+          maxWidth: 920,
           margin: "0 auto",
-          padding: "0 16px",
+          padding: "0 24px 16px",
           width: "100%",
         }}
       >
@@ -331,19 +429,48 @@ export function ChatWindow() {
             display: "flex",
             alignItems: "center",
             justifyContent: "space-between",
-            padding: "20px 0",
+            padding: "16px 0 12px",
             borderBottom: "1px solid var(--border)",
+            gap: 12,
+            flexWrap: "wrap",
           }}
         >
-          <div>
-            <h1 style={{ margin: 0, fontSize: 28, letterSpacing: 0.5 }}>Alfred</h1>
-            <p style={{ margin: 0, color: "var(--muted)", fontSize: 13 }}>
+          <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+            <h1
+              className="mono"
+              style={{
+                margin: 0,
+                fontSize: 22,
+                letterSpacing: 6,
+                color: "var(--hud)",
+                textShadow: "0 0 12px var(--orb-glow)",
+                fontWeight: 500,
+              }}
+            >
+              ALFRED
+            </h1>
+            <p
+              style={{
+                margin: 0,
+                color: "var(--muted)",
+                fontSize: 13,
+                fontStyle: "italic",
+              }}
+            >
               {greeting}
             </p>
           </div>
-          <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 8,
+              flexWrap: "wrap",
+            }}
+          >
             <button
               type="button"
+              className="hud-button"
               onClick={() => setHandsFreePersisted(!handsFree)}
               aria-pressed={handsFree}
               title={
@@ -351,47 +478,31 @@ export function ChatWindow() {
                   ? `Hands-free is on — say "${WAKE_LABEL}" to start a message`
                   : `Turn on hands-free (wake word: "${WAKE_LABEL}")`
               }
-              style={{
-                padding: "6px 10px",
-                borderRadius: 6,
-                border: "1px solid var(--border)",
-                background: handsFree ? "var(--accent)" : "transparent",
-                color: handsFree ? "#fff" : "var(--muted)",
-                cursor: "pointer",
-                fontSize: 13,
-              }}
             >
               {handsFree
                 ? wake.status === "listening"
-                  ? `🎙️ "${WAKE_LABEL}" — listening`
+                  ? `🎙 ${WAKE_LABEL} · LIVE`
                   : wake.status === "paused"
-                    ? `🎙️ "${WAKE_LABEL}" — paused`
+                    ? `🎙 ${WAKE_LABEL} · PAUSED`
                     : wake.status === "starting"
-                      ? "🎙️ Starting…"
+                      ? "🎙 STARTING…"
                       : wake.status === "error"
-                        ? "🎙️ Wake-word error"
-                        : `🎙️ Hands-free on`
-                : "🎙️ Hands-free off"}
+                        ? "🎙 WAKE ERR"
+                        : "🎙 HANDS-FREE"
+                : "🎙 HANDS-FREE"}
             </button>
             <button
               type="button"
+              className="hud-button"
               onClick={() => setVoiceOutPersisted(!voiceOut)}
               aria-pressed={voiceOut}
               title={voiceOut ? "Mute Alfred's voice" : "Unmute Alfred's voice"}
-              style={{
-                padding: "6px 10px",
-                borderRadius: 6,
-                border: "1px solid var(--border)",
-                background: voiceOut ? "var(--accent)" : "transparent",
-                color: voiceOut ? "#fff" : "var(--muted)",
-                cursor: "pointer",
-                fontSize: 13,
-              }}
             >
-              {voiceOut ? "🔊 Voice on" : "🔇 Voice off"}
+              {voiceOut ? "🔊 VOICE" : "🔇 VOICE"}
             </button>
             <button
               type="button"
+              className="hud-button"
               onClick={() => setCameraPersisted(!cameraOn)}
               aria-pressed={cameraOn}
               title={
@@ -403,82 +514,102 @@ export function ChatWindow() {
                     }`
                   : "Turn on the camera so Alfred can see who's in the room"
               }
-              style={{
-                padding: "6px 10px",
-                borderRadius: 6,
-                border: "1px solid var(--border)",
-                background: cameraOn ? "var(--accent)" : "transparent",
-                color: cameraOn ? "#fff" : "var(--muted)",
-                cursor: "pointer",
-                fontSize: 13,
-              }}
             >
               {cameraOn
                 ? camera.status === "ready"
-                  ? `📷 Camera on — ${camera.faceCount} ${
-                      camera.faceCount === 1 ? "face" : "faces"
-                    }`
+                  ? `📷 CAM · ${camera.faceCount}`
                   : camera.status === "starting"
-                    ? "📷 Starting…"
+                    ? "📷 STARTING…"
                     : camera.status === "error"
-                      ? "📷 Camera error"
-                      : "📷 Camera on"
-                : "📷 Camera off"}
+                      ? "📷 CAM ERR"
+                      : "📷 CAM"
+                : "📷 CAM"}
             </button>
             {cameraOn && camera.status === "ready" ? (
               <button
                 type="button"
+                className="hud-button"
                 onClick={() => void handleLook()}
                 disabled={busy}
                 title="Capture the current frame and attach it to your next message so Alfred can see what you're looking at."
-                style={{
-                  padding: "6px 10px",
-                  borderRadius: 6,
-                  border: "1px solid var(--border)",
-                  background: "transparent",
-                  color: "var(--muted)",
-                  cursor: busy ? "not-allowed" : "pointer",
-                  fontSize: 13,
-                }}
               >
-                👁 Look
+                👁 LOOK
               </button>
             ) : null}
             <ModeIndicator mode={mode} />
           </div>
         </header>
 
+        {/*
+          Centerpiece: the JARVIS orb. Reacts to mode (idle / listening
+          / thinking / speaking) and amplitude (mic RMS or TTS amplitude).
+        */}
+        <div
+          style={{
+            display: "flex",
+            justifyContent: "center",
+            padding: "18px 0 8px",
+          }}
+        >
+          <Orb size={180} caption={orbCaption} />
+        </div>
+
         <main
           style={{
             flex: 1,
             overflowY: "auto",
-            padding: "20px 0",
+            padding: "12px 4px 20px",
           }}
         >
           {loadingConvo ? (
-            <p style={{ color: "var(--muted)", textAlign: "center", marginTop: 40 }}>
-              Alfred is retrieving the conversation…
+            <p
+              className="mono"
+              style={{
+                color: "var(--muted)",
+                textAlign: "center",
+                marginTop: 40,
+                fontSize: 11,
+              }}
+            >
+              · RETRIEVING CONVERSATION ·
             </p>
           ) : messages.length === 0 ? (
-            <p style={{ color: "var(--muted)", textAlign: "center", marginTop: 40 }}>
+            <p
+              style={{
+                color: "var(--muted)",
+                textAlign: "center",
+                marginTop: 40,
+                fontStyle: "italic",
+              }}
+            >
               Say &ldquo;Hello Alfred&rdquo; to begin.
             </p>
           ) : (
             messages.map((m) => <Message key={m.id} msg={m} />)
           )}
           {busy ? (
-            <p style={{ color: "var(--muted)", fontStyle: "italic", fontSize: 13 }}>
-              Alfred is composing a reply…
+            <p
+              className="mono"
+              style={{
+                color: "var(--hud)",
+                fontSize: 11,
+                opacity: 0.85,
+                margin: "12px 0",
+                textAlign: "center",
+              }}
+            >
+              · ALFRED IS COMPOSING A REPLY ·
             </p>
           ) : null}
           {error ? (
             <p
               style={{
-                color: "#b33",
+                color: "var(--danger)",
                 fontSize: 13,
-                background: "rgba(179, 51, 51, 0.08)",
+                background: "rgba(255, 80, 80, 0.06)",
+                border: "1px solid rgba(255, 80, 80, 0.3)",
                 padding: 10,
-                borderRadius: 6,
+                borderRadius: 3,
               }}
             >
               {error}
@@ -490,11 +621,12 @@ export function ChatWindow() {
         {handsFree && wake.error ? (
           <p
             style={{
-              color: "#b33",
+              color: "var(--danger)",
               fontSize: 12,
-              background: "rgba(179, 51, 51, 0.08)",
+              background: "rgba(255, 80, 80, 0.06)",
+              border: "1px solid rgba(255, 80, 80, 0.3)",
               padding: 8,
-              borderRadius: 6,
+              borderRadius: 3,
               margin: "0 0 8px 0",
             }}
           >
@@ -505,11 +637,12 @@ export function ChatWindow() {
         {cameraOn && camera.error ? (
           <p
             style={{
-              color: "#b33",
+              color: "var(--danger)",
               fontSize: 12,
-              background: "rgba(179, 51, 51, 0.08)",
+              background: "rgba(255, 80, 80, 0.06)",
+              border: "1px solid rgba(255, 80, 80, 0.3)",
               padding: 8,
-              borderRadius: 6,
+              borderRadius: 3,
               margin: "0 0 8px 0",
             }}
           >
