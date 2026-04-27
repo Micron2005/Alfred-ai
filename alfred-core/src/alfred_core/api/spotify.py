@@ -22,6 +22,7 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import quote, urlparse
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import RedirectResponse
@@ -170,23 +171,30 @@ def _bounce_url(return_to: str | None, settings: Settings) -> str:
     safe_default = "/"
     if not return_to:
         return safe_default
-    # Allow only relative paths or paths on a small allowlist of
-    # loopback origins. We do this with prefix matching rather than
-    # urlparse magic, but with two important guards so it can't be
-    # turned into an open redirector:
-    #
-    #   - Reject ``//`` (protocol-relative URLs like ``//evil.com``
-    #     which browsers resolve to ``https://evil.com``).
-    #   - Require an explicit origin boundary (trailing ``/`` after the
-    #     host) so ``http://127.0.0.1.evil.com`` doesn't match.
+    # Same-origin relative paths are always allowed — but reject
+    # protocol-relative URLs like ``//evil.com`` which the browser
+    # would resolve to ``https://evil.com``.
     if return_to.startswith("/") and not return_to.startswith("//"):
         return return_to
-    redirect_origin = settings.alfred_spotify_redirect_uri.rsplit("/api/", 1)[0]
-    for origin in ("http://127.0.0.1", "http://localhost", redirect_origin):
-        if not origin:
-            continue
-        if return_to == origin or return_to.startswith(origin + "/"):
-            return return_to
+    # Absolute URLs: parse and allow only loopback origins (any port,
+    # so the frontend on :3000 and the backend on :8000 both work
+    # under the standard docker-compose topology), plus the configured
+    # redirect URI's origin. ``urlparse`` cleanly separates host from
+    # path so attacker-controlled subdomains like
+    # ``http://127.0.0.1.evil.com`` cannot fool the matcher.
+    parsed = urlparse(return_to)
+    if parsed.scheme not in ("http", "https") or not parsed.hostname:
+        return safe_default
+    if parsed.hostname in ("127.0.0.1", "localhost", "::1"):
+        return return_to
+    redirect_origin = urlparse(settings.alfred_spotify_redirect_uri)
+    if (
+        redirect_origin.hostname
+        and parsed.hostname == redirect_origin.hostname
+        and parsed.port == redirect_origin.port
+        and parsed.scheme == redirect_origin.scheme
+    ):
+        return return_to
     return safe_default
 
 
@@ -239,8 +247,11 @@ async def callback(
     # comes back instead of ``code``. Surface it via a query string
     # rather than a 4xx so the SPA can show a polite message.
     if error or not code or not state:
+        # ``quote`` the Spotify-supplied error code so an attacker
+        # who hits this endpoint directly with ``?error=foo%26evil%3D1``
+        # can't smuggle additional query parameters onto the SPA's URL.
         return RedirectResponse(
-            url=f"/?spotify_error={error or 'missing_code'}",
+            url=f"/?spotify_error={quote(error or 'missing_code', safe='')}",
             status_code=302,
         )
     return_to = _consume_state(state)
