@@ -633,7 +633,9 @@ async def chat(req: ChatRequest, session: AsyncSession = Depends(get_session)) -
         visible_reply
     )
     if conversation_titles:
-        suggested_title = conversation_titles[0] or None
+        suggested_title = next(
+            (t for t in conversation_titles if t), None
+        )
         archived = await summarise_and_persist_conversation(
             session=session,
             settings=settings,

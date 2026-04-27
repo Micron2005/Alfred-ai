@@ -75,16 +75,17 @@ _REMEMBER_CONVERSATION_PATTERN = re.compile(
 def extract_remember_conversation(reply: str) -> tuple[str, list[str]]:
     """Pull ``[REMEMBER_CONVERSATION]`` markers out of an assistant reply.
 
-    Returns ``(visible_reply, optional_titles)`` where ``optional_titles``
-    is a list of suggested titles if the model emitted them inline (e.g.
-    ``[REMEMBER_CONVERSATION: Spotify setup]``). Empty list if the user
-    just wanted the conversation archived without a particular label —
-    the summariser will pick a title from the content.
+    Returns ``(visible_reply, titles)`` where ``titles`` has one entry
+    per matched marker — the inline title if the model emitted one
+    (``[REMEMBER_CONVERSATION: Spotify setup]``), otherwise an empty
+    string for a bare ``[REMEMBER_CONVERSATION]``. The caller can use
+    ``if titles:`` as a "was the marker present at all?" check, and
+    pull the first non-empty entry as a suggested title.
     """
     titles: list[str] = []
     for match in _REMEMBER_CONVERSATION_PATTERN.finditer(reply):
-        if match.group(1):
-            titles.append(match.group(1).strip())
+        raw = match.group(1)
+        titles.append(raw.strip() if raw else "")
     cleaned = _REMEMBER_CONVERSATION_PATTERN.sub("", reply)
     cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
     return cleaned, titles

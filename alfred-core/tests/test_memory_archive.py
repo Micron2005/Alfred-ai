@@ -29,7 +29,11 @@ def test_remember_conversation_marker_is_extracted_and_stripped() -> None:
         "[REMEMBER_CONVERSATION]"
     )
     visible, titles = extract_remember_conversation(reply)
-    assert titles == []
+    # Bare marker still produces a list entry — empty string — so the
+    # chat handler's ``if titles:`` check correctly fires the archive.
+    # If we only appended on titled markers, the archive would silently
+    # skip every untitled invocation.
+    assert titles == [""]
     assert "[REMEMBER_CONVERSATION" not in visible
     assert visible == "Of course, sir, I'll keep this one in the archive."
 
@@ -44,10 +48,13 @@ def test_remember_conversation_marker_with_title() -> None:
 def test_remember_conversation_multiple_markers_collect_titles() -> None:
     reply = (
         "[REMEMBER_CONVERSATION: HUD layout decisions]\n"
+        "[REMEMBER_CONVERSATION]\n"
         "[REMEMBER_CONVERSATION: Spotify wiring]"
     )
     visible, titles = extract_remember_conversation(reply)
-    assert titles == ["HUD layout decisions", "Spotify wiring"]
+    # Bare marker in the middle keeps its slot as an empty string so
+    # the count-of-markers semantics survive.
+    assert titles == ["HUD layout decisions", "", "Spotify wiring"]
     assert visible == ""
 
 
