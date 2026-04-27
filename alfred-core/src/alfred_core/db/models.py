@@ -93,3 +93,42 @@ class Feedback(Base):
     rating: Mapped[int] = mapped_column()  # +1 up, -1 down
     note: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(default=_utcnow)
+
+
+class SpotifyAccount(Base):
+    """Linked Spotify account for the single-user Alfred install.
+
+    We store the access + refresh tokens server-side so the chat tool
+    can talk to Spotify directly (start playback, query now-playing,
+    pull audio analysis) without dragging the browser into the loop
+    for every call. The refresh token is long-lived and the access
+    token is renewed on demand when it expires.
+
+    There is intentionally only ever one row in this table: the
+    ``account_key`` column is fixed at ``"default"`` for now since
+    Alfred is single-user. Multi-user support would key it on a real
+    user identifier instead.
+    """
+
+    __tablename__ = "spotify_accounts"
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    account_key: Mapped[str] = mapped_column(String(64), unique=True, default="default")
+    # Spotify user identifiers (display name + URI) for the linked
+    # account, populated on connect so the UI can show "Connected as
+    # X" without an extra API hop.
+    spotify_user_id: Mapped[str] = mapped_column(String(128), default="")
+    display_name: Mapped[str] = mapped_column(String(200), default="")
+    # OAuth tokens. Access tokens are short-lived (1h); we store the
+    # refresh token and renew on demand.
+    access_token: Mapped[str] = mapped_column(Text)
+    refresh_token: Mapped[str] = mapped_column(Text)
+    # Granted scope string (space-delimited list as Spotify returns it).
+    # Stored so we can detect when the user needs to re-link after we
+    # add features that require new scopes.
+    scope: Mapped[str] = mapped_column(Text, default="")
+    # Absolute expiry timestamp for the access token. Refresh proactively
+    # ~30 s before this to avoid mid-call 401s.
+    expires_at: Mapped[datetime] = mapped_column(default=_utcnow)
+    created_at: Mapped[datetime] = mapped_column(default=_utcnow)
+    updated_at: Mapped[datetime] = mapped_column(default=_utcnow, onupdate=_utcnow)

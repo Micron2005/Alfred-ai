@@ -139,3 +139,38 @@ def test_persona_omits_presence_when_camera_is_off() -> None:
     # not in the static persona body.
     assert "Through the laptop camera you can currently see" not in persona.system_prompt
     assert "presumably him" not in persona.system_prompt
+
+
+def test_persona_includes_spotify_prompt_only_when_configured_and_linked() -> None:
+    """The Spotify tool prompt requires both server-config + a linked account."""
+    base = Settings(
+        alfred_spotify_client_id="cid", alfred_spotify_client_secret="secret"
+    )
+
+    # Configured but not linked: do NOT inject the prompt — the LLM
+    # would otherwise lie about being able to play music.
+    persona_unlinked = build_persona(
+        Mode.STANDARD, base, ContextBundle(spotify_linked=False)
+    )
+    assert "[SPOTIFY_PLAY:" not in persona_unlinked.system_prompt
+    assert "MUSIC" not in persona_unlinked.system_prompt
+
+    # Configured AND linked: prompt is injected.
+    persona_linked = build_persona(
+        Mode.STANDARD, base, ContextBundle(spotify_linked=True)
+    )
+    assert "[SPOTIFY_PLAY:" in persona_linked.system_prompt
+    assert "MUSIC" in persona_linked.system_prompt
+    # Nightfall should also pick it up.
+    persona_linked_nf = build_persona(
+        Mode.NIGHTFALL, base, ContextBundle(spotify_linked=True)
+    )
+    assert "[SPOTIFY_PLAY:" in persona_linked_nf.system_prompt
+
+    # Not configured at all: prompt is absent regardless of link state.
+    persona_unconfigured = build_persona(
+        Mode.STANDARD,
+        Settings(alfred_spotify_client_id="", alfred_spotify_client_secret=""),
+        ContextBundle(spotify_linked=True),
+    )
+    assert "[SPOTIFY_PLAY:" not in persona_unconfigured.system_prompt

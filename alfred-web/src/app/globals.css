@@ -347,3 +347,109 @@ input {
   background-clip: padding-box;
   border: 2px solid transparent;
 }
+
+/* ─── Spotify HUD widget ────────────────────────────────────────── */
+
+.hud-spotify {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  width: min(420px, 92%);
+  padding: 8px 12px 10px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: rgba(108, 214, 255, 0.03);
+  position: relative;
+}
+.nightfall .hud-spotify {
+  background: rgba(216, 236, 255, 0.025);
+}
+.hud-spotify--unconfigured {
+  border-color: rgba(108, 214, 255, 0.18);
+  background: transparent;
+  padding: 4px 10px;
+  font-family:
+    ui-monospace, SFMono-Regular, "JetBrains Mono", "Fira Code", monospace;
+  font-size: 10px;
+  letter-spacing: 1.4px;
+  color: var(--muted);
+  opacity: 0.6;
+}
+.hud-spotify__label {
+  display: inline-block;
+  text-transform: uppercase;
+}
+.hud-spotify__row {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+}
+.hud-spotify__bars {
+  display: block;
+  width: 100%;
+  height: 56px;
+}
+.hud-spotify__bar {
+  fill: var(--hud);
+  filter: drop-shadow(0 0 4px var(--orb-glow));
+  transition: fill 200ms ease;
+}
+.hud-spotify__bar--nightfall {
+  fill: var(--hud);
+  /* Nightfall bars use the colder accent; the HUD variable already
+     swaps with the body class, so this rule mostly exists to allow
+     a stronger glow without affecting the standard palette. */
+  filter: drop-shadow(0 0 6px rgba(216, 236, 255, 0.5));
+}
+.hud-spotify__now {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+}
+.hud-spotify__art {
+  width: 48px;
+  height: 48px;
+  border-radius: 2px;
+  object-fit: cover;
+  border: 1px solid var(--border);
+}
+.hud-spotify__meta {
+  flex: 1;
+  min-width: 0;
+}
+.hud-spotify__title {
+  font-family:
+    ui-monospace, SFMono-Regular, "JetBrains Mono", "Fira Code", monospace;
+  font-size: 12px;
+  letter-spacing: 1.2px;
+  text-transform: uppercase;
+  color: var(--hud);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.hud-spotify__artist {
+  font-size: 11px;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  margin-top: 2px;
+}
+.hud-spotify__controls {
+  display: flex;
+  gap: 6px;
+}
+.hud-spotify__error {
+  font-size: 10px;
+  color: var(--danger);
+  font-family:
+    ui-monospace, SFMono-Regular, "JetBrains Mono", "Fira Code", monospace;
+  letter-spacing: 1.2px;
+  text-transform: uppercase;
+  text-align: center;
+  width: 100%;
+}

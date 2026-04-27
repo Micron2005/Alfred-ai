@@ -52,6 +52,12 @@ class ContextBundle:
     # toggled it on. ``None`` means the camera is off (or unsupported);
     # an integer means "this many faces are visible right now".
     faces_visible: int | None = None
+    # Whether the user has finished the Spotify OAuth flow. Both this
+    # AND ``settings.has_spotify`` (the dev-app credentials) must be
+    # true for the music-control tool prompt to be attached. Without
+    # this flag we'd tell the LLM it can play music when in fact the
+    # account isn't linked yet.
+    spotify_linked: bool = False
 
 
 STANDARD_TEMPLATE = """\
@@ -221,6 +227,47 @@ similar so the user knows what's happening — but don't pad it.
 """
 
 
+SPOTIFY_TOOL_PROMPT = """\
+
+MUSIC — YOU CAN CONTROL HIS SPOTIFY
+You have a Spotify control tool. The user has Premium and is linked, \
+so you can actually start, pause, skip, and look up music — not just \
+talk about it. Use it whenever he asks for music ("play something \
+focused", "skip this", "what's playing?", "put on Foals", "pause"). \
+Do NOT use it for unrelated chat.
+
+To use the tool, include ONE of these markers on its own line in your \
+reply:
+
+    [SPOTIFY_PLAY: <free-text query>]    e.g. [SPOTIFY_PLAY: Bohemian Rhapsody by Queen]
+    [SPOTIFY_RESUME]                     resume what was already playing
+    [SPOTIFY_PAUSE]
+    [SPOTIFY_NEXT]
+    [SPOTIFY_PREV]
+    [SPOTIFY_NOW]                        check the currently-playing track
+
+The system will execute the action and replace the marker with a short \
+confirmation in his view (e.g. "_(Now playing: Bohemian Rhapsody — \
+Queen)_"). On failure, the marker is replaced with a polite error \
+line and you'll see the result on the next turn — apologise briefly \
+and offer to try something else.
+
+Rules:
+- Emit at most ONE marker per reply. If he asks for two things ("pause \
+and tell me what was playing"), pick the most useful one.
+- Keep PLAY queries short and search-engine-shaped — \
+"focused instrumental" or "Foals What Went Down", not "could you put \
+on something a bit ambient please". Spotify does the matching.
+- Don't pretend you played something if you didn't emit a marker. \
+Either emit it, or admit you can't.
+- The Spotify Connect device named "Alfred" is your in-browser player. \
+If he says "play it through Alfred" he means use that device — but \
+the system handles device routing for you, so just emit the marker.
+- A short polite line beside the marker is fine \
+("Very good, {address}.") but don't pad.
+"""
+
+
 EMAIL_TOOL_PROMPT = """\
 
 EMAIL — YOU CAN SEND ON HIS BEHALF
@@ -344,6 +391,16 @@ def build_persona(
 
     if settings.has_gmail:
         prompt = prompt + EMAIL_TOOL_PROMPT.format(
+            address=settings.alfred_user_address,
+        )
+
+    # Spotify control is gated on both server-side configuration AND
+    # the user having linked their account — without the OAuth grant
+    # there's no token to make API calls with, so dangling the
+    # capability in the prompt would just cause Alfred to lie about
+    # what he can do.
+    if settings.has_spotify and context is not None and context.spotify_linked:
+        prompt = prompt + SPOTIFY_TOOL_PROMPT.format(
             address=settings.alfred_user_address,
         )
 

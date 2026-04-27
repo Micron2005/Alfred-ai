@@ -71,6 +71,28 @@ class Settings(BaseSettings):
     alfred_edge_tts_rate: str = Field(default="+0%")
     alfred_edge_tts_pitch: str = Field(default="+0Hz")
 
+    # ─── Spotify ────────────────────────────────────────────────────────
+    # Create a free Spotify Developer app at developer.spotify.com/dashboard.
+    # Add ``http://127.0.0.1:8000/api/spotify/callback`` to the app's
+    # redirect URIs and tick both Web API and Web Playback SDK. Then drop
+    # the Client ID + Client Secret into .env.
+    #
+    # IMPORTANT: Spotify began rejecting ``http://localhost`` in 2025.
+    # Loopback URIs must use the literal IP ``127.0.0.1`` instead. The
+    # default below reflects that.
+    #
+    # If unset, Spotify integration is silently disabled and Alfred
+    # responds politely that music control isn't wired up rather than
+    # crashing.
+    alfred_spotify_client_id: str = Field(default="")
+    alfred_spotify_client_secret: str = Field(default="")
+    # The redirect URI must match exactly what is registered in the Spotify
+    # app dashboard. Defaults to the local backend; override only if the
+    # backend is exposed on a different host/port.
+    alfred_spotify_redirect_uri: str = Field(
+        default="http://127.0.0.1:8000/api/spotify/callback"
+    )
+
     @property
     def has_cloud(self) -> bool:
         """Whether a real Anthropic key has been configured."""
@@ -87,6 +109,20 @@ class Settings(BaseSettings):
     def has_tavily(self) -> bool:
         """Whether a Tavily API key is configured for web search."""
         return bool(self.alfred_tavily_api_key and self.alfred_tavily_api_key.strip())
+
+    @property
+    def has_spotify(self) -> bool:
+        """Whether Spotify Developer app credentials are configured.
+
+        Note: this only checks that the *app* is configured. The user
+        must still link their Spotify *account* via the OAuth flow
+        before the integration can actually do anything. See
+        ``SpotifyClient.get_status``.
+        """
+        return bool(
+            self.alfred_spotify_client_id.strip()
+            and self.alfred_spotify_client_secret.strip()
+        )
 
 
 @lru_cache(maxsize=1)
