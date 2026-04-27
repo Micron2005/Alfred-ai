@@ -226,7 +226,20 @@ class SpotifyClient:
     # ─── Access-token plumbing ───────────────────────────────────────
 
     async def get_access_token(self) -> str:
-        """Return a non-expired access token, refreshing if needed."""
+        """Return a non-expired access token, refreshing if needed.
+
+        On refresh we ``flush()`` rather than ``commit()`` so the new
+        token row is staged but the surrounding transaction's atomicity
+        is preserved. The chat handler reuses one DB session per turn
+        (user message + facts + assistant message must commit together
+        or not at all); a stray commit here would prematurely persist
+        whatever the caller was mid-way through writing.
+
+        The trade-off is that if the caller later rolls back, the
+        refreshed token is lost — but the next request will simply
+        refresh again. Spotify allows that freely, so the cost is just
+        one extra HTTP call in the rare rollback case.
+        """
         account = await self._require_account()
         # Compare in aware UTC. Old rows written before we made
         # _utcnow tz-aware may be naive; treat those as expired.
@@ -242,7 +255,7 @@ class SpotifyClient:
         new_refresh = token_payload.get("refresh_token")
         if new_refresh:
             account.refresh_token = str(new_refresh)
-        await self._session.commit()
+        await self._session.flush()
         return account.access_token
 
     # ─── Public API surface used by the chat tool + HUD ──────────────
@@ -250,11 +263,11 @@ class SpotifyClient:
     async def now_playing(self) -> TrackInfo | None:
         """Return what's currently playing, or ``None`` if nothing is."""
         token = await self.get_access_token()
-        async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
-            response = await client.get(
-                f"{_API_BASE}/me/player/currently-playing",
-                headers=self._auth_headers(token),
-            )
+        response = await self._http(
+            "GET",
+            f"{_API_BASE}/me/player/currently-playing",
+            headers=self._auth_headers(token),
+        )
         # 204: no track playing right now (could be paused, idle, or no
         # active device). The endpoint distinguishes "no content" via
         # status code rather than body, hence this check.
@@ -345,12 +358,12 @@ class SpotifyClient:
         Returns ``None`` if Spotify finds nothing.
         """
         token = await self.get_access_token()
-        async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
-            response = await client.get(
-                f"{_API_BASE}/search",
-                headers=self._auth_headers(token),
-                params={"q": query, "type": "track", "limit": 1},
-            )
+        response = await self._http(
+            "GET",
+            f"{_API_BASE}/search",
+            headers=self._auth_headers(token),
+            params={"q": query, "type": "track", "limit": 1},
+        )
         if response.status_code >= 400:
             raise SpotifyError(
                 f"Spotify search returned HTTP {response.status_code}: "
@@ -375,11 +388,11 @@ class SpotifyClient:
         if not track_id:
             raise SpotifyError("track_id is required for audio analysis.")
         token = await self.get_access_token()
-        async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
-            response = await client.get(
-                f"{_API_BASE}/audio-analysis/{track_id}",
-                headers=self._auth_headers(token),
-            )
+        response = await self._http(
+            "GET",
+            f"{_API_BASE}/audio-analysis/{track_id}",
+            headers=self._auth_headers(token),
+        )
         if response.status_code == 404:
             raise SpotifyError("No audio analysis available for that track.")
         if response.status_code >= 400:
@@ -423,25 +436,43 @@ class SpotifyClient:
         return {"Authorization": f"Bearer {token}"}
 
     @staticmethod
+    async def _http(method: str, url: str, **kwargs: Any) -> httpx.Response:
+        """Issue an HTTP call, translating network errors to ``SpotifyError``.
+
+        Without this, an httpx timeout or DNS failure would propagate as
+        a raw exception out of the chat handler / API endpoints and
+        surface as a 500 to the user. By converting everything into our
+        own error type here, callers can fold the failure into a polite
+        reply (the chat handler) or a clean 503 (the API endpoints).
+        """
+        try:
+            async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
+                return await client.request(method, url, **kwargs)
+        except httpx.HTTPError as exc:
+            raise SpotifyError(
+                f"Couldn't reach Spotify ({exc.__class__.__name__})."
+            ) from exc
+
+    @staticmethod
     def _expiry_from(token_payload: dict[str, Any]) -> datetime:
         raw_ttl = token_payload.get("expires_in") or 0
         ttl = int(raw_ttl) if isinstance(raw_ttl, (int, float, str)) else 0
         return datetime.now(UTC) + timedelta(seconds=max(ttl, 30))
 
     async def _exchange_code(self, code: str) -> dict[str, Any]:
-        async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
-            response = await client.post(
-                f"{_AUTH_BASE}/api/token",
-                headers={
-                    "Authorization": self._basic_auth(),
-                    "Content-Type": "application/x-www-form-urlencoded",
-                },
-                data={
-                    "grant_type": "authorization_code",
-                    "code": code,
-                    "redirect_uri": self._settings.alfred_spotify_redirect_uri,
-                },
-            )
+        response = await self._http(
+            "POST",
+            f"{_AUTH_BASE}/api/token",
+            headers={
+                "Authorization": self._basic_auth(),
+                "Content-Type": "application/x-www-form-urlencoded",
+            },
+            data={
+                "grant_type": "authorization_code",
+                "code": code,
+                "redirect_uri": self._settings.alfred_spotify_redirect_uri,
+            },
+        )
         if response.status_code >= 400:
             raise SpotifyError(
                 f"Token exchange failed (HTTP {response.status_code}): "
@@ -450,18 +481,18 @@ class SpotifyClient:
         return cast(dict[str, Any], response.json())
 
     async def _refresh(self, refresh_token: str) -> dict[str, Any]:
-        async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
-            response = await client.post(
-                f"{_AUTH_BASE}/api/token",
-                headers={
-                    "Authorization": self._basic_auth(),
-                    "Content-Type": "application/x-www-form-urlencoded",
-                },
-                data={
-                    "grant_type": "refresh_token",
-                    "refresh_token": refresh_token,
-                },
-            )
+        response = await self._http(
+            "POST",
+            f"{_AUTH_BASE}/api/token",
+            headers={
+                "Authorization": self._basic_auth(),
+                "Content-Type": "application/x-www-form-urlencoded",
+            },
+            data={
+                "grant_type": "refresh_token",
+                "refresh_token": refresh_token,
+            },
+        )
         if response.status_code >= 400:
             # If the refresh token is rejected the user has to re-link;
             # surface that distinctly so the UI can prompt them.
@@ -476,11 +507,11 @@ class SpotifyClient:
         return cast(dict[str, Any], response.json())
 
     async def _fetch_profile(self, access_token: str) -> dict[str, Any]:
-        async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
-            response = await client.get(
-                f"{_API_BASE}/me",
-                headers=self._auth_headers(access_token),
-            )
+        response = await self._http(
+            "GET",
+            f"{_API_BASE}/me",
+            headers=self._auth_headers(access_token),
+        )
         if response.status_code >= 400:
             raise SpotifyError(
                 f"Couldn't fetch Spotify profile (HTTP {response.status_code})."
@@ -497,14 +528,13 @@ class SpotifyClient:
         json: dict[str, Any] | None = None,
     ) -> None:
         """Issue a playback-control call and translate Spotify's quirks."""
-        async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
-            response = await client.request(
-                method,
-                f"{_API_BASE}{path}",
-                headers=self._auth_headers(token),
-                params=params,
-                json=json,
-            )
+        response = await self._http(
+            method,
+            f"{_API_BASE}{path}",
+            headers=self._auth_headers(token),
+            params=params,
+            json=json,
+        )
         # 204 is the success signal for most playback calls.
         if response.status_code in (200, 202, 204):
             return

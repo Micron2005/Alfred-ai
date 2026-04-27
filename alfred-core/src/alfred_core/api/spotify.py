@@ -170,19 +170,22 @@ def _bounce_url(return_to: str | None, settings: Settings) -> str:
     safe_default = "/"
     if not return_to:
         return safe_default
-    # Allow only relative paths or paths on common loopback origins.
-    # Doing this with allowlist rather than urlparse magic keeps the
-    # check airtight and easy to reason about.
-    if return_to.startswith("/"):
+    # Allow only relative paths or paths on a small allowlist of
+    # loopback origins. We do this with prefix matching rather than
+    # urlparse magic, but with two important guards so it can't be
+    # turned into an open redirector:
+    #
+    #   - Reject ``//`` (protocol-relative URLs like ``//evil.com``
+    #     which browsers resolve to ``https://evil.com``).
+    #   - Require an explicit origin boundary (trailing ``/`` after the
+    #     host) so ``http://127.0.0.1.evil.com`` doesn't match.
+    if return_to.startswith("/") and not return_to.startswith("//"):
         return return_to
-    for prefix in (
-        "http://127.0.0.1",
-        "http://localhost",
-        # Trust the configured redirect URI's origin too (in case the
-        # frontend is hosted somewhere other than the loopback).
-        settings.alfred_spotify_redirect_uri.rsplit("/api/", 1)[0],
-    ):
-        if prefix and return_to.startswith(prefix):
+    redirect_origin = settings.alfred_spotify_redirect_uri.rsplit("/api/", 1)[0]
+    for origin in ("http://127.0.0.1", "http://localhost", redirect_origin):
+        if not origin:
+            continue
+        if return_to == origin or return_to.startswith(origin + "/"):
             return return_to
     return safe_default
 
@@ -293,6 +296,12 @@ async def access_token(
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except (SpotifyUnconfiguredError, SpotifyError) as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
+    # ``get_access_token`` flushes a refreshed token but doesn't commit
+    # (so the chat handler can keep transactional control over its own
+    # turn). Standalone endpoints like this one own the request and
+    # must commit themselves, otherwise the new token vanishes when
+    # the session closes.
+    await session.commit()
     return AccessTokenResponse(access_token=token)
 
 
@@ -307,6 +316,9 @@ async def now_playing(
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except (SpotifyUnconfiguredError, SpotifyError) as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
+    # ``now_playing`` may have refreshed the access token via
+    # ``get_access_token``; persist that here.
+    await session.commit()
     if track is None:
         return None
     return TrackResponse(
@@ -333,8 +345,8 @@ async def play(
         if req.uri:
             uris = [req.uri]
             await client.play(device_id=req.device_id, uris=uris)
-            return {"played_uri": req.uri}
-        if req.query:
+            played_uri: str | None = req.uri
+        elif req.query:
             uri = await client.search_track(req.query)
             if uri is None:
                 raise HTTPException(
@@ -342,14 +354,18 @@ async def play(
                     detail=f"Spotify couldn't find a track matching {req.query!r}.",
                 )
             await client.play(device_id=req.device_id, uris=[uri])
-            return {"played_uri": uri}
-        # Neither query nor URI: just resume.
-        await client.play(device_id=req.device_id)
-        return {"played_uri": None}
+            played_uri = uri
+        else:
+            # Neither query nor URI: just resume.
+            await client.play(device_id=req.device_id)
+            played_uri = None
     except SpotifyNotLinkedError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except (SpotifyUnconfiguredError, SpotifyError) as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
+    # Persist any token refresh that happened inside ``client``.
+    await session.commit()
+    return {"played_uri": played_uri}
 
 
 @router.post("/pause")
@@ -363,6 +379,7 @@ async def pause(
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except (SpotifyUnconfiguredError, SpotifyError) as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
+    await session.commit()
     return {"ok": True}
 
 
@@ -377,6 +394,7 @@ async def next_track(
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except (SpotifyUnconfiguredError, SpotifyError) as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
+    await session.commit()
     return {"ok": True}
 
 
@@ -391,6 +409,7 @@ async def previous_track(
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except (SpotifyUnconfiguredError, SpotifyError) as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
+    await session.commit()
     return {"ok": True}
 
 
@@ -406,6 +425,7 @@ async def transfer(
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except (SpotifyUnconfiguredError, SpotifyError) as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
+    await session.commit()
     return {"ok": True}
 
 
@@ -416,8 +436,10 @@ async def audio_analysis(
     settings: Settings = Depends(get_settings),
 ) -> dict[str, Any]:
     try:
-        return await _client(session, settings).audio_analysis(track_id)
+        analysis = await _client(session, settings).audio_analysis(track_id)
     except SpotifyNotLinkedError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except (SpotifyUnconfiguredError, SpotifyError) as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
+    await session.commit()
+    return analysis
