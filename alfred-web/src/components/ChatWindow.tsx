@@ -29,7 +29,11 @@ const VOICE_OUT_KEY = "alfred.voiceOutEnabled";
 const HANDS_FREE_KEY = "alfred.handsFreeEnabled";
 const CAMERA_KEY = "alfred.cameraEnabled";
 const FULL_HUD_KEY = "alfred.fullHudEnabled";
-const SIDEBAR_COLLAPSED_KEY = "alfred.sidebarCollapsed";
+// v2: the sidebar's role changed (it now hosts the active chat, not
+// just the archive list). Old "collapsed=1" values from v1 would
+// hide the conversation from existing users post-upgrade, so we use
+// a new key to start everyone fresh on the new default (expanded).
+const SIDEBAR_COLLAPSED_KEY = "alfred.sidebarCollapsed.v2";
 
 // Use ``||`` (not ``??``) so an empty-string value from Docker Compose
 // — which is what `${NEXT_PUBLIC_WAKE_KEYWORD}` expands to when the
@@ -55,11 +59,11 @@ export function ChatWindow() {
   const [handsFree, setHandsFree] = useState(false);
   const [cameraOn, setCameraOn] = useState(false);
   const [fullHud, setFullHud] = useState(false);
-  // Default ``true`` (collapsed) — most users with a single
-  // conversation don't need the archive panel taking up screen real
-  // estate. The toggle is sticky so anyone who wants it expanded
-  // only has to click once.
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(true);
+  // Default ``false`` (expanded) — the sidebar now hosts the active
+  // conversation (CONVERSATION tab) so collapsing it by default
+  // would hide the chat entirely. Users can collapse it manually
+  // when they want the HUD full-screen.
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [recording, setRecording] = useState(false);
   const [speaking, setSpeaking] = useState(false);
   const endRef = useRef<HTMLDivElement>(null);
@@ -80,9 +84,14 @@ export function ChatWindow() {
     setVoiceOut(localStorage.getItem(VOICE_OUT_KEY) === "1");
     setHandsFree(localStorage.getItem(HANDS_FREE_KEY) === "1");
     setCameraOn(localStorage.getItem(CAMERA_KEY) === "1");
-    setFullHud(localStorage.getItem(FULL_HUD_KEY) === "1");
-    // ``null`` falls through to the default (collapsed) so first-time
-    // users get the cleaner layout out of the box.
+    // Now that the chat lives in the sidebar, the main pane would
+    // be nearly empty without the HUD widgets — default the full HUD
+    // *on* for users who haven't explicitly turned it off. Existing
+    // "0" values are still respected.
+    const fullHudStored = localStorage.getItem(FULL_HUD_KEY);
+    setFullHud(fullHudStored === null ? true : fullHudStored === "1");
+    // Sidebar default = expanded (chat lives there). Persisted value
+    // overrides the default if present.
     const stored = localStorage.getItem(SIDEBAR_COLLAPSED_KEY);
     if (stored !== null) setSidebarCollapsed(stored === "1");
   }, []);
@@ -462,6 +471,143 @@ export function ChatWindow() {
           ? `Standing by · ${WAKE_LABEL}`
           : "Standing by";
 
+  // The active conversation lives in the sidebar's CONVERSATION tab
+  // — extract it as a JSX block so we can pass it to the sidebar
+  // without ChatWindow's render becoming unreadable. This used to
+  // sit in the main pane, which meant a long chat would push the
+  // HUD off-screen and the user couldn't reach the camera/voice
+  // toggles without scrolling all the way back up.
+  const chatPane = (
+    <>
+      <main
+        style={{
+          flex: 1,
+          overflowY: "auto",
+          padding: "12px 14px 16px",
+        }}
+      >
+        {loadingConvo ? (
+          <p
+            className="mono"
+            style={{
+              color: "var(--muted)",
+              textAlign: "center",
+              marginTop: 40,
+              fontSize: 11,
+            }}
+          >
+            · RETRIEVING CONVERSATION ·
+          </p>
+        ) : messages.length === 0 ? (
+          <p
+            style={{
+              color: "var(--muted)",
+              textAlign: "center",
+              marginTop: 40,
+              fontStyle: "italic",
+              fontSize: 13,
+              padding: "0 8px",
+            }}
+          >
+            Say &ldquo;Hello Alfred&rdquo; to begin.
+          </p>
+        ) : (
+          messages.map((m) => <Message key={m.id} msg={m} />)
+        )}
+        {busy ? (
+          <p
+            className="mono"
+            style={{
+              color: "var(--hud)",
+              fontSize: 11,
+              opacity: 0.85,
+              margin: "12px 0",
+              textAlign: "center",
+            }}
+          >
+            · ALFRED IS COMPOSING A REPLY ·
+          </p>
+        ) : null}
+        {error ? (
+          <p
+            style={{
+              color: "var(--danger)",
+              fontSize: 13,
+              background: "rgba(255, 80, 80, 0.06)",
+              border: "1px solid rgba(255, 80, 80, 0.3)",
+              padding: 10,
+              borderRadius: 3,
+            }}
+          >
+            {error}
+          </p>
+        ) : null}
+        <div ref={endRef} />
+      </main>
+
+      {handsFree && wake.error ? (
+        <p
+          style={{
+            color: "var(--danger)",
+            fontSize: 12,
+            background: "rgba(255, 80, 80, 0.06)",
+            border: "1px solid rgba(255, 80, 80, 0.3)",
+            padding: 8,
+            borderRadius: 3,
+            margin: "0 12px 8px",
+          }}
+        >
+          {wake.error}
+        </p>
+      ) : null}
+
+      {cameraOn && camera.error ? (
+        <p
+          style={{
+            color: "var(--danger)",
+            fontSize: 12,
+            background: "rgba(255, 80, 80, 0.06)",
+            border: "1px solid rgba(255, 80, 80, 0.3)",
+            padding: 8,
+            borderRadius: 3,
+            margin: "0 12px 8px",
+          }}
+        >
+          {camera.error}
+        </p>
+      ) : null}
+
+      <div style={{ padding: "0 12px 12px" }}>
+        <Composer
+          ref={composerRef}
+          onSend={handleSend}
+          disabled={busy || loadingConvo}
+          onMicStateChange={setRecording}
+        />
+      </div>
+
+      {/*
+        Hidden <video> for the camera feed. We don't render the live
+        preview to the user — the chat header's face count is enough
+        ambient feedback. Keep ``playsInline`` + ``muted`` so iOS
+        Safari and Chrome let it autoplay without user gesture once the
+        stream is attached. ``aria-hidden`` so screen readers ignore it.
+      */}
+      <video
+        // useRef<T>(null) yields RefObject<T | null>, which the
+        // installed @types/react (v18 against a v19-rc react) refuses
+        // to accept as a video element ref. The runtime contract is
+        // identical — a current that may be null until mount — so
+        // cast it through the type the JSX prop expects.
+        ref={camera.videoRef as React.RefObject<HTMLVideoElement>}
+        playsInline
+        muted
+        aria-hidden
+        style={{ display: "none" }}
+      />
+    </>
+  );
+
   return (
     <div style={{ display: "flex", minHeight: "100vh" }}>
       <ConversationSidebar
@@ -475,6 +621,7 @@ export function ChatWindow() {
         busy={busy || loadingConvo}
         collapsed={sidebarCollapsed}
         onToggleCollapsed={toggleSidebar}
+        chatPane={chatPane}
       />
 
       <div
@@ -482,10 +629,10 @@ export function ChatWindow() {
           flex: 1,
           display: "flex",
           flexDirection: "column",
-          // Chat reads naturally at ~920 px wide — bump that ceiling
-          // a little when the sidebar is collapsed so the reclaimed
-          // width isn't entirely dead space on either side.
-          maxWidth: sidebarCollapsed ? 1100 : 920,
+          // Main pane is now pure HUD (no chat) — let it use the
+          // available width up to a generous ceiling so the JARVIS
+          // widgets aren't squished into a narrow column.
+          maxWidth: 1200,
           margin: "0 auto",
           padding: "0 24px 16px",
           width: "100%",
@@ -669,128 +816,6 @@ export function ChatWindow() {
           <SpotifyPlayer nightfall={mode === "nightfall"} />
         </div>
 
-        <main
-          style={{
-            flex: 1,
-            overflowY: "auto",
-            padding: "12px 4px 20px",
-          }}
-        >
-          {loadingConvo ? (
-            <p
-              className="mono"
-              style={{
-                color: "var(--muted)",
-                textAlign: "center",
-                marginTop: 40,
-                fontSize: 11,
-              }}
-            >
-              · RETRIEVING CONVERSATION ·
-            </p>
-          ) : messages.length === 0 ? (
-            <p
-              style={{
-                color: "var(--muted)",
-                textAlign: "center",
-                marginTop: 40,
-                fontStyle: "italic",
-              }}
-            >
-              Say &ldquo;Hello Alfred&rdquo; to begin.
-            </p>
-          ) : (
-            messages.map((m) => <Message key={m.id} msg={m} />)
-          )}
-          {busy ? (
-            <p
-              className="mono"
-              style={{
-                color: "var(--hud)",
-                fontSize: 11,
-                opacity: 0.85,
-                margin: "12px 0",
-                textAlign: "center",
-              }}
-            >
-              · ALFRED IS COMPOSING A REPLY ·
-            </p>
-          ) : null}
-          {error ? (
-            <p
-              style={{
-                color: "var(--danger)",
-                fontSize: 13,
-                background: "rgba(255, 80, 80, 0.06)",
-                border: "1px solid rgba(255, 80, 80, 0.3)",
-                padding: 10,
-                borderRadius: 3,
-              }}
-            >
-              {error}
-            </p>
-          ) : null}
-          <div ref={endRef} />
-        </main>
-
-        {handsFree && wake.error ? (
-          <p
-            style={{
-              color: "var(--danger)",
-              fontSize: 12,
-              background: "rgba(255, 80, 80, 0.06)",
-              border: "1px solid rgba(255, 80, 80, 0.3)",
-              padding: 8,
-              borderRadius: 3,
-              margin: "0 0 8px 0",
-            }}
-          >
-            {wake.error}
-          </p>
-        ) : null}
-
-        {cameraOn && camera.error ? (
-          <p
-            style={{
-              color: "var(--danger)",
-              fontSize: 12,
-              background: "rgba(255, 80, 80, 0.06)",
-              border: "1px solid rgba(255, 80, 80, 0.3)",
-              padding: 8,
-              borderRadius: 3,
-              margin: "0 0 8px 0",
-            }}
-          >
-            {camera.error}
-          </p>
-        ) : null}
-
-        <Composer
-          ref={composerRef}
-          onSend={handleSend}
-          disabled={busy || loadingConvo}
-          onMicStateChange={setRecording}
-        />
-
-        {/*
-          Hidden <video> for the camera feed. We don't render the live
-          preview to the user — the chat header's face count is enough
-          ambient feedback. Keep ``playsInline`` + ``muted`` so iOS
-          Safari and Chrome let it autoplay without user gesture once the
-          stream is attached. ``aria-hidden`` so screen readers ignore it.
-        */}
-        <video
-          // useRef<T>(null) yields RefObject<T | null>, which the
-          // installed @types/react (v18 against a v19-rc react) refuses
-          // to accept as a video element ref. The runtime contract is
-          // identical — a current that may be null until mount — so
-          // cast it through the type the JSX prop expects.
-          ref={camera.videoRef as React.RefObject<HTMLVideoElement>}
-          playsInline
-          muted
-          aria-hidden
-          style={{ display: "none" }}
-        />
       </div>
     </div>
   );

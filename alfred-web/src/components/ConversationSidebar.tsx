@@ -1,6 +1,10 @@
 "use client";
 
+import { useEffect, useState } from "react";
 import type { ConversationSummary } from "@/lib/api";
+
+const TAB_KEY = "alfred.sidebarTab";
+type Tab = "conversation" | "archives";
 
 interface Props {
   conversations: ConversationSummary[];
@@ -13,6 +17,11 @@ interface Props {
    * expand button — gives the chat the full window width. */
   collapsed?: boolean;
   onToggleCollapsed?: () => void;
+  /** The active conversation pane (messages + composer + error
+   * banners + hidden camera <video>). The sidebar mounts this in the
+   * "CONVERSATION" tab so the chat lives in the side panel and the
+   * main pane is left to the JARVIS HUD. */
+  chatPane: React.ReactNode;
 }
 
 function formatWhen(iso: string | null): string {
@@ -40,7 +49,24 @@ export function ConversationSidebar({
   busy,
   collapsed = false,
   onToggleCollapsed,
+  chatPane,
 }: Props) {
+  // Tab persistence — once you've picked a tab the choice sticks.
+  // Default ``conversation`` so first paint shows the active chat
+  // (the user almost always wants the chat, not the archive list).
+  const [tab, setTabState] = useState<Tab>("conversation");
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const stored = window.localStorage.getItem(TAB_KEY);
+    if (stored === "archives" || stored === "conversation") setTabState(stored);
+  }, []);
+  const setTab = (next: Tab) => {
+    setTabState(next);
+    if (typeof window !== "undefined") {
+      window.localStorage.setItem(TAB_KEY, next);
+    }
+  };
+
   if (collapsed) {
     // Thin rail mode — only the expand chevron + a quick "+ NEW"
     // shortcut so the user can still start a new conversation
@@ -67,8 +93,8 @@ export function ConversationSidebar({
           type="button"
           className="hud-button hud-button--icon"
           onClick={onToggleCollapsed}
-          title="Show conversation archive"
-          aria-label="Show conversation archive"
+          title="Show conversation panel"
+          aria-label="Show conversation panel"
           style={{ minWidth: 24, padding: "4px 6px", fontSize: 12 }}
         >
           ☰
@@ -87,10 +113,14 @@ export function ConversationSidebar({
       </aside>
     );
   }
+
   return (
     <aside
       style={{
-        width: 260,
+        // Wide enough that long messages wrap naturally rather than
+        // line-by-line. The sidebar is now the primary chat surface,
+        // not just the archive index.
+        width: 420,
         borderRight: "1px solid var(--border)",
         background:
           "linear-gradient(180deg, rgba(255,255,255,0.015) 0%, transparent 30%), var(--bg-elev)",
@@ -102,173 +132,231 @@ export function ConversationSidebar({
         boxShadow: "inset -1px 0 0 rgba(108, 214, 255, 0.04)",
       }}
     >
+      {/*
+        Tab strip — switches the sidebar's body between the active
+        conversation (default) and the archive list. The collapse
+        chevron and "+ NEW" shortcut sit on the same row so they're
+        always reachable regardless of which tab is open.
+      */}
       <div
         style={{
-          padding: "16px 16px 12px",
+          padding: "10px 12px",
           borderBottom: "1px solid var(--border)",
           display: "flex",
           alignItems: "center",
-          justifyContent: "space-between",
-          gap: 8,
+          gap: 6,
         }}
       >
-        <span
-          className="mono"
-          style={{
-            fontSize: 10,
-            color: "var(--muted)",
-            opacity: 0.85,
-            display: "flex",
-            alignItems: "center",
-            gap: 6,
-          }}
-        >
-          {onToggleCollapsed ? (
-            <button
-              type="button"
-              className="hud-button hud-button--icon"
-              onClick={onToggleCollapsed}
-              title="Hide conversation archive"
-              aria-label="Hide conversation archive"
-              style={{ minWidth: 22, padding: "2px 5px", fontSize: 11 }}
-            >
-              ◀
-            </button>
-          ) : null}
-          ⟢ ARCHIVES
-        </span>
+        {onToggleCollapsed ? (
+          <button
+            type="button"
+            className="hud-button hud-button--icon"
+            onClick={onToggleCollapsed}
+            title="Hide conversation panel"
+            aria-label="Hide conversation panel"
+            style={{ minWidth: 22, padding: "3px 6px", fontSize: 11 }}
+          >
+            ◀
+          </button>
+        ) : null}
+        <SidebarTab
+          active={tab === "conversation"}
+          onClick={() => setTab("conversation")}
+          label="◇ CONVERSATION"
+          title="Active chat"
+        />
+        <SidebarTab
+          active={tab === "archives"}
+          onClick={() => setTab("archives")}
+          label="⟢ ARCHIVES"
+          title="Saved conversations"
+        />
+        <span style={{ flex: 1 }} />
         <button
           type="button"
           className="hud-button hud-button--primary"
           onClick={onNewChat}
           disabled={busy}
           title="Start a new conversation"
-          style={{
-            padding: "4px 10px",
-            fontSize: 10,
-          }}
+          style={{ padding: "4px 10px", fontSize: 10 }}
         >
           + NEW
         </button>
       </div>
 
-      <div style={{ flex: 1, overflowY: "auto", padding: "8px 0" }}>
-        {conversations.length === 0 ? (
-          <p
-            style={{
-              color: "var(--muted)",
-              textAlign: "center",
-              fontSize: 13,
-              padding: "20px 16px",
-              fontStyle: "italic",
-            }}
-          >
-            No past conversations yet.
-          </p>
-        ) : (
-          conversations.map((c) => {
-            const isActive = c.id === activeId;
-            return (
-              <div
-                key={c.id}
-                onClick={() => onSelect(c.id)}
-                style={{
-                  padding: "10px 12px 10px 14px",
-                  margin: "2px 8px",
-                  borderRadius: 3,
-                  cursor: "pointer",
-                  background: isActive
-                    ? "rgba(108, 214, 255, 0.08)"
-                    : "transparent",
-                  border: `1px solid ${
-                    isActive ? "var(--hud)" : "transparent"
-                  }`,
-                  boxShadow: isActive
-                    ? "0 0 0 1px var(--hud), 0 0 14px var(--orb-glow)"
-                    : "none",
-                  display: "flex",
-                  flexDirection: "column",
-                  gap: 2,
-                  position: "relative",
-                  transition: "background 160ms ease, border-color 160ms ease",
-                }}
-              >
+      {tab === "conversation" ? (
+        // The chat pane already provides its own scroll container +
+        // composer at the bottom, so we just give it a fill-the-rest
+        // flex column and let it manage itself.
+        <div
+          style={{
+            flex: 1,
+            display: "flex",
+            flexDirection: "column",
+            minHeight: 0, // critical so inner ``overflow:auto`` works
+          }}
+        >
+          {chatPane}
+        </div>
+      ) : (
+        <div style={{ flex: 1, overflowY: "auto", padding: "8px 0" }}>
+          {conversations.length === 0 ? (
+            <p
+              style={{
+                color: "var(--muted)",
+                textAlign: "center",
+                fontSize: 13,
+                padding: "20px 16px",
+                fontStyle: "italic",
+              }}
+            >
+              No past conversations yet.
+            </p>
+          ) : (
+            conversations.map((c) => {
+              const isActive = c.id === activeId;
+              return (
                 <div
-                  style={{
-                    fontSize: 13,
-                    fontWeight: isActive ? 600 : 500,
-                    color: isActive ? "var(--fg)" : "var(--fg)",
-                    overflow: "hidden",
-                    textOverflow: "ellipsis",
-                    whiteSpace: "nowrap",
-                    paddingRight: 20,
+                  key={c.id}
+                  onClick={() => {
+                    onSelect(c.id);
+                    setTab("conversation");
                   }}
-                >
-                  {c.title}
-                </div>
-                <div
                   style={{
-                    fontSize: 10,
-                    color: "var(--muted)",
-                    display: "flex",
-                    justifyContent: "space-between",
-                    fontFamily:
-                      'ui-monospace, SFMono-Regular, "JetBrains Mono", monospace',
-                    letterSpacing: 1,
-                  }}
-                >
-                  <span>{formatWhen(c.last_message_at ?? c.created_at)}</span>
-                  {c.mode === "nightfall" ? (
-                    <span
-                      style={{
-                        color: "var(--accent)",
-                        letterSpacing: 1.5,
-                        textShadow: "0 0 6px var(--accent-soft)",
-                      }}
-                    >
-                      NIGHTFALL
-                    </span>
-                  ) : null}
-                </div>
-                <button
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    if (
-                      window.confirm(`Delete "${c.title}"? This cannot be undone.`)
-                    ) {
-                      onDelete(c.id);
-                    }
-                  }}
-                  aria-label="Delete conversation"
-                  title="Delete"
-                  style={{
-                    position: "absolute",
-                    right: 4,
-                    top: 4,
-                    background: "transparent",
-                    border: "none",
-                    color: "var(--muted)",
-                    cursor: "pointer",
-                    fontSize: 14,
-                    lineHeight: 1,
-                    padding: "2px 6px",
+                    padding: "10px 12px 10px 14px",
+                    margin: "2px 8px",
                     borderRadius: 3,
-                    transition: "color 160ms ease",
-                  }}
-                  onMouseEnter={(e) => {
-                    e.currentTarget.style.color = "var(--danger)";
-                  }}
-                  onMouseLeave={(e) => {
-                    e.currentTarget.style.color = "var(--muted)";
+                    cursor: "pointer",
+                    background: isActive
+                      ? "rgba(108, 214, 255, 0.08)"
+                      : "transparent",
+                    border: `1px solid ${
+                      isActive ? "var(--hud)" : "transparent"
+                    }`,
+                    boxShadow: isActive
+                      ? "0 0 0 1px var(--hud), 0 0 14px var(--orb-glow)"
+                      : "none",
+                    display: "flex",
+                    flexDirection: "column",
+                    gap: 2,
+                    position: "relative",
+                    transition: "background 160ms ease, border-color 160ms ease",
                   }}
                 >
-                  ×
-                </button>
-              </div>
-            );
-          })
-        )}
-      </div>
+                  <div
+                    style={{
+                      fontSize: 13,
+                      fontWeight: isActive ? 600 : 500,
+                      color: "var(--fg)",
+                      overflow: "hidden",
+                      textOverflow: "ellipsis",
+                      whiteSpace: "nowrap",
+                      paddingRight: 20,
+                    }}
+                  >
+                    {c.title}
+                  </div>
+                  <div
+                    style={{
+                      fontSize: 10,
+                      color: "var(--muted)",
+                      display: "flex",
+                      justifyContent: "space-between",
+                      fontFamily:
+                        'ui-monospace, SFMono-Regular, "JetBrains Mono", monospace',
+                      letterSpacing: 1,
+                    }}
+                  >
+                    <span>{formatWhen(c.last_message_at ?? c.created_at)}</span>
+                    {c.mode === "nightfall" ? (
+                      <span
+                        style={{
+                          color: "var(--accent)",
+                          letterSpacing: 1.5,
+                          textShadow: "0 0 6px var(--accent-soft)",
+                        }}
+                      >
+                        NIGHTFALL
+                      </span>
+                    ) : null}
+                  </div>
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      if (
+                        window.confirm(
+                          `Delete "${c.title}"? This cannot be undone.`,
+                        )
+                      ) {
+                        onDelete(c.id);
+                      }
+                    }}
+                    aria-label="Delete conversation"
+                    title="Delete"
+                    style={{
+                      position: "absolute",
+                      right: 4,
+                      top: 4,
+                      background: "transparent",
+                      border: "none",
+                      color: "var(--muted)",
+                      cursor: "pointer",
+                      fontSize: 14,
+                      lineHeight: 1,
+                      padding: "2px 6px",
+                      borderRadius: 3,
+                      transition: "color 160ms ease",
+                    }}
+                    onMouseEnter={(e) => {
+                      e.currentTarget.style.color = "var(--danger)";
+                    }}
+                    onMouseLeave={(e) => {
+                      e.currentTarget.style.color = "var(--muted)";
+                    }}
+                  >
+                    ×
+                  </button>
+                </div>
+              );
+            })
+          )}
+        </div>
+      )}
     </aside>
+  );
+}
+
+function SidebarTab({
+  active,
+  onClick,
+  label,
+  title,
+}: {
+  active: boolean;
+  onClick: () => void;
+  label: string;
+  title: string;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      title={title}
+      className="mono"
+      style={{
+        background: active ? "rgba(108, 214, 255, 0.08)" : "transparent",
+        color: active ? "var(--hud)" : "var(--muted)",
+        border: `1px solid ${active ? "var(--hud)" : "transparent"}`,
+        boxShadow: active ? "0 0 10px var(--orb-glow)" : "none",
+        borderRadius: 3,
+        padding: "4px 8px",
+        fontSize: 10,
+        letterSpacing: 1.5,
+        cursor: "pointer",
+        transition: "background 160ms ease, color 160ms ease",
+      }}
+    >
+      {label}
+    </button>
   );
 }
