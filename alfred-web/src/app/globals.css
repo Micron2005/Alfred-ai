@@ -453,3 +453,208 @@ input {
   text-align: center;
   width: 100%;
 }
+
+/* ─── Full HUD: clock + weather + 7-day forecast ─────────────────────
+ *
+ * The "telemetry" pane sits between the header and the orb when the
+ * user has flipped HUD · FULL on. Two cells: clock on the left,
+ * current weather on the right, joined by a thin gold rule and the
+ * usual cyan corner-bracket notches. Below the orb we render a strip
+ * of seven daily cells.
+ */
+.hud-telemetry {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+  padding: 14px 18px;
+  margin: 4px 0 0;
+  position: relative;
+  border: 1px solid rgba(108, 214, 255, 0.18);
+  border-radius: 4px;
+  background: rgba(108, 214, 255, 0.025);
+}
+.nightfall .hud-telemetry {
+  background: rgba(216, 236, 255, 0.02);
+}
+.hud-telemetry::before,
+.hud-telemetry::after {
+  /* Gold corner brackets — same pattern as Alfred's chat bubbles. */
+  content: "";
+  position: absolute;
+  width: 14px;
+  height: 14px;
+  border-color: var(--accent);
+}
+.hud-telemetry::before {
+  top: -2px;
+  left: -2px;
+  border-top: 1px solid var(--accent);
+  border-left: 1px solid var(--accent);
+}
+.hud-telemetry::after {
+  bottom: -2px;
+  right: -2px;
+  border-bottom: 1px solid var(--accent);
+  border-right: 1px solid var(--accent);
+}
+
+/* ─── Clock ──────────────────────────────────────────────────────── */
+.hud-clock {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 4px;
+}
+.hud-clock-time {
+  font-family:
+    ui-monospace, SFMono-Regular, "JetBrains Mono", "Fira Code", monospace;
+  font-size: 38px;
+  font-weight: 300;
+  color: var(--hud);
+  text-shadow: 0 0 12px var(--orb-glow);
+  letter-spacing: 4px;
+  line-height: 1;
+}
+.hud-clock-date {
+  font-family:
+    ui-monospace, SFMono-Regular, "JetBrains Mono", "Fira Code", monospace;
+  font-size: 11px;
+  color: var(--accent);
+  letter-spacing: 2.2px;
+  text-transform: uppercase;
+}
+
+/* ─── Current weather card ──────────────────────────────────────── */
+.hud-weather {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  align-items: flex-end;
+  text-align: right;
+}
+.hud-weather--loading,
+.hud-weather--error {
+  opacity: 0.4;
+}
+.hud-weather__city {
+  font-family:
+    ui-monospace, SFMono-Regular, "JetBrains Mono", "Fira Code", monospace;
+  font-size: 11px;
+  color: var(--accent);
+  letter-spacing: 2.2px;
+  text-transform: uppercase;
+}
+.hud-weather__row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.hud-weather__icon {
+  font-size: 26px;
+  line-height: 1;
+  filter: drop-shadow(0 0 6px var(--orb-glow));
+}
+.hud-weather__temp {
+  font-family:
+    ui-monospace, SFMono-Regular, "JetBrains Mono", "Fira Code", monospace;
+  font-size: 38px;
+  font-weight: 300;
+  color: var(--hud);
+  text-shadow: 0 0 12px var(--orb-glow);
+  letter-spacing: 2px;
+  line-height: 1;
+}
+.hud-weather__condition {
+  font-size: 12px;
+  color: var(--text);
+  font-style: italic;
+  text-transform: capitalize;
+}
+.hud-weather__detail {
+  font-family:
+    ui-monospace, SFMono-Regular, "JetBrains Mono", "Fira Code", monospace;
+  font-size: 10px;
+  color: var(--muted);
+  letter-spacing: 1.6px;
+}
+
+/* ─── 7-day forecast strip ──────────────────────────────────────── */
+.hud-forecast {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  gap: 6px;
+  margin: 4px 0 12px;
+  padding: 10px 12px;
+  border: 1px solid rgba(108, 214, 255, 0.18);
+  border-radius: 4px;
+  background: rgba(108, 214, 255, 0.02);
+  position: relative;
+}
+.nightfall .hud-forecast {
+  background: rgba(216, 236, 255, 0.02);
+}
+.hud-forecast__day {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 2px;
+  border-right: 1px solid rgba(108, 214, 255, 0.08);
+}
+.hud-forecast__day:last-child {
+  border-right: none;
+}
+.hud-forecast__label {
+  font-family:
+    ui-monospace, SFMono-Regular, "JetBrains Mono", "Fira Code", monospace;
+  font-size: 9px;
+  color: var(--accent);
+  letter-spacing: 1.4px;
+  text-transform: uppercase;
+}
+.hud-forecast__icon {
+  font-size: 22px;
+  line-height: 1;
+  filter: drop-shadow(0 0 6px var(--orb-glow));
+}
+.hud-forecast__high {
+  font-family:
+    ui-monospace, SFMono-Regular, "JetBrains Mono", "Fira Code", monospace;
+  font-size: 14px;
+  color: var(--hud);
+  font-weight: 400;
+  letter-spacing: 1px;
+}
+.hud-forecast__low {
+  font-family:
+    ui-monospace, SFMono-Regular, "JetBrains Mono", "Fira Code", monospace;
+  font-size: 11px;
+  color: var(--muted);
+  letter-spacing: 1px;
+}
+
+/* Compact transport buttons inside the Spotify widget. The base
+ * ``.hud-button`` is wider than a glyph; the icon variant tightens
+ * padding so the row of ⏮ ⏸ ⏭ doesn't dominate the widget. */
+.hud-button--icon {
+  padding: 5px 8px;
+  min-width: 32px;
+  font-size: 12px;
+  letter-spacing: 0;
+}
+
+@media (max-width: 600px) {
+  .hud-telemetry {
+    grid-template-columns: 1fr;
+  }
+  .hud-weather {
+    align-items: flex-start;
+    text-align: left;
+  }
+  .hud-forecast {
+    /* Allow horizontal scroll on small screens rather than crushing
+     * each cell to <30 px wide. */
+    grid-template-columns: repeat(7, minmax(48px, 1fr));
+    overflow-x: auto;
+  }
+}

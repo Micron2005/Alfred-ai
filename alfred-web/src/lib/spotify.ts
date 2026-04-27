@@ -125,6 +125,36 @@ export function transferPlayback(
   });
 }
 
+// ─── Manual transport controls ────────────────────────────────────────
+//
+// These mirror the chat-driven [SPOTIFY_PLAY] / [SPOTIFY_PAUSE] / …
+// markers but go straight from the UI buttons to the backend. We hit
+// the backend (rather than the Web Playback SDK directly) so the same
+// transport works for tracks playing on a non-Alfred device — e.g.
+// the user's phone.
+
+export function playSpotify(): Promise<{ played_uri: string | null }> {
+  return jsonFetch<{ played_uri: string | null }>("/api/spotify/play", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({}),
+  });
+}
+
+export function pauseSpotify(): Promise<{ ok: boolean }> {
+  return jsonFetch<{ ok: boolean }>("/api/spotify/pause", { method: "POST" });
+}
+
+export function nextSpotifyTrack(): Promise<{ ok: boolean }> {
+  return jsonFetch<{ ok: boolean }>("/api/spotify/next", { method: "POST" });
+}
+
+export function previousSpotifyTrack(): Promise<{ ok: boolean }> {
+  return jsonFetch<{ ok: boolean }>("/api/spotify/previous", {
+    method: "POST",
+  });
+}
+
 // ─── Web Playback SDK loader ─────────────────────────────────────────
 //
 // The SDK script is hosted on Spotify's CDN. We load it on demand so
