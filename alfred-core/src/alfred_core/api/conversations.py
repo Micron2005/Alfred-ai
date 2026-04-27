@@ -62,6 +62,35 @@ def _extract_images(metadata: dict[str, object] | None) -> list[MessageImageOut]
     return out
 
 
+def _extract_sources(metadata: dict[str, object] | None) -> list[MessageSourceOut]:
+    """Pull web-search sources out of a Message's ``metadata_json`` blob.
+
+    Sources live there as ``{"sources": [{"title": "...", "url": "...",
+    "snippet": "..."}]}``. Same defensive pattern as ``_extract_images``:
+    return an empty list rather than crashing on malformed data, since
+    older messages will not have this field at all.
+    """
+    if not metadata:
+        return []
+    raw = metadata.get("sources")
+    if not isinstance(raw, list):
+        return []
+    out: list[MessageSourceOut] = []
+    for entry in raw:
+        if not isinstance(entry, dict):
+            continue
+        title = entry.get("title")
+        url = entry.get("url")
+        snippet = entry.get("snippet")
+        if (
+            isinstance(title, str)
+            and isinstance(url, str)
+            and isinstance(snippet, str)
+        ):
+            out.append(MessageSourceOut(title=title, url=url, snippet=snippet))
+    return out
+
+
 class ConversationSummary(BaseModel):
     id: UUID
     title: str
@@ -80,6 +109,12 @@ class MessageImageOut(BaseModel):
     mime_type: str
 
 
+class MessageSourceOut(BaseModel):
+    title: str
+    url: str
+    snippet: str
+
+
 class MessageOut(BaseModel):
     id: UUID
     role: str
@@ -87,6 +122,7 @@ class MessageOut(BaseModel):
     backend: str | None = None
     model: str | None = None
     images: list[MessageImageOut] = []
+    sources: list[MessageSourceOut] = []
     created_at: datetime
 
 
@@ -157,6 +193,7 @@ async def get_conversation(
                 backend=m.backend,
                 model=m.model,
                 images=_extract_images(m.metadata_json),
+                sources=_extract_sources(m.metadata_json),
                 created_at=_as_utc(m.created_at),
             )
             for m in msgs

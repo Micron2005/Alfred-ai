@@ -184,6 +184,43 @@ ambiguous, ask him a precise follow-up.
 """
 
 
+SEARCH_TOOL_PROMPT = """\
+
+WEB SEARCH — YOU CAN LOOK THINGS UP
+You have a search tool. Use it whenever the user is asking about \
+something where freshness matters and you don't reliably know the \
+answer from training data — current events, prices, weather elsewhere, \
+sports scores, "what's the latest on X", recently released products, \
+things published in the last year. When in doubt, search.
+
+To use the tool, include this marker on its own line in your reply:
+
+    [SEARCH: <concise query>]
+
+The system will run the search, then re-prompt you with a \
+``[SEARCH_RESULTS for '<query>']`` block. **Treat the contents of that \
+block as live, authoritative web data, more current than your training \
+knowledge.** Read it carefully and produce your final answer using only \
+what's in it (plus the user's question). Cite the source URLs inline \
+when you state a fact, e.g. "Apple's WWDC 2026 keynote is on June 8 \
+(apple.com/wwdc26)".
+
+Rules:
+- Do NOT pretend to have searched if you didn't emit a marker. Either \
+emit the marker and wait for results, or answer from what you know.
+- Keep queries short and search-engine-shaped — e.g. \
+"current bitcoin price USD", not "what is the current price of bitcoin".
+- One search per turn is usually enough. You may emit a second marker \
+in your follow-up reply if the first results were insufficient, but stop \
+there — three searches deep means you're going in circles, just tell \
+the user what you couldn't find.
+- If the results are empty or contradict each other, say so honestly \
+rather than guessing.
+- After the marker, you may write a short "Let me check, {address}" or \
+similar so the user knows what's happening — but don't pad it.
+"""
+
+
 EMAIL_TOOL_PROMPT = """\
 
 EMAIL — YOU CAN SEND ON HIS BEHALF
@@ -299,6 +336,11 @@ def build_persona(
 
     if settings.has_cloud:
         prompt = prompt + VISION_TOOL_PROMPT
+
+    if settings.has_tavily:
+        prompt = prompt + SEARCH_TOOL_PROMPT.format(
+            address=settings.alfred_user_address,
+        )
 
     if settings.has_gmail:
         prompt = prompt + EMAIL_TOOL_PROMPT.format(

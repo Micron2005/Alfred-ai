@@ -1,10 +1,15 @@
 "use client";
 
-import type { ChatMessageOut } from "@/lib/api";
+import type { ChatMessageOut, ChatSource } from "@/lib/api";
 
 export function Message({ msg }: { msg: ChatMessageOut }) {
   const isUser = msg.role === "user";
   const images = msg.images ?? [];
+  // Sources only appear on assistant turns, and only when Alfred
+  // actually consulted the web for this reply. Drop the synthetic
+  // "Search summary" entry from the visible list — it has no URL,
+  // so a footer chip would be confusing.
+  const sources: ChatSource[] = (msg.sources ?? []).filter((s) => !!s.url);
   return (
     <div
       style={{
@@ -58,6 +63,43 @@ export function Message({ msg }: { msg: ChatMessageOut }) {
           </div>
         )}
         {msg.content && <span>{msg.content}</span>}
+        {sources.length > 0 && (
+          <div
+            style={{
+              marginTop: 8,
+              paddingTop: 8,
+              borderTop: "1px dashed var(--border)",
+              display: "flex",
+              flexDirection: "column",
+              gap: 4,
+              fontSize: 12,
+              opacity: 0.85,
+            }}
+          >
+            <div style={{ fontWeight: 600, opacity: 0.7 }}>
+              🔎 Sources
+            </div>
+            {sources.map((s, idx) => (
+              <a
+                key={`${s.url}-${idx}`}
+                href={s.url}
+                target="_blank"
+                rel="noopener noreferrer"
+                title={s.snippet}
+                style={{
+                  color: "var(--accent)",
+                  textDecoration: "none",
+                  whiteSpace: "nowrap",
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                  maxWidth: "100%",
+                }}
+              >
+                {s.title || s.url}
+              </a>
+            ))}
+          </div>
+        )}
       </div>
     </div>
   );

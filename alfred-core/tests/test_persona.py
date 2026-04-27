@@ -27,6 +27,26 @@ def test_standard_persona_addresses_user_correctly() -> None:
     assert "sir" in persona.greeting.lower()
 
 
+def test_persona_includes_search_prompt_only_when_tavily_configured() -> None:
+    """SEARCH tool instructions should only ship when an API key is set."""
+    persona_off = build_persona(
+        Mode.STANDARD, Settings(alfred_tavily_api_key="")
+    )
+    assert "WEB SEARCH" not in persona_off.system_prompt
+    assert "[SEARCH:" not in persona_off.system_prompt
+
+    persona_on = build_persona(
+        Mode.STANDARD, Settings(alfred_tavily_api_key="key")
+    )
+    assert "WEB SEARCH" in persona_on.system_prompt
+    assert "[SEARCH:" in persona_on.system_prompt
+    # Nightfall should also pick it up.
+    persona_on_nf = build_persona(
+        Mode.NIGHTFALL, Settings(alfred_tavily_api_key="key")
+    )
+    assert "WEB SEARCH" in persona_on_nf.system_prompt
+
+
 def test_standard_persona_does_not_assume_bruce_wayne() -> None:
     persona = build_persona(Mode.STANDARD, _settings())
     # The prompt must explicitly correct the Bruce Wayne assumption.
