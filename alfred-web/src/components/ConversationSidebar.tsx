@@ -24,9 +24,10 @@ interface Props {
    * banners). The sidebar mounts this in the "CONVERSATION" tab so
    * the chat lives in the side panel and the main pane is left to
    * the JARVIS HUD. The element is **always** rendered (just hidden
-   * with ``display:none`` when not in the conversation tab or when
-   * the sidebar is collapsed) so refs into the Composer / wake-word
-   * pipeline don't get nulled out by tab switches or collapses. */
+   * with off-screen positioning when not in the conversation tab or
+   * when the sidebar is collapsed) so refs into the Composer /
+   * wake-word pipeline don't get nulled out by tab switches or
+   * collapses. */
   chatPane: React.ReactNode;
 }
 
@@ -73,172 +74,173 @@ export function ConversationSidebar({
     }
   };
 
-  // The chat pane (Composer, message list, etc.) is mounted
-  // unconditionally so refs/recording state survive collapse + tab
-  // switches. We just hide it via CSS when it shouldn't be on
-  // screen. ``visibility:hidden + position:absolute`` is intentional
-  // (rather than plain ``display:none``) — it keeps Composer's
-  // layout calculations sane (textarea autosize, focus rings) while
-  // still being inert and invisible.
+  // The chat pane (Composer, message list, etc.) must stay mounted
+  // across collapse-toggle and tab-switch transitions — otherwise
+  // ``composerRef.current`` gets nulled out, in-flight recordings
+  // are torn down, and any typed-but-not-sent text or attached
+  // images are lost.
+  //
+  // **The structural rule** is that this slot has to occupy the
+  // *same JSX position with the same key* in every render of
+  // ``ConversationSidebar``, regardless of ``collapsed`` /
+  // ``tab``. React reconciles children by index, so swapping
+  // wholesale return branches (early ``return`` for the collapsed
+  // case, etc.) breaks the invariant and remounts the slot. We
+  // therefore render a single ``<aside>`` shell with one stable
+  // child layout: a top-row ``<div>`` (rail buttons or tab strip)
+  // + the chat pane slot + the optional archives list.
   const chatVisible = !collapsed && tab === "conversation";
-  const chatPaneSlot = (
-    <div
-      aria-hidden={!chatVisible}
-      style={
-        chatVisible
-          ? {
-              flex: 1,
-              display: "flex",
-              flexDirection: "column",
-              minHeight: 0, // critical so inner ``overflow:auto`` works
-            }
-          : {
-              // Mounted but hidden — keeps Composer's ref / hands-free
-              // pipeline / mic recording alive when the user
-              // collapses the sidebar or flips to the archives tab.
-              position: "absolute",
-              left: -99999,
-              top: 0,
-              width: 1,
-              height: 1,
-              overflow: "hidden",
-              pointerEvents: "none",
-            }
-      }
-    >
-      {chatPane}
-    </div>
-  );
-
-  if (collapsed) {
-    // Thin rail mode — only the expand chevron + a quick "+ NEW"
-    // shortcut so the user can still start a new conversation
-    // without first re-opening the panel. Designed to be ~32 px wide
-    // so the HUD reclaims essentially the whole window. The chat
-    // pane is still mounted (off-screen) so wake word + LOOK button
-    // continue to work.
-    return (
-      <aside
-        style={{
-          width: 32,
-          borderRight: "1px solid var(--border)",
-          background: "var(--bg-elev)",
-          display: "flex",
-          flexDirection: "column",
-          alignItems: "center",
-          height: "100vh",
-          position: "sticky",
-          top: 0,
-          padding: "12px 0",
-          gap: 8,
-          boxShadow: "inset -1px 0 0 rgba(108, 214, 255, 0.04)",
-        }}
-      >
-        <button
-          type="button"
-          className="hud-button hud-button--icon"
-          onClick={onToggleCollapsed}
-          title="Show conversation panel"
-          aria-label="Show conversation panel"
-          style={{ minWidth: 24, padding: "4px 6px", fontSize: 12 }}
-        >
-          ☰
-        </button>
-        <button
-          type="button"
-          className="hud-button hud-button--icon"
-          onClick={onNewChat}
-          disabled={busy}
-          title="Start a new conversation"
-          aria-label="Start a new conversation"
-          style={{ minWidth: 24, padding: "4px 6px", fontSize: 12 }}
-        >
-          +
-        </button>
-        {chatPaneSlot}
-      </aside>
-    );
-  }
 
   return (
     <aside
+      // ``key`` on the aside isn't strictly required (it's already
+      // at a stable position in ChatWindow's tree), but width is
+      // styled inline so the element keeps the same identity across
+      // collapse toggles — no remount.
       style={{
-        // Wide enough that long messages wrap naturally rather than
-        // line-by-line. The sidebar is now the primary chat surface,
-        // not just the archive index.
-        width: 420,
+        width: collapsed ? 32 : 420,
         borderRight: "1px solid var(--border)",
-        background:
-          "linear-gradient(180deg, rgba(255,255,255,0.015) 0%, transparent 30%), var(--bg-elev)",
+        background: collapsed
+          ? "var(--bg-elev)"
+          : "linear-gradient(180deg, rgba(255,255,255,0.015) 0%, transparent 30%), var(--bg-elev)",
         display: "flex",
         flexDirection: "column",
         height: "100vh",
         position: "sticky",
         top: 0,
         boxShadow: "inset -1px 0 0 rgba(108, 214, 255, 0.04)",
+        // Important: ``relative`` so the off-screen chat-pane slot
+        // (``position:absolute; left:-99999px``) is anchored to the
+        // sidebar rather than the document.
+        // ``position:sticky`` already establishes a containing
+        // block — making it explicit here for readers.
       }}
     >
       {/*
-        Tab strip — switches the sidebar's body between the active
-        conversation (default) and the archive list. The collapse
-        chevron and "+ NEW" shortcut sit on the same row so they're
-        always reachable regardless of which tab is open.
+        Top row — rail buttons when collapsed, tab strip + new-chat
+        when expanded. Same JSX position in both modes so its
+        children reconcile cleanly.
       */}
-      <div
-        style={{
-          padding: "10px 12px",
-          borderBottom: "1px solid var(--border)",
-          display: "flex",
-          alignItems: "center",
-          gap: 6,
-        }}
-      >
-        {onToggleCollapsed ? (
+      {collapsed ? (
+        <div
+          style={{
+            display: "flex",
+            flexDirection: "column",
+            alignItems: "center",
+            padding: "12px 0",
+            gap: 8,
+          }}
+        >
           <button
             type="button"
             className="hud-button hud-button--icon"
             onClick={onToggleCollapsed}
-            title="Hide conversation panel"
-            aria-label="Hide conversation panel"
-            style={{ minWidth: 22, padding: "3px 6px", fontSize: 11 }}
+            title="Show conversation panel"
+            aria-label="Show conversation panel"
+            style={{ minWidth: 24, padding: "4px 6px", fontSize: 12 }}
           >
-            ◀
+            ☰
           </button>
-        ) : null}
-        <SidebarTab
-          active={tab === "conversation"}
-          onClick={() => setTab("conversation")}
-          label="◇ CONVERSATION"
-          title="Active chat"
-        />
-        <SidebarTab
-          active={tab === "archives"}
-          onClick={() => setTab("archives")}
-          label="⟢ ARCHIVES"
-          title="Saved conversations"
-        />
-        <span style={{ flex: 1 }} />
-        <button
-          type="button"
-          className="hud-button hud-button--primary"
-          onClick={onNewChat}
-          disabled={busy}
-          title="Start a new conversation"
-          style={{ padding: "4px 10px", fontSize: 10 }}
+          <button
+            type="button"
+            className="hud-button hud-button--icon"
+            onClick={onNewChat}
+            disabled={busy}
+            title="Start a new conversation"
+            aria-label="Start a new conversation"
+            style={{ minWidth: 24, padding: "4px 6px", fontSize: 12 }}
+          >
+            +
+          </button>
+        </div>
+      ) : (
+        <div
+          style={{
+            padding: "10px 12px",
+            borderBottom: "1px solid var(--border)",
+            display: "flex",
+            alignItems: "center",
+            gap: 6,
+          }}
         >
-          + NEW
-        </button>
+          {onToggleCollapsed ? (
+            <button
+              type="button"
+              className="hud-button hud-button--icon"
+              onClick={onToggleCollapsed}
+              title="Hide conversation panel"
+              aria-label="Hide conversation panel"
+              style={{ minWidth: 22, padding: "3px 6px", fontSize: 11 }}
+            >
+              ◀
+            </button>
+          ) : null}
+          <SidebarTab
+            active={tab === "conversation"}
+            onClick={() => setTab("conversation")}
+            label="◇ CONVERSATION"
+            title="Active chat"
+          />
+          <SidebarTab
+            active={tab === "archives"}
+            onClick={() => setTab("archives")}
+            label="⟢ ARCHIVES"
+            title="Saved conversations"
+          />
+          <span style={{ flex: 1 }} />
+          <button
+            type="button"
+            className="hud-button hud-button--primary"
+            onClick={onNewChat}
+            disabled={busy}
+            title="Start a new conversation"
+            style={{ padding: "4px 10px", fontSize: 10 }}
+          >
+            + NEW
+          </button>
+        </div>
+      )}
+
+      {/*
+        STABLE chat-pane slot. Always at this position in the JSX
+        tree, with the same key, so React never unmounts it on
+        collapse-toggle / tab-switch — the Composer's ref +
+        recording state + typed text + attached images all survive.
+        ``visibility``/positioning swaps in & out without affecting
+        identity.
+      */}
+      <div
+        key="chat-pane-slot"
+        aria-hidden={!chatVisible}
+        style={
+          chatVisible
+            ? {
+                flex: 1,
+                display: "flex",
+                flexDirection: "column",
+                minHeight: 0, // critical so inner ``overflow:auto`` works
+              }
+            : {
+                position: "absolute",
+                left: -99999,
+                top: 0,
+                width: 1,
+                height: 1,
+                overflow: "hidden",
+                pointerEvents: "none",
+              }
+        }
+      >
+        {chatPane}
       </div>
 
       {/*
-        Always render the chat pane (visible when CONVERSATION tab is
-        active; off-screen but mounted otherwise). Refs into the
-        Composer + the in-flight recording state stay alive across
-        tab switches.
+        Archives list — only mounted when expanded + on the archives
+        tab. Conditional placement here is fine because (unlike the
+        chat pane) the archives panel has no refs / recordings that
+        need to survive remounts.
       */}
-      {chatPaneSlot}
-
-      {tab === "archives" ? (
+      {!collapsed && tab === "archives" ? (
         <div style={{ flex: 1, overflowY: "auto", padding: "8px 0" }}>
           {conversations.length === 0 ? (
             <p
