@@ -32,18 +32,22 @@ export function ModeIndicator({ mode }: { mode: Mode }) {
     >
       <span
         aria-hidden
+        // Nightfall gets an accent-coloured "alive" pulse via a
+        // dedicated keyframe (``hud-accent-pulse``). The previous
+        // version reused ``hud-recording-pulse`` which hardcoded a
+        // bright red box-shadow, painting over the dot's amber glow
+        // through the animation.
+        className={isNight ? "hud-pulse-accent" : undefined}
         style={{
           width: 7,
           height: 7,
           borderRadius: "50%",
           background: "var(--accent)",
-          boxShadow: isNight
-            ? "0 0 10px var(--accent), 0 0 4px var(--accent)"
-            : "0 0 6px var(--accent-soft)",
-          // Subtle "alive" pulse on the dot in Nightfall.
-          animation: isNight
-            ? "hud-recording-pulse 1.6s ease-in-out infinite"
-            : "none",
+          // Standard mode keeps a static soft glow; Nightfall's box
+          // shadow is controlled by the keyframes, so leaving this
+          // unset for nightfall avoids fighting the animation on
+          // first render.
+          boxShadow: isNight ? undefined : "0 0 6px var(--accent-soft)",
         }}
       />
       PROTOCOL · {isNight ? "NIGHTFALL" : "STANDARD"}

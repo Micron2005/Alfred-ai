@@ -110,7 +110,13 @@ body::before {
   transition: opacity 400ms ease;
 }
 
-.nightfall body::before {
+/*
+ * The nightfall class is added directly to <body>, not to an
+ * ancestor of it, so this has to be ``body.nightfall::before`` —
+ * the descendant selector ``.nightfall body::before`` would
+ * never match.
+ */
+body.nightfall::before {
   opacity: 0.45;
 }
 
@@ -271,6 +277,29 @@ input {
 @keyframes hud-recording-pulse {
   0%, 100% { box-shadow: 0 0 14px rgba(255, 80, 80, 0.35); }
   50%      { box-shadow: 0 0 22px rgba(255, 80, 80, 0.55); }
+}
+
+/*
+ * Generic accent-coloured pulse, used by the Nightfall indicator dot.
+ * Animates ``--pulse-glow`` (driven by box-shadow opacity) so the dot
+ * stays in its theme-accent colour through the animation instead of
+ * being painted over with the recording red. The actual colour comes
+ * from ``var(--accent)`` set on the element.
+ */
+.hud-pulse-accent {
+  animation: hud-accent-pulse 1.6s ease-in-out infinite;
+}
+@keyframes hud-accent-pulse {
+  0%, 100% {
+    box-shadow:
+      0 0 4px var(--accent),
+      0 0 10px var(--accent-soft);
+  }
+  50% {
+    box-shadow:
+      0 0 6px var(--accent),
+      0 0 16px var(--accent);
+  }
 }
 
 /* Orb ring rotations + tick orbit — pure CSS so React doesn't re-render.
