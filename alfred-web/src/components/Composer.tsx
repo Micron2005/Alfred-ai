@@ -254,9 +254,16 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     onMicStateChange?.(mic === "recording");
     orbStore.setHold("listening", mic === "recording");
     return () => {
-      // If the component unmounts mid-recording, make sure the orb
-      // store doesn't get stuck in "listening" forever.
+      // If the component unmounts mid-recording, make sure both the
+      // orb store and the parent's ``recording`` state are cleared —
+      // otherwise ChatWindow would keep the wake-word engine paused
+      // and the orb caption stuck on "Listening" until the Composer
+      // remounted. With the sidebar layout the Composer normally
+      // stays mounted across tab/collapse toggles (see the stable
+      // chat-pane slot in ConversationSidebar), but this cleanup
+      // is the safety net for any future remount path.
       orbStore.setHold("listening", false);
+      onMicStateChange?.(false);
     };
   }, [mic, onMicStateChange]);
 
