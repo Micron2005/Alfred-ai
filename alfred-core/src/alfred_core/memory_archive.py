@@ -479,6 +479,14 @@ def _rollup_covered_until(note: MemoryNote) -> datetime | None:
 
     Stored as an ISO-8601 string in ``MemoryNote.structured`` so we can
     skip past it next time and avoid re-archiving the same prefix.
+
+    Returned naive (UTC). The ``messages.created_at`` column is
+    ``TIMESTAMP WITHOUT TIME ZONE``, so psycopg3 hands us naive
+    datetimes when we read messages back from the DB. Comparing those
+    against an aware datetime would raise ``TypeError: can't compare
+    offset-naive and offset-aware datetimes`` and crash the chat
+    handler on every turn after a rollup. We strip tzinfo here so the
+    comparison in ``rollup_if_pressured`` is always naive-vs-naive.
     """
     structured = note.structured or {}
     if not isinstance(structured, dict):
@@ -490,8 +498,8 @@ def _rollup_covered_until(note: MemoryNote) -> datetime | None:
         parsed = datetime.fromisoformat(raw)
     except ValueError:
         return None
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=UTC)
+    if parsed.tzinfo is not None:
+        parsed = parsed.astimezone(UTC).replace(tzinfo=None)
     return parsed
 
 
