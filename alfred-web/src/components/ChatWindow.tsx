@@ -19,6 +19,7 @@ import {
 import { useWakeWord } from "@/lib/useWakeWord";
 import { useCamera } from "@/lib/useCamera";
 import { Orb } from "@/components/Orb";
+import { SpotifyPlayer } from "@/components/SpotifyPlayer";
 import { orbStore } from "@/lib/orbState";
 
 const ACTIVE_CONVO_KEY = "alfred.activeConversationId";
@@ -581,6 +582,21 @@ export function ChatWindow() {
           }}
         >
           <Orb size={180} caption={orbCaption} />
+        </div>
+
+        {/*
+          Spotify HUD widget: spectrum visualizer + now-playing card +
+          connect/disconnect controls. Renders nothing when Spotify
+          isn't configured server-side.
+        */}
+        <div
+          style={{
+            display: "flex",
+            justifyContent: "center",
+            padding: "0 12px 8px",
+          }}
+        >
+          <SpotifyPlayer nightfall={mode === "nightfall"} />
         </div>
 
         <main

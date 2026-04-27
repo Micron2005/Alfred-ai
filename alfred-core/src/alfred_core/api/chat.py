@@ -44,6 +44,22 @@ from alfred_core.tools.search_marker import (
     extract_invocations,
     strip_markers,
 )
+from alfred_core.tools.spotify import (
+    SpotifyClient,
+    SpotifyError,
+    SpotifyNotLinkedError,
+    SpotifyUnconfiguredError,
+)
+from alfred_core.tools.spotify_marker import (
+    SpotifyAction,
+    SpotifyInvocation,
+)
+from alfred_core.tools.spotify_marker import (
+    extract_invocations as extract_spotify_invocations,
+)
+from alfred_core.tools.spotify_marker import (
+    replace_marker as replace_spotify_marker,
+)
 from alfred_core.tools.web_search import (
     SearchResult,
     WebSearchError,
@@ -367,13 +383,102 @@ async def _build_context(
     facts = await recent_facts(session)
     known_facts = tuple(f.content for f in facts)
 
+    spotify_linked = False
+    if settings.has_spotify:
+        # Single round-trip to ``spotify_accounts`` per turn. Cheap
+        # and guarantees the persona prompt stays accurate the
+        # moment after the user disconnects.
+        try:
+            status_info = await SpotifyClient(session, settings).get_status()
+            spotify_linked = status_info.linked
+        except Exception:
+            # An error here just means we omit the music tool from
+            # the prompt — we don't want a flaky DB query to 500 the
+            # whole chat turn.
+            spotify_linked = False
+
     return ContextBundle(
         now_local=now_local,
         timezone_label=settings.alfred_timezone,
         weather_summary=weather_summary,
         known_facts=known_facts,
         faces_visible=presence.faces_visible if presence is not None else None,
+        spotify_linked=spotify_linked,
     )
+
+
+async def _process_spotify_invocations(
+    reply: str,
+    session: AsyncSession,
+    settings: Settings,
+) -> str:
+    """Execute each ``[SPOTIFY_…]`` marker and inline a confirmation.
+
+    Mirrors the email-draft pipeline: actions run sequentially (so a
+    flaky one fails loudly rather than racing with a successful
+    sibling), and each marker is swapped for a short human-readable
+    line. Errors are folded into the visible reply so Alfred can
+    apologise rather than 500ing.
+    """
+    invocations = extract_spotify_invocations(reply)
+    if not invocations:
+        return reply
+    if not settings.has_spotify:
+        # The persona shouldn't have given the LLM the music tool
+        # without server-side config, but be defensive in case the
+        # model picked up the marker pattern from somewhere else.
+        for inv in invocations:
+            reply = replace_spotify_marker(
+                reply,
+                inv,
+                "_(I can't control music yet — Spotify isn't configured on the server.)_",
+            )
+        return reply
+    client = SpotifyClient(session, settings)
+    for inv in invocations:
+        confirmation = await _run_spotify_action(client, inv)
+        reply = replace_spotify_marker(reply, inv, confirmation)
+    return reply
+
+
+async def _run_spotify_action(
+    client: SpotifyClient, inv: SpotifyInvocation
+) -> str:
+    """Run a single Spotify action and return its inline confirmation."""
+    try:
+        if inv.action is SpotifyAction.PLAY:
+            uri = await client.search_track(inv.query)
+            if uri is None:
+                return f"_(I couldn't find anything matching {inv.query!r} on Spotify.)_"
+            await client.play(uris=[uri])
+            return f"_(Now playing: {inv.query})_"
+        if inv.action is SpotifyAction.RESUME:
+            await client.play()
+            return "_(Resumed playback.)_"
+        if inv.action is SpotifyAction.PAUSE:
+            await client.pause()
+            return "_(Paused.)_"
+        if inv.action is SpotifyAction.NEXT:
+            await client.next_track()
+            return "_(Skipped to the next track.)_"
+        if inv.action is SpotifyAction.PREV:
+            await client.previous_track()
+            return "_(Skipped back.)_"
+        if inv.action is SpotifyAction.NOW:
+            track = await client.now_playing()
+            if track is None:
+                return "_(Spotify isn't playing anything right now.)_"
+            state = "playing" if track.is_playing else "paused on"
+            return (
+                f"_(Currently {state}: {track.title} — {track.artists})_"
+            )
+    except SpotifyNotLinkedError as exc:
+        return f"_(I couldn't reach Spotify — {exc})_"
+    except SpotifyUnconfiguredError as exc:
+        return f"_(I couldn't reach Spotify — {exc})_"
+    except SpotifyError as exc:
+        return f"_(Spotify wasn't happy about that: {exc})_"
+    return "_(Unknown Spotify command.)_"
 
 
 @router.post("", response_model=ChatReply)
@@ -467,6 +572,9 @@ async def chat(req: ChatRequest, session: AsyncSession = Depends(get_session)) -
         await save_facts(session, new_facts)
 
     visible_reply = await _process_email_drafts(visible_reply, settings)
+    visible_reply = await _process_spotify_invocations(
+        visible_reply, session, settings
+    )
 
     # Persist any sources Alfred consulted in the message metadata so
     # they survive a page reload — the chat history endpoint lifts
