@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from alfred_core.config import get_settings
@@ -25,8 +26,16 @@ _Session = async_sessionmaker(_engine, expire_on_commit=False)
 
 
 async def init_db() -> None:
-    """Create tables on startup. In production we'd use Alembic migrations."""
+    """Create tables on startup. In production we'd use Alembic migrations.
+
+    The pgvector extension has to exist *before* any table that uses a
+    ``vector`` column is created. The Postgres image we ship is
+    ``pgvector/pgvector:pg16`` which has the extension's libraries
+    available, but the role still needs to opt in with ``CREATE
+    EXTENSION``.
+    """
     async with _engine.begin() as conn:
+        await conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
         await conn.run_sync(Base.metadata.create_all)
 
 

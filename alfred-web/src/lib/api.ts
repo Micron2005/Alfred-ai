@@ -139,6 +139,96 @@ export async function deleteConversation(id: string): Promise<void> {
   if (!resp.ok) throw new Error("Could not delete conversation");
 }
 
+// ─── Long-term memory archive (Phase 12b) ──────────────────────────────
+
+export interface MemoryNote {
+  id: string;
+  title: string;
+  summary: string;
+  key_facts: string[];
+  decisions: string[];
+  follow_ups: string[];
+  source: string;
+  source_conversation_id: string | null;
+  markdown_filename: string;
+  created_at: string;
+  updated_at: string;
+  /** Cosine similarity (0..1) when returned from a search. Absent for list/get. */
+  similarity?: number | null;
+}
+
+export interface MemoryNoteList {
+  notes: MemoryNote[];
+  /** Container-side path where Markdown mirrors are written. The host
+   * mount point is configured by ALFRED_MEMORY_HOST_PATH in the
+   * compose file — surfaced here so the UI can show the user where
+   * their notes live. */
+  storage_path: string;
+}
+
+export async function listMemoryNotes(query?: string): Promise<MemoryNoteList> {
+  const url = new URL(`${API_BASE}/memory`);
+  if (query && query.trim()) url.searchParams.set("q", query.trim());
+  const resp = await fetch(url.toString());
+  if (!resp.ok) throw new Error("Could not list memory notes");
+  return resp.json() as Promise<MemoryNoteList>;
+}
+
+export async function getMemoryNote(id: string): Promise<MemoryNote> {
+  const resp = await fetch(`${API_BASE}/memory/${id}`);
+  if (!resp.ok) throw new Error("Could not load memory note");
+  return resp.json() as Promise<MemoryNote>;
+}
+
+export interface MemoryNotePatch {
+  title?: string;
+  summary?: string;
+  key_facts?: string[];
+  decisions?: string[];
+  follow_ups?: string[];
+}
+
+export async function updateMemoryNote(
+  id: string,
+  patch: MemoryNotePatch,
+): Promise<MemoryNote> {
+  const resp = await fetch(`${API_BASE}/memory/${id}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(patch),
+  });
+  if (!resp.ok) throw new Error("Could not update memory note");
+  return resp.json() as Promise<MemoryNote>;
+}
+
+export async function deleteMemoryNote(id: string): Promise<void> {
+  const resp = await fetch(`${API_BASE}/memory/${id}`, { method: "DELETE" });
+  if (!resp.ok) throw new Error("Could not delete memory note");
+}
+
+export async function summarizeConversationToMemory(
+  conversationId: string,
+  title?: string,
+): Promise<MemoryNote> {
+  const resp = await fetch(`${API_BASE}/memory/summarize`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ conversation_id: conversationId, title }),
+  });
+  if (!resp.ok) {
+    const detail = await resp.text();
+    let cleanDetail = detail;
+    try {
+      const parsed = JSON.parse(detail) as { detail?: string };
+      if (parsed.detail) cleanDetail = parsed.detail;
+    } catch {
+      /* leave as-is */
+    }
+    throw new Error(`Could not archive conversation: ${cleanDetail}`);
+  }
+  return resp.json() as Promise<MemoryNote>;
+}
+
 export async function transcribeAudio(blob: Blob): Promise<string> {
   const form = new FormData();
   const ext = blob.type.includes("ogg") ? "ogg" : "webm";

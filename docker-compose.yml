@@ -29,6 +29,14 @@ services:
         condition: service_healthy
     ports:
       - "8000:8000"
+    # Mount the long-term memory archive (Phase 12b) from the host so
+    # the user can browse / grep / edit memory notes outside Alfred.
+    # Default falls back to a sibling folder next to the repo if
+    # ``ALFRED_MEMORY_HOST_PATH`` isn't set in ``.env`` — handy on
+    # Linux dev boxes. Windows users typically point this at
+    # ``C:\Users\<them>\Documents\Alfred Memory``.
+    volumes:
+      - ${ALFRED_MEMORY_HOST_PATH:-./alfred-memory}:/app/alfred-memory
     extra_hosts:
       - "host.docker.internal:host-gateway"
 
