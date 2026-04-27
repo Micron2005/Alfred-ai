@@ -195,7 +195,10 @@ async def update_memory_note(
             s.strip() for s in patch.follow_ups if isinstance(s, str) and s.strip()
         ]
     note.structured = structured
-    note.source = "manual" if note.source == "manual" else note.source
+    # Note: ``source`` is intentionally not changed by an edit. It
+    # records *how* the note got into the archive (auto-archive, rollup,
+    # manual archive button) — editing the body afterwards doesn't
+    # rewrite that history.
     # Re-embed when the user edits the title / summary so retrieval
     # stays accurate. Best-effort — failure leaves the existing
     # embedding in place.

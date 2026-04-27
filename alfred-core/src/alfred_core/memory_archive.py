@@ -615,10 +615,13 @@ async def search_relevant_notes(
 ) -> list[MemoryHit]:
     """Vector-search the memory archive for notes relevant to ``query_text``.
 
-    Falls back to recent-notes ordering if no embedding service is
-    available (so retrieval is at least *something* rather than
-    nothing). Returns an empty list if there are no notes at all or
-    no embedding could be produced and there are no notes either.
+    Returns ``[]`` whenever a real similarity can't be computed (no
+    embedding service, no embedded notes, empty query, etc.). Earlier
+    versions returned the most-recent notes as a "weak fallback", but
+    that injected 0%-relevant notes into the chat system prompt every
+    turn the embedder happened to be unreachable, polluting context
+    with arbitrary memories. Manual browsing of the archive uses
+    ``GET /memory`` instead — semantic search is strictly opt-in.
     """
     k = top_k if top_k is not None else settings.alfred_memory_retrieval_top_k
     floor = (
@@ -634,13 +637,7 @@ async def search_relevant_notes(
         title=query_text, summary="", settings=settings
     )
     if query_embedding is None:
-        # Without an embedding we can't do similarity. Return the most
-        # recent notes as a weak fallback so the panel/system prompt
-        # still has *some* context.
-        result = await session.execute(
-            select(MemoryNote).order_by(MemoryNote.created_at.desc()).limit(k)
-        )
-        return [MemoryHit(note=n, similarity=0.0) for n in result.scalars().all()]
+        return []
 
     # Cosine distance — pgvector's ``cosine_distance`` returns a value
     # in [0, 2] where 0 means identical. Convert to similarity = 1 - d.
