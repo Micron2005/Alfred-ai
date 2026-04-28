@@ -1,12 +1,15 @@
 """Decides which LLM backend handles a given turn.
 
 Rules of thumb:
-- If the user's most recent turn carries one or more images AND the cloud
-  backend is enabled, send it to Claude — local Ollama chat models are
-  text-only and we don't want to silently drop the image.
+- If the user's most recent turn carries one or more images, prefer the
+  **local** vision model (free, offline, private — see Phase 17.5).
+  If local vision isn't configured, fall back to cloud (Anthropic).
+  If neither is wired, raise ``VisionUnavailableError`` so the chat
+  endpoint can surface a polite "I can't see images yet" message
+  rather than silently dropping the attachment.
 - If the user's request looks like a hard coding task AND the cloud backend
   is enabled, send it to Claude.
-- Otherwise stay local.
+- Otherwise stay local (chat model).
 
 This is a deliberately small heuristic. As we add real tool-calling in later
 phases, this module will grow into something smarter (e.g. a fast classifier
@@ -41,32 +44,54 @@ class VisionUnavailableError(RuntimeError):
 class Router:
     local: LLMBackend
     cloud: LLMBackend | None
+    local_vision: LLMBackend | None
     use_cloud_for_coding: bool
 
     @classmethod
     def from_settings(cls, settings: Settings) -> Router:
-        local = OllamaBackend(host=settings.ollama_host, default_model=settings.local_model_chat)
+        local = OllamaBackend(
+            host=settings.ollama_host, default_model=settings.local_model_chat
+        )
         cloud: LLMBackend | None = None
         if settings.has_cloud:
             cloud = AnthropicBackend(
                 api_key=settings.anthropic_api_key,
                 default_model=settings.anthropic_model,
             )
+        # Local vision is its own Ollama-backed instance pointed at the
+        # vision model. Same code path as the chat backend; only the
+        # default model differs. We don't ping Ollama to verify the
+        # model is pulled — if it isn't, the request 404s at chat time
+        # and surfaces as a normal vision error.
+        local_vision: LLMBackend | None = None
+        if settings.has_local_vision:
+            local_vision = OllamaBackend(
+                host=settings.ollama_host,
+                default_model=settings.local_model_vision,
+            )
         return cls(
             local=local,
             cloud=cloud,
+            local_vision=local_vision,
             use_cloud_for_coding=settings.use_cloud_for_coding,
         )
 
     def pick(self, last_user_message: str, *, has_images: bool = False) -> LLMBackend:
         if has_images:
-            if self.cloud is None:
-                raise VisionUnavailableError(
-                    "I can't see images yet — Alfred needs an Anthropic API "
-                    "key for that. Set ANTHROPIC_API_KEY in .env and restart "
-                    "the containers, and I'll be able to look at what you send."
-                )
-            return self.cloud
+            # Prefer the local vision model — it's free, runs on the
+            # user's GPU, and doesn't leak the image to a third party.
+            # Fall back to cloud (Anthropic) only if local isn't
+            # configured.
+            if self.local_vision is not None:
+                return self.local_vision
+            if self.cloud is not None:
+                return self.cloud
+            raise VisionUnavailableError(
+                "I can't see images yet, sir — no vision backend is "
+                "configured. Either pull a local vision model "
+                "(`ollama pull llama3.2-vision:11b`) or set "
+                "ANTHROPIC_API_KEY in .env, then restart the containers."
+            )
         if (
             self.cloud is not None
             and self.use_cloud_for_coding
