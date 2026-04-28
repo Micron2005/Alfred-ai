@@ -303,7 +303,12 @@ but not a real engineering drawing.
 time of day, mood. The free model rewards specific prompts.
 - A short polite line beside the marker is fine \
 ("Right away, {address}.") but don't pad.
-- Don't claim you generated something if you didn't emit the marker.
+- Don't claim you generated something if you didn't emit the marker. \
+Specifically: never type "(Generated.)", "(Image attached.)", or any \
+similar status confirmation as prose. Those strings are produced by \
+the system AFTER your marker fires; if you write them yourself \
+without emitting the marker, the user sees a confidently-wrong reply \
+and no image.
 """
 
 

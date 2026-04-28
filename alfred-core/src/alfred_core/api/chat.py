@@ -48,6 +48,7 @@ from alfred_core.tools.image_gen import (
     ImageGenError,
     generate_image,
 )
+from alfred_core.tools.history_scrub import scrub_assistant_content
 from alfred_core.tools.image_marker import (
     extract_requests as extract_image_requests,
 )
@@ -651,6 +652,15 @@ async def chat(req: ChatRequest, session: AsyncSession = Depends(get_session)) -
     for m in history:
         if m.role in ("user", "assistant"):
             content = m.content
+            # Strip user-facing tool-status placeholders ( ``_( ... )_``
+            # confirmations from image-gen, email, Spotify, etc.) from
+            # past assistant replies so the model doesn't learn to type
+            # them as prose on a future turn. See
+            # ``alfred_core.tools.history_scrub`` for the rationale —
+            # this prevents Alfred from claiming "_(Generated.)_" without
+            # actually emitting the [GENERATE_IMAGE] marker.
+            if m.role == "assistant":
+                content = scrub_assistant_content(content)
             # Anthropic (and most providers) reject empty user/assistant
             # messages outright. The most common case is a past user turn
             # that was image-only (no caption): the stored content is the
@@ -659,7 +669,9 @@ async def chat(req: ChatRequest, session: AsyncSession = Depends(get_session)) -
             # and the assistant's earlier reply has already absorbed
             # whatever it needed from it. So substitute a placeholder
             # that preserves alternating-role structure without losing
-            # the fact that an image was there.
+            # the fact that an image was there. The same defensive
+            # fallback handles assistant turns whose entire content
+            # was a single tool-status placeholder (now scrubbed away).
             if not content.strip():
                 content = (
                     "[image attached]" if m.role == "user" else "[no reply]"
