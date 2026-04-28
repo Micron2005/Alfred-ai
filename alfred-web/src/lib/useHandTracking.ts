@@ -515,6 +515,26 @@ export function useHandTracking(
         ? computeHandState(rawLeft, leftRefs.current, vw, vh, false)
         : null;
 
+      // Reset per-hand refs when a hand leaves the frame so
+      // re-entry starts from a clean baseline. Without this,
+      // ``smoothed`` keeps the last position (the EMA blend then
+      // drags the cursor in from the old spot for 2-3 frames),
+      // and the pinch / fist latches stay set (a hand re-entering
+      // mid-gesture in the hysteresis band would re-fire the
+      // latched gesture without the user actually pinching).
+      if (!rawRight) {
+        rightRefs.current.smoothed = null;
+        rightRefs.current.pinchLatched = false;
+        rightRefs.current.fistLatched = false;
+        rightRefs.current.lastLandmarks = null;
+      }
+      if (!rawLeft) {
+        leftRefs.current.smoothed = null;
+        leftRefs.current.pinchLatched = false;
+        leftRefs.current.fistLatched = false;
+        leftRefs.current.lastLandmarks = null;
+      }
+
       // Commit per-hand state if it materially changed.
       setRight((curr) => (handStateEqual(curr, nextRight) ? curr : nextRight));
       setLeft((curr) => (handStateEqual(curr, nextLeft) ? curr : nextLeft));
