@@ -94,7 +94,16 @@ async function staleWhileRevalidate(request) {
       return response;
     })
     .catch(() => null);
-  return cached || networkPromise || fetch(request);
+  // Await the network promise on cache miss — `networkPromise` itself is
+  // always truthy (it's a Promise), so a naive `cached || networkPromise`
+  // would resolve to `null` on a cache-miss + network-error and reach
+  // `event.respondWith(Promise<null>)`, which TypeErrors. Fall through to
+  // a fresh `fetch(request)` that the browser can surface as a real
+  // network error instead of a silent null response.
+  if (cached) return cached;
+  const fresh = await networkPromise;
+  if (fresh) return fresh;
+  return fetch(request);
 }
 
 async function networkFirstWithOfflineFallback(request) {
