@@ -170,10 +170,18 @@ function HandSkeleton({
 }
 
 export function HandCursor({ enabled, rightHand, leftHand }: Props) {
-  // Track the previous right-hand pinch state and last cursor
-  // position so the effect can decide whether each frame is a
-  // pointermove, a pointerdown, or a pointerup.
-  const prevPinchRef = useRef(false);
+  // Tracks the *raw* right-hand pinch state from the previous
+  // frame so we can detect genuine pinch starts (false → true)
+  // and pinch ends (true → false) regardless of what the left
+  // hand is doing. Critical for distinguishing "user just started
+  // pinching" from "user dropped the left modifier while still
+  // pinching with the right" — the latter must NOT fire a new
+  // pointerdown.
+  const prevRawRightPinchRef = useRef(false);
+  // Tracks whether we currently hold an outstanding synthetic
+  // pointerdown that needs an eventual pointerup. ``true`` only
+  // between a pointerdown we dispatched and the matching pointerup.
+  const synthDownActiveRef = useRef(false);
   const lastPosRef = useRef<CursorPoint | null>(null);
   // The element the pinch *started* on. Used so the click event at
   // pointerup goes to the right place if the cursor strayed off the
@@ -181,38 +189,27 @@ export function HandCursor({ enabled, rightHand, leftHand }: Props) {
   const downTargetRef = useRef<Element | null>(null);
 
   const cursor = rightHand?.cursor ?? null;
-  // ``isPinching`` here gates synthetic pointer events. We treat
-  // a *deliberate* two-handed pinch (both hands pinching, with
-  // the left hand NOT in a fist) as NOT a click — the user's
-  // intent is the two-handed resize gesture, not a single-finger
-  // click. If a drag was already in progress when the user
-  // started their second deliberate pinch, this will cleanly
-  // release it on the same frame as the second pinch starts
-  // (the existing pointerup path handles ``isPinching`` flipping
-  // false mid-gesture).
-  //
-  // The ``!leftHand?.isFist`` guard is critical: a closed fist
-  // tucks the thumb against the fingers, which can put the
-  // thumb-tip ↔ index-tip distance below the pinch threshold and
-  // spuriously set ``leftHand.isPinching = true``. Without this
+  const rawRightPinch = !!rightHand?.isPinching;
+  // The left hand counts as a "modifier" (suppressing single-hand
+  // pinch semantics) only when it's deliberately pinching — NOT
+  // when its pinch latch was incidentally tripped by a closed
+  // fist tucking the thumb against the fingers. Without this
   // guard, every left-fist (which opens the Quick Tools menu)
-  // would also suppress all right-hand clicks — making the menu
-  // items unreachable, since the menu's only intended input is
-  // right-hand pinch-click.
+  // would also suppress all right-hand clicks, making the menu
+  // items unreachable.
   const leftPinchModifier =
     !!leftHand?.isPinching && !leftHand?.isFist;
-  const isPinching = !!rightHand?.isPinching && !leftPinchModifier;
 
   // Fire a clean (pointerup, pointercancel) pair on the captured
-  // down target if a pinch is currently active. Used by both
-  // teardown paths (tracking toggled off, hand left the frame).
-  // Routing to ``downTargetRef`` rather than ``elementAt(x, y)`` is
-  // critical: during a drag the cursor may have moved off the
-  // original widget, so events sent to the current hover target
-  // would never reach the HudWidget that owns the gesture, leaving
-  // its drag state stuck.
-  function releasePinch() {
-    if (!prevPinchRef.current) return;
+  // down target if we currently hold a synthetic pointerdown. Used
+  // by both teardown paths (tracking toggled off, hand left the
+  // frame). Routing to ``downTargetRef`` rather than
+  // ``elementAt(x, y)`` is critical: during a drag the cursor may
+  // have moved off the original widget, so events sent to the
+  // current hover target would never reach the HudWidget that owns
+  // the gesture, leaving its drag state stuck.
+  function teardownDown() {
+    if (!synthDownActiveRef.current) return;
     const last = lastPosRef.current;
     const target = downTargetRef.current;
     if (!target || !last) return;
@@ -233,8 +230,9 @@ export function HandCursor({ enabled, rightHand, leftHand }: Props) {
       // setPointerCapture / drag state. Otherwise dragRef stays
       // non-null and isDragging never clears, leaving the widget
       // stuck "grabbing" until reload.
-      releasePinch();
-      prevPinchRef.current = false;
+      teardownDown();
+      synthDownActiveRef.current = false;
+      prevRawRightPinchRef.current = false;
       lastPosRef.current = null;
       downTargetRef.current = null;
       return;
@@ -245,8 +243,9 @@ export function HandCursor({ enabled, rightHand, leftHand }: Props) {
       // toggle-off. Note: a left-hand-only frame still hits this
       // branch, which is correct — we don't want a phantom right
       // cursor lingering at its last position.
-      releasePinch();
-      prevPinchRef.current = false;
+      teardownDown();
+      synthDownActiveRef.current = false;
+      prevRawRightPinchRef.current = false;
       lastPosRef.current = null;
       downTargetRef.current = null;
       return;
@@ -254,28 +253,44 @@ export function HandCursor({ enabled, rightHand, leftHand }: Props) {
 
     const { x, y } = cursor;
     const last = lastPosRef.current;
-    const buttons = isPinching ? 1 : 0;
+    const wasRawRightPinch = prevRawRightPinchRef.current;
+    const wasSynthDownActive = synthDownActiveRef.current;
+    const buttons = wasSynthDownActive ? 1 : 0;
     const hover = elementAt(x, y);
 
-    // pointerdown — pinch just started.
-    if (isPinching && !prevPinchRef.current) {
-      if (hover) {
-        downTargetRef.current = hover;
-        hover.dispatchEvent(
-          new PointerEvent("pointerdown", buildPointerInit(x, y, 1)),
-        );
-      }
+    // pointerdown — fires only when the right hand's RAW pinch
+    // transitions false → true AND no left modifier is currently
+    // active. Using the raw transition (not the gated
+    // ``isPinching`` value) prevents a spurious pointerdown when
+    // the user finishes a two-hand resize by releasing the left
+    // hand first while the right hand is still physically
+    // pinching: in that case the gated value would flip false →
+    // true with no actual new pinch, and a stale right-pinch
+    // would synthesise a click on whatever's under the cursor.
+    const rawRightJustStarted = rawRightPinch && !wasRawRightPinch;
+    if (
+      rawRightJustStarted &&
+      !leftPinchModifier &&
+      !wasSynthDownActive &&
+      hover
+    ) {
+      downTargetRef.current = hover;
+      synthDownActiveRef.current = true;
+      hover.dispatchEvent(
+        new PointerEvent("pointerdown", buildPointerInit(x, y, 1)),
+      );
     }
 
-    // While pinching, route pointermove + pointerup to the element
-    // the gesture started on, NOT to whatever's currently under the
-    // cursor. This emulates the browser's native pointer capture
-    // behavior: synthetic events bypass setPointerCapture (the
-    // browser only tracks real hardware pointers), so the widget
-    // would lose move events the moment the cursor strayed off its
-    // bounds during a fast drag. Manual capture here makes the
-    // gesture stick to the original target until release.
-    const moveTarget = isPinching
+    // While we hold an outstanding pointerdown, route pointermove
+    // + pointerup to the element the gesture started on, NOT
+    // whatever's currently under the cursor. This emulates the
+    // browser's native pointer-capture behavior: synthetic events
+    // bypass setPointerCapture (the browser only tracks real
+    // hardware pointers), so the widget would lose move events
+    // the moment the cursor strayed off its bounds during a fast
+    // drag. Manual capture here makes the gesture stick to the
+    // original target until release.
+    const moveTarget = synthDownActiveRef.current
       ? (downTargetRef.current ?? hover)
       : hover;
 
@@ -287,22 +302,26 @@ export function HandCursor({ enabled, rightHand, leftHand }: Props) {
       );
     }
 
-    // pointerup + click — pinch just released. The pointerup goes
-    // to the captured down target so a widget that owns the drag
-    // sees a matched up event; the click goes to the element under
-    // the cursor at release time so a button hit-test works the way
-    // a mouse click does (drag off → no click; release on target →
-    // click).
+    // pointerup + click — fires when our held synthetic
+    // pointerdown needs to be released. Two distinct paths:
     //
-    // Edge case: ``isPinching`` can flip false because the right
-    // hand un-pinched (genuine release) OR because the left hand
-    // *just* started pinching (the gate suppressed the right
-    // pinch as the start of a two-hand resize). In the latter
-    // case the user's intent is a resize gesture — firing a click
-    // would wrongly activate whatever's under the cursor (e.g. a
-    // widget's hide button). The pointerup is still correct (it
-    // releases any in-progress drag cleanly), but skip the click.
-    if (!isPinching && prevPinchRef.current) {
+    //   1. Genuine release: raw right pinch transitioned true →
+    //      false. Both pointerup AND click fire (click respects
+    //      the same drag-off-target → no-click rule that mouse
+    //      events follow).
+    //   2. Modifier interruption: raw right is still pinching but
+    //      the left hand started its own deliberate pinch. The
+    //      user's intent is now a two-hand resize, not a click —
+    //      fire pointerup so any in-progress drag releases
+    //      cleanly, but skip the click.
+    //
+    // ``synthDownActiveRef`` is the source of truth for "do we
+    // owe a pointerup to someone?" — using a raw-transition test
+    // here would miss the modifier-interruption case.
+    const rawRightJustEnded = !rawRightPinch && wasRawRightPinch;
+    const shouldRelease =
+      wasSynthDownActive && (rawRightJustEnded || leftPinchModifier);
+    if (shouldRelease) {
       const downTarget = downTargetRef.current;
       if (downTarget) {
         downTarget.dispatchEvent(
@@ -310,9 +329,8 @@ export function HandCursor({ enabled, rightHand, leftHand }: Props) {
         );
       }
       const clickTarget = hover ?? downTarget;
-      const releaseWasGenuine = !leftPinchModifier;
       if (
-        releaseWasGenuine &&
+        rawRightJustEnded &&
         clickTarget &&
         clickTarget === downTarget
       ) {
@@ -329,12 +347,13 @@ export function HandCursor({ enabled, rightHand, leftHand }: Props) {
           }),
         );
       }
+      synthDownActiveRef.current = false;
       downTargetRef.current = null;
     }
 
-    prevPinchRef.current = isPinching;
+    prevRawRightPinchRef.current = rawRightPinch;
     lastPosRef.current = { x, y };
-  }, [enabled, cursor, isPinching, leftPinchModifier]);
+  }, [enabled, cursor, rawRightPinch, leftPinchModifier]);
 
   if (!enabled) return null;
   // No hands visible at all — nothing to draw, but stay mounted so
