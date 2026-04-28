@@ -101,7 +101,15 @@ async def generate_image(prompt: str) -> GeneratedImage:
     url = _POLLINATIONS_BASE + encoded_prompt
 
     try:
-        async with httpx.AsyncClient(timeout=_TIMEOUT_S) as client:
+        # ``follow_redirects=True`` is essential — ``image.pollinations.ai``
+        # is CDN-fronted and routinely answers with a 302 to the actual
+        # PNG payload. httpx defaulted to NOT following redirects from
+        # 0.23 onwards, so without this flag the chat handler would see
+        # an empty redirect body and surface "non-image response. Try
+        # again." every single time.
+        async with httpx.AsyncClient(
+            timeout=_TIMEOUT_S, follow_redirects=True
+        ) as client:
             response = await client.get(url, params=_DEFAULT_QUERY)
     except httpx.HTTPError as exc:
         raise ImageGenError(
