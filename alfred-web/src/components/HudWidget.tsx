@@ -157,8 +157,16 @@ export function HudWidget({
       committed: false,
     };
     // Capture so we keep getting move/up events even if the pointer
-    // leaves the widget (common with fast drags).
-    e.currentTarget.setPointerCapture(e.pointerId);
+    // leaves the widget (common with fast drags). Synthetic pointer
+    // events (e.g. from hand-tracking) carry pointerIds the browser
+    // hasn't registered as active hardware pointers; setPointerCapture
+    // throws NotFoundError on those. Swallow it — HandCursor's manual
+    // capture keeps the gesture going for synthetic streams.
+    try {
+      e.currentTarget.setPointerCapture(e.pointerId);
+    } catch {
+      /* synthetic-pointer / unregistered pointerId — safe to ignore */
+    }
   }
 
   function moveBodyPress(e: React.PointerEvent<HTMLDivElement>) {
@@ -210,7 +218,11 @@ export function HudWidget({
   function startResize(e: React.PointerEvent<HTMLDivElement>) {
     e.preventDefault();
     e.stopPropagation();
-    e.currentTarget.setPointerCapture(e.pointerId);
+    try {
+      e.currentTarget.setPointerCapture(e.pointerId);
+    } catch {
+      /* synthetic pointer — see startBodyPress for context */
+    }
     const rect = containerRef.current?.getBoundingClientRect();
     resizeRef.current = {
       pointerId: e.pointerId,

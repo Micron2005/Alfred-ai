@@ -120,34 +120,54 @@ export function HandCursor({ enabled, cursor, isPinching }: Props) {
     const { x, y } = cursor;
     const last = lastPosRef.current;
     const buttons = isPinching ? 1 : 0;
-    const target = elementAt(x, y);
+    const hover = elementAt(x, y);
 
     // pointerdown — pinch just started.
     if (isPinching && !prevPinchRef.current) {
-      if (target) {
-        downTargetRef.current = target;
-        target.dispatchEvent(
+      if (hover) {
+        downTargetRef.current = hover;
+        hover.dispatchEvent(
           new PointerEvent("pointerdown", buildPointerInit(x, y, 1)),
         );
       }
     }
 
+    // While pinching, route pointermove + pointerup to the element
+    // the gesture started on, NOT to whatever's currently under the
+    // cursor. This emulates the browser's native pointer capture
+    // behavior: synthetic events bypass setPointerCapture (the
+    // browser only tracks real hardware pointers), so the widget
+    // would lose move events the moment the cursor strayed off its
+    // bounds during a fast drag. Manual capture here makes the
+    // gesture stick to the original target until release.
+    const moveTarget = isPinching
+      ? (downTargetRef.current ?? hover)
+      : hover;
+
     // pointermove — fire whenever the cursor actually changed
     // position. This covers both hovering and dragging.
-    if (last && (last.x !== x || last.y !== y) && target) {
-      target.dispatchEvent(
+    if (last && (last.x !== x || last.y !== y) && moveTarget) {
+      moveTarget.dispatchEvent(
         new PointerEvent("pointermove", buildPointerInit(x, y, buttons)),
       );
     }
 
-    // pointerup + click — pinch just released.
+    // pointerup + click — pinch just released. The pointerup goes
+    // to the captured down target so a widget that owns the drag
+    // sees a matched up event; the click goes to the element under
+    // the cursor at release time so a button hit-test works the way
+    // a mouse click does (drag off → no click; release on target →
+    // click).
     if (!isPinching && prevPinchRef.current) {
-      const upTarget = target ?? downTargetRef.current;
-      if (upTarget) {
-        upTarget.dispatchEvent(
+      const downTarget = downTargetRef.current;
+      if (downTarget) {
+        downTarget.dispatchEvent(
           new PointerEvent("pointerup", buildPointerInit(x, y, 0)),
         );
-        upTarget.dispatchEvent(
+      }
+      const clickTarget = hover ?? downTarget;
+      if (clickTarget && clickTarget === downTarget) {
+        clickTarget.dispatchEvent(
           new MouseEvent("click", {
             bubbles: true,
             cancelable: true,
