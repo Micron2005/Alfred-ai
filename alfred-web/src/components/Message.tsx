@@ -82,15 +82,20 @@ export function Message({ msg }: { msg: ChatMessageOut }) {
             >
               {images.map((img, idx) => {
                 const src = `data:${img.mime_type};base64,${img.data}`;
+                // Assistant-generated images are the centerpiece of
+                // the reply, so they get a roomier max size; user
+                // attachments stay compact since they're usually
+                // reference material the model is being asked about.
+                const maxSide = isUser ? 240 : 480;
                 return (
                   // eslint-disable-next-line @next/next/no-img-element
                   <img
                     key={idx}
                     src={src}
-                    alt="attached"
+                    alt={isUser ? "attached" : "generated"}
                     style={{
-                      maxWidth: 240,
-                      maxHeight: 240,
+                      maxWidth: maxSide,
+                      maxHeight: maxSide,
                       borderRadius: 3,
                       border: "1px solid var(--border)",
                       objectFit: "contain",

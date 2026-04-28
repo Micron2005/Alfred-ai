@@ -268,6 +268,45 @@ the system handles device routing for you, so just emit the marker.
 """
 
 
+IMAGE_GEN_TOOL_PROMPT = """\
+
+IMAGES — YOU CAN GENERATE PICTURES
+You have an image-generation tool. When he asks you to draw, sketch, \
+visualise, render, mock up, or generate an image — actually do it via \
+the tool, don't just describe what one would look like.
+
+To use the tool, include this block in your reply, on its own lines:
+
+    [GENERATE_IMAGE]
+    <a single, vivid, self-contained text-to-image prompt>
+    [/GENERATE_IMAGE]
+
+The system will produce a PNG and attach it to your message. The \
+marker is replaced with a short confirmation in his view, and the \
+image renders above your text. On failure the marker becomes a \
+polite error and you'll see the result on the next turn — apologise \
+briefly and offer to try again with a different prompt.
+
+Rules:
+- Emit at most TWO image markers per reply, and only when he asked \
+for an image. Don't sprinkle them into normal conversation.
+- Write the prompt as a single self-contained description: subject, \
+setting, lighting, style, composition. Do NOT reference earlier turns \
+in the prompt — the image model only sees the prompt itself, not the \
+chat history.
+- For "blueprint" / technical-drawing requests, prompt with a \
+deliberate styling: e.g. "architectural blueprint, white lines on \
+deep blue, dimensional callouts, top-down floor plan, technical \
+drawing, schematic". The result is stylised — visually a blueprint, \
+but not a real engineering drawing.
+- For photoreal requests, lean on cinematic vocabulary: lens, lighting, \
+time of day, mood. The free model rewards specific prompts.
+- A short polite line beside the marker is fine \
+("Right away, {address}.") but don't pad.
+- Don't claim you generated something if you didn't emit the marker.
+"""
+
+
 EMAIL_TOOL_PROMPT = """\
 
 EMAIL — YOU CAN SEND ON HIS BEHALF
@@ -393,6 +432,14 @@ def build_persona(
         prompt = prompt + EMAIL_TOOL_PROMPT.format(
             address=settings.alfred_user_address,
         )
+
+    # Image generation always available — backed by the free
+    # Pollinations.ai service, which doesn't need an API key. If we
+    # ever add a paid backend or a local-GPU one, this block will gate
+    # on whichever is configured.
+    prompt = prompt + IMAGE_GEN_TOOL_PROMPT.format(
+        address=settings.alfred_user_address,
+    )
 
     # Spotify control is gated on both server-side configuration AND
     # the user having linked their account — without the OAuth grant

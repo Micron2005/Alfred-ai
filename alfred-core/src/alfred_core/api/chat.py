@@ -15,6 +15,7 @@ Flow for each user message:
 from __future__ import annotations
 
 import asyncio
+import base64
 from dataclasses import dataclass
 from datetime import datetime
 from uuid import UUID
@@ -42,6 +43,17 @@ from alfred_core.persona import ContextBundle, Mode, build_persona
 from alfred_core.router import Router, VisionUnavailableError
 from alfred_core.tools.email import EmailError, send_email
 from alfred_core.tools.email_marker import EmailDraft, extract_drafts, replace_marker
+from alfred_core.tools.image_gen import (
+    GeneratedImage,
+    ImageGenError,
+    generate_image,
+)
+from alfred_core.tools.image_marker import (
+    extract_requests as extract_image_requests,
+)
+from alfred_core.tools.image_marker import (
+    replace_marker as replace_image_marker,
+)
 from alfred_core.tools.images import (
     ImagePayload,
     ImageValidationError,
@@ -512,6 +524,71 @@ async def _run_spotify_action(
     return "_(Unknown Spotify command.)_"
 
 
+# Hard cap on how many ``[GENERATE_IMAGE]`` markers we'll honour per
+# turn. Each one is a 5-30 s round-trip to the free Pollinations
+# service, and a runaway prompt loop emitting a dozen markers would
+# block the chat for minutes. Two is plenty for the genuine
+# "compare these two ideas" / "and another variation" flow; any
+# extras get a polite refusal in their place.
+_MAX_IMAGES_PER_TURN = 2
+
+
+async def _process_image_requests(
+    reply: str,
+) -> tuple[str, list[GeneratedImage]]:
+    """Generate each ``[GENERATE_IMAGE]`` request and inline a confirmation.
+
+    Returns the modified visible reply plus the list of successfully
+    generated images, in marker order. The chat handler attaches the
+    images to the assistant message's ``metadata_json`` so they
+    survive page reload, and includes them in the ``ChatReply`` so
+    the UI can render them on the new turn without an extra fetch.
+
+    Failures are folded into the reply (Alfred apologises in-line
+    rather than the chat 500ing) and the corresponding image is
+    omitted from the returned list.
+    """
+
+    requests = extract_image_requests(reply)
+    if not requests:
+        return reply, []
+
+    generated: list[GeneratedImage] = []
+    honoured = 0
+    for req in requests:
+        if honoured >= _MAX_IMAGES_PER_TURN:
+            reply = replace_image_marker(
+                reply,
+                req,
+                (
+                    "_(I drew the first couple, sir, but skipped the "
+                    "rest — let's not flood the page.)_"
+                ),
+            )
+            continue
+        try:
+            image = await generate_image(req.prompt)
+        except ImageGenError as exc:
+            reply = replace_image_marker(
+                reply,
+                req,
+                f"_(I couldn't draw that — {exc})_",
+            )
+            continue
+        generated.append(image)
+        # Visible confirmation; the bytes themselves render above the
+        # text bubble via the message-images pipeline. Keep the line
+        # short — the image speaks for itself.
+        reply = replace_image_marker(
+            reply,
+            req,
+            "_(Generated.)_",
+        )
+        honoured += 1
+
+    return reply, generated
+
+
 @router.post("", response_model=ChatReply)
 async def chat(req: ChatRequest, session: AsyncSession = Depends(get_session)) -> ChatReply:
     settings = get_settings()
@@ -654,18 +731,33 @@ async def chat(req: ChatRequest, session: AsyncSession = Depends(get_session)) -
     visible_reply = await _process_spotify_invocations(
         visible_reply, session, settings
     )
+    visible_reply, generated_images = await _process_image_requests(
+        visible_reply
+    )
 
-    # Persist any sources Alfred consulted in the message metadata so
-    # they survive a page reload — the chat history endpoint lifts
-    # them back out into the same `sources` field on each turn.
+    # Persist sources + generated images in the assistant message
+    # metadata so they survive a page reload — the chat history
+    # endpoint lifts them back out via ``_extract_images`` /
+    # ``_extract_sources``.
     assistant_metadata: dict[str, object] | None = None
+    metadata_payload: dict[str, object] = {}
     if outcome.sources:
-        assistant_metadata = {
-            "sources": [
-                {"title": r.title, "url": r.url, "snippet": r.snippet}
-                for r in outcome.sources
-            ]
-        }
+        metadata_payload["sources"] = [
+            {"title": r.title, "url": r.url, "snippet": r.snippet}
+            for r in outcome.sources
+        ]
+    encoded_images: list[dict[str, str]] = []
+    if generated_images:
+        for img in generated_images:
+            encoded_images.append(
+                {
+                    "data": base64.b64encode(img.data).decode("ascii"),
+                    "mime_type": img.mime_type,
+                }
+            )
+        metadata_payload["images"] = encoded_images
+    if metadata_payload:
+        assistant_metadata = metadata_payload
 
     assistant_msg = Message(
         conversation_id=convo.id,
@@ -691,6 +783,10 @@ async def chat(req: ChatRequest, session: AsyncSession = Depends(get_session)) -
             content=assistant_msg.content,
             backend=assistant_msg.backend,
             model=assistant_msg.model,
+            images=[
+                ImageOut(data=entry["data"], mime_type=entry["mime_type"])
+                for entry in encoded_images
+            ],
             sources=[
                 SourceOut(title=r.title, url=r.url, snippet=r.snippet)
                 for r in outcome.sources
