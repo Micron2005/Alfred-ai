@@ -18,10 +18,16 @@ class _StubBackend(LLMBackend):
         return ChatResponse(content="stub", model="stub", backend=self.name)
 
 
-def _router(*, with_cloud: bool, use_cloud_for_coding: bool = True) -> Router:
+def _router(
+    *,
+    with_cloud: bool,
+    with_local_vision: bool = False,
+    use_cloud_for_coding: bool = True,
+) -> Router:
     return Router(
         local=_StubBackend("local"),
         cloud=_StubBackend("cloud") if with_cloud else None,
+        local_vision=_StubBackend("local-vision") if with_local_vision else None,
         use_cloud_for_coding=use_cloud_for_coding,
     )
 
@@ -62,13 +68,44 @@ def test_image_turn_routes_to_cloud_even_if_coding_toggle_off() -> None:
     assert r.pick("what's in this?", has_images=True).name == "cloud"
 
 
-def test_image_turn_without_cloud_raises() -> None:
-    """If there's no cloud backend, we'd rather fail loudly than pretend we
-    can see the image. The chat endpoint maps this to a 503 with a helpful
-    message about ANTHROPIC_API_KEY."""
-    r = _router(with_cloud=False)
+def test_image_turn_without_any_vision_backend_raises() -> None:
+    """If neither local vision nor cloud is configured, fail loudly rather
+    than silently dropping the attached image. Chat endpoint maps this to a
+    503 with instructions to pull a local vision model OR set the
+    Anthropic key."""
+    r = _router(with_cloud=False, with_local_vision=False)
     with pytest.raises(VisionUnavailableError):
         r.pick("describe this", has_images=True)
+
+
+def test_image_turn_prefers_local_vision_over_cloud() -> None:
+    """When BOTH local vision and cloud are wired, prefer local — it's
+    free, runs on the user's GPU, and doesn't leak the image to a
+    third party. The user's stated preference is 'I'd rather not pay'."""
+    r = _router(with_cloud=True, with_local_vision=True)
+    assert (
+        r.pick("what's in this picture?", has_images=True).name == "local-vision"
+    )
+
+
+def test_image_turn_uses_local_vision_when_no_cloud() -> None:
+    """The whole point of Phase 17.5: vision works without an Anthropic key."""
+    r = _router(with_cloud=False, with_local_vision=True)
+    assert r.pick("describe this", has_images=True).name == "local-vision"
+
+
+def test_image_turn_falls_back_to_cloud_when_no_local_vision() -> None:
+    """Backward-compat path: if a user has the cloud key but never
+    ``ollama pull``'d a vision model, vision still works via cloud."""
+    r = _router(with_cloud=True, with_local_vision=False)
+    assert r.pick("what's in this?", has_images=True).name == "cloud"
+
+
+def test_local_vision_does_not_steal_text_only_turns() -> None:
+    """A vision-capable backend shouldn't be picked for a plain-text turn
+    — local chat model handles those (faster, no vision overhead)."""
+    r = _router(with_cloud=True, with_local_vision=True)
+    assert r.pick("what's the weather like?").name == "local"
 
 
 @pytest.mark.asyncio

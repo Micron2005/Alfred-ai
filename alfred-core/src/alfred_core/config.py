@@ -32,6 +32,17 @@ class Settings(BaseSettings):
     ollama_host: str = Field(default="http://host.docker.internal:11434")
     local_model_chat: str = Field(default="llama3.1:8b-instruct-q4_K_M")
     local_model_fast: str = Field(default="phi3.5:3.8b-mini-instruct-q4_K_M")
+    # Vision-capable Ollama model. Used when the user attaches an image
+    # to a turn. Default is Meta's Llama 3.2-Vision 11B (~6.5 GB on
+    # disk, fits in 8 GB VRAM with room to spare). Pull it once with
+    # ``ollama pull llama3.2-vision:11b`` before first use; if the
+    # model isn't installed Ollama returns a 404 and the chat handler
+    # surfaces it as a vision error.
+    #
+    # Set to an empty string to disable local vision entirely — Alfred
+    # will then fall back to cloud vision (Anthropic) if available, or
+    # report ``VisionUnavailableError`` if neither is wired.
+    local_model_vision: str = Field(default="llama3.2-vision:11b")
 
     # ─── Cloud LLM (optional) ───────────────────────────────────────────
     anthropic_api_key: str = Field(default="")
@@ -129,6 +140,29 @@ class Settings(BaseSettings):
     def has_cloud(self) -> bool:
         """Whether a real Anthropic key has been configured."""
         return bool(self.anthropic_api_key and self.anthropic_api_key.strip())
+
+    @property
+    def has_local_vision(self) -> bool:
+        """Whether a local Ollama vision model is configured.
+
+        Note this only checks that the *model name* is set — we don't
+        contact Ollama at startup to verify the user has actually
+        pulled it. If the model isn't available locally, the request
+        will fail at chat time and surface as a normal vision error.
+        """
+
+        return bool(self.local_model_vision and self.local_model_vision.strip())
+
+    @property
+    def has_vision(self) -> bool:
+        """Whether *some* vision backend is wired (local or cloud).
+
+        The persona's vision tool prompt is gated on this rather than
+        on the cloud backend specifically, since either path lets
+        Alfred actually see what the user attaches.
+        """
+
+        return self.has_local_vision or self.has_cloud
 
     @property
     def has_gmail(self) -> bool:

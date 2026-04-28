@@ -420,7 +420,11 @@ def build_persona(
             f"At your service, {settings.alfred_user_address_nightfall}."
         )
 
-    if settings.has_cloud:
+    # Vision is available whenever ANY vision backend is wired —
+    # local Ollama (llama3.2-vision et al.) or cloud (Anthropic).
+    # We don't differentiate in the prompt; from Alfred's perspective
+    # he can either see images or he can't.
+    if settings.has_vision:
         prompt = prompt + VISION_TOOL_PROMPT
 
     if settings.has_tavily:
