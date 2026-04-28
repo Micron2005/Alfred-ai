@@ -20,6 +20,8 @@ import {
 } from "@/lib/api";
 import { useWakeWord } from "@/lib/useWakeWord";
 import { useCamera } from "@/lib/useCamera";
+import { useHandTracking } from "@/lib/useHandTracking";
+import { HandCursor } from "@/components/HandCursor";
 import { Orb } from "@/components/Orb";
 import { SpotifyPlayer } from "@/components/SpotifyPlayer";
 import { CameraPreview } from "@/components/CameraPreview";
@@ -36,6 +38,7 @@ const ACTIVE_CONVO_KEY = "alfred.activeConversationId";
 const VOICE_OUT_KEY = "alfred.voiceOutEnabled";
 const HANDS_FREE_KEY = "alfred.handsFreeEnabled";
 const CAMERA_KEY = "alfred.cameraEnabled";
+const HAND_KEY = "alfred.handTrackingEnabled";
 const FULL_HUD_KEY = "alfred.fullHudEnabled";
 // v2: the sidebar's role changed (it now hosts the active chat, not
 // just the archive list). Old "collapsed=1" values from v1 would
@@ -66,6 +69,7 @@ export function ChatWindow() {
   const [voiceOut, setVoiceOut] = useState(false);
   const [handsFree, setHandsFree] = useState(false);
   const [cameraOn, setCameraOn] = useState(false);
+  const [handTrackingOn, setHandTrackingOn] = useState(false);
   const [fullHud, setFullHud] = useState(false);
   // Default ``false`` (expanded) — the sidebar now hosts the active
   // conversation (CONVERSATION tab) so collapsing it by default
@@ -92,6 +96,7 @@ export function ChatWindow() {
     setVoiceOut(localStorage.getItem(VOICE_OUT_KEY) === "1");
     setHandsFree(localStorage.getItem(HANDS_FREE_KEY) === "1");
     setCameraOn(localStorage.getItem(CAMERA_KEY) === "1");
+    setHandTrackingOn(localStorage.getItem(HAND_KEY) === "1");
     // Now that the chat lives in the sidebar, the main pane would
     // be nearly empty without the HUD widgets — default the full HUD
     // *on* for users who haven't explicitly turned it off. Existing
@@ -111,6 +116,7 @@ export function ChatWindow() {
   });
 
   const camera = useCamera({ enabled: cameraOn });
+  const hand = useHandTracking({ enabled: handTrackingOn });
 
   // Customizable-HUD state. ``customEnabled`` is the user-facing
   // "is the HUD freely arrangeable?" switch (off by default — most
@@ -178,6 +184,13 @@ export function ChatWindow() {
     setCameraOn(enabled);
     if (typeof window !== "undefined") {
       localStorage.setItem(CAMERA_KEY, enabled ? "1" : "0");
+    }
+  }
+
+  function setHandTrackingPersisted(enabled: boolean) {
+    setHandTrackingOn(enabled);
+    if (typeof window !== "undefined") {
+      localStorage.setItem(HAND_KEY, enabled ? "1" : "0");
     }
   }
 
@@ -748,6 +761,33 @@ export function ChatWindow() {
             <button
               type="button"
               className="hud-button"
+              onClick={() => setHandTrackingPersisted(!handTrackingOn)}
+              aria-pressed={handTrackingOn}
+              title={
+                handTrackingOn
+                  ? hand.status === "ready"
+                    ? "Pinch your thumb and index finger to click or drag widgets. Toggle off to disable."
+                    : hand.status === "error"
+                      ? hand.error ?? "Hand tracking failed"
+                      : "Starting hand tracking…"
+                  : "Track your hand via the webcam — pinch to click and drag HUD widgets without touching the screen."
+              }
+            >
+              {handTrackingOn
+                ? hand.status === "ready"
+                  ? hand.isPinching
+                    ? "✊ HAND · PINCH"
+                    : "✋ HAND · ON"
+                  : hand.status === "starting"
+                    ? "✋ STARTING…"
+                    : hand.status === "error"
+                      ? "✋ HAND ERR"
+                      : "✋ HAND"
+                : "✋ HAND"}
+            </button>
+            <button
+              type="button"
+              className="hud-button"
               onClick={() => setFullHudPersisted(!fullHud)}
               aria-pressed={fullHud}
               title={
@@ -997,6 +1037,24 @@ export function ChatWindow() {
           muted
           aria-hidden
           style={{ display: "none" }}
+        />
+        {/*
+          Hidden <video> for the hand-tracking feed. Same lifecycle
+          rules as the camera one above — keep it always mounted so
+          ``hand.videoRef.current`` doesn't null out across tab /
+          sidebar transitions and silently break the detection loop.
+        */}
+        <video
+          ref={hand.videoRef as React.RefObject<HTMLVideoElement>}
+          playsInline
+          muted
+          aria-hidden
+          style={{ display: "none" }}
+        />
+        <HandCursor
+          enabled={handTrackingOn && hand.status === "ready"}
+          cursor={hand.cursor}
+          isPinching={hand.isPinching}
         />
       </div>
     </div>
