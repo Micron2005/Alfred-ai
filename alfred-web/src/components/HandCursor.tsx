@@ -1,44 +1,35 @@
 "use client";
 
 /**
- * HandCursor — visualizes the hand-tracking cursor and synthesizes
- * real DOM pointer events so existing widget interactions (drag,
- * click, slider) work without per-component plumbing.
+ * HandCursor — visualizes hand-tracking and synthesizes real DOM
+ * pointer events so existing widget interactions (drag, click,
+ * slider) work without per-component plumbing.
  *
- * Events fired on the element under the cursor:
- *   - ``pointerdown`` when a pinch starts
- *   - ``pointermove`` every frame while the cursor moves (whether
- *     pinching or not — same as a real mouse hovering or dragging)
- *   - ``pointerup`` + ``click`` when a pinch releases (the click
- *     is dispatched on the element under the cursor at release
- *     time, not the original pinch-down target, matching browser
- *     mouse behavior when the user drags off the original target)
+ * Phase 12c.3: handles up to two hands. The right hand is the
+ * cursor / pointer hand — its index fingertip drives the cursor
+ * dot AND is the source of synthetic pointer events. The left hand
+ * is the modifier / tool hand — only rendered as a skeleton in
+ * gold; pinches on the left hand do NOT dispatch synthetic pointer
+ * events (otherwise two-handed pinches would fire double clicks).
+ *
+ * Synthetic events fired on the element under the right cursor:
+ *   - ``pointerdown`` when a right pinch starts
+ *   - ``pointermove`` every frame while the right cursor moves
+ *   - ``pointerup`` + ``click`` when the right pinch releases
  *
  * Synthetic events use a dedicated ``pointerId`` of ``9999`` so
- * they don't collide with real touch / pen / mouse pointers if
- * the user is mixing input modes.
- *
- * The visual cursor is a glowing cyan dot that swells slightly
- * when pinching, so the user has positive feedback that the gesture
- * was detected. Both the cursor and the events live behind a
- * single ``enabled`` prop — flipping it off cleans up any in-flight
- * pinch gesture so we never leak a stuck "pointer-down" state.
+ * they don't collide with real touch / pen / mouse pointers.
  */
 
 import { useEffect, useRef } from "react";
-import type { CursorPoint } from "@/lib/useHandTracking";
+import type { CursorPoint, HandState } from "@/lib/useHandTracking";
 
 interface Props {
   enabled: boolean;
-  cursor: CursorPoint | null;
-  /**
-   * All 21 viewport-pixel landmark positions, in MediaPipe's
-   * hand-landmark order. When provided, the component renders the
-   * full hand skeleton rather than just a fingertip dot. Pass
-   * ``null`` (or omit) to fall back to the dot-only mode.
-   */
-  landmarks?: CursorPoint[] | null;
-  isPinching: boolean;
+  /** Right (cursor) hand state. ``null`` when not visible. */
+  rightHand: HandState | null;
+  /** Left (modifier) hand state. ``null`` when not visible. */
+  leftHand: HandState | null;
 }
 
 // MediaPipe's official HAND_CONNECTIONS list. Each pair is two
@@ -82,6 +73,12 @@ const FINGERTIPS = [4, 8, 12, 16, 20] as const;
 
 const SYNTHETIC_POINTER_ID = 9999;
 
+const CYAN_STROKE = "rgba(0, 229, 255, 0.95)";
+const CYAN_FILL = "rgba(0, 229, 255, 0.18)";
+const GOLD_STROKE = "rgba(255, 200, 60, 0.95)";
+const GOLD_FILL = "rgba(255, 200, 60, 0.22)";
+const PINCH_FLASH = "rgba(255, 200, 60, 0.95)";
+
 function elementAt(x: number, y: number): Element | null {
   if (typeof document === "undefined") return null;
   return document.elementFromPoint(x, y);
@@ -109,21 +106,91 @@ function buildPointerInit(
   };
 }
 
-export function HandCursor({
-  enabled,
-  cursor,
+interface SkeletonProps {
+  landmarks: CursorPoint[];
+  /** Stroke color for bones + non-tip landmarks. */
+  stroke: string;
+  /** Fill color for non-tip landmarks. */
+  fill: string;
+  /** ``true`` flashes the thumb + index tips gold to confirm pinch. */
+  pinching: boolean;
+  /** Bone-line width — slightly thicker while pinching. */
+  baseStroke: number;
+  /** SVG filter id (each hand needs its own glow defs). */
+  filterId: string;
+}
+
+function HandSkeleton({
   landmarks,
-  isPinching,
-}: Props) {
-  // Track the previous pinch state and last cursor position so the
-  // effect can decide whether each frame is a pointermove, a
-  // pointerdown, or a pointerup.
+  stroke,
+  fill,
+  pinching,
+  baseStroke,
+  filterId,
+}: SkeletonProps) {
+  return (
+    <g filter={`url(#${filterId})`}>
+      {HAND_CONNECTIONS.map(([a, b], i) => {
+        const pa = landmarks[a];
+        const pb = landmarks[b];
+        if (!pa || !pb) return null;
+        return (
+          <line
+            key={i}
+            x1={pa.x}
+            y1={pa.y}
+            x2={pb.x}
+            y2={pb.y}
+            stroke={stroke}
+            strokeWidth={baseStroke}
+            strokeLinecap="round"
+          />
+        );
+      })}
+      {landmarks.map((p, i) => {
+        const isTip = (FINGERTIPS as readonly number[]).includes(i);
+        const isThumbOrIndexTip = i === 4 || i === 8;
+        const r = isTip ? (pinching && isThumbOrIndexTip ? 7 : 5) : 3;
+        const tipFill = pinching && isThumbOrIndexTip ? PINCH_FLASH : fill;
+        const tipStroke = pinching && isThumbOrIndexTip ? PINCH_FLASH : stroke;
+        return (
+          <circle
+            key={i}
+            cx={p.x}
+            cy={p.y}
+            r={r}
+            fill={tipFill}
+            stroke={tipStroke}
+            strokeWidth={1.5}
+          />
+        );
+      })}
+    </g>
+  );
+}
+
+export function HandCursor({ enabled, rightHand, leftHand }: Props) {
+  // Track the previous right-hand pinch state and last cursor
+  // position so the effect can decide whether each frame is a
+  // pointermove, a pointerdown, or a pointerup.
   const prevPinchRef = useRef(false);
   const lastPosRef = useRef<CursorPoint | null>(null);
   // The element the pinch *started* on. Used so the click event at
   // pointerup goes to the right place if the cursor strayed off the
   // original target during the gesture.
   const downTargetRef = useRef<Element | null>(null);
+
+  const cursor = rightHand?.cursor ?? null;
+  // ``isPinching`` here gates synthetic pointer events. We treat
+  // a two-handed pinch (right + left both pinching) as NOT a click
+  // / drag, because the user's intent is the two-handed resize
+  // gesture, not a single-finger click. If a drag was already in
+  // progress when the user started their second pinch, this will
+  // cleanly release it on the same frame as the second pinch
+  // starts (the existing pointerup path handles ``isPinching``
+  // flipping false mid-gesture).
+  const isPinching =
+    !!rightHand?.isPinching && !leftHand?.isPinching;
 
   // Fire a clean (pointerup, pointercancel) pair on the captured
   // down target if a pinch is currently active. Used by both
@@ -163,7 +230,10 @@ export function HandCursor({
     }
 
     if (!cursor) {
-      // Hand left the frame — same release path as toggle-off.
+      // Right hand left the frame — same release path as
+      // toggle-off. Note: a left-hand-only frame still hits this
+      // branch, which is correct — we don't want a phantom right
+      // cursor lingering at its last position.
       releasePinch();
       prevPinchRef.current = false;
       lastPosRef.current = null;
@@ -242,96 +312,88 @@ export function HandCursor({
   }, [enabled, cursor, isPinching]);
 
   if (!enabled) return null;
-  // No hand visible — nothing to draw, but stay mounted so the
-  // gesture-cleanup effect above keeps running.
-  if (!cursor && (!landmarks || landmarks.length === 0)) return null;
+  // No hands visible at all — nothing to draw, but stay mounted so
+  // the gesture-cleanup effect above keeps running.
+  if (!rightHand && !leftHand) return null;
 
-  const cursorSize = isPinching ? 28 : 22;
-  const cursorRing = isPinching ? 3 : 2;
-  const stroke = isPinching ? 3.5 : 2.5;
-  const cyan = "rgba(0, 229, 255, 0.95)";
-  const cyanFill = "rgba(0, 229, 255, 0.18)";
-  const gold = "rgba(255, 200, 60, 0.95)";
+  // Visual pinch state reflects the *actual* right pinch — the
+  // user should see feedback that their pinch was detected even
+  // when the synthetic-event gate suppresses clicks (e.g. during
+  // two-handed resize).
+  const visualPinch = !!rightHand?.isPinching;
+  const cursorSize = visualPinch ? 28 : 22;
+  const cursorRing = visualPinch ? 3 : 2;
+
+  // Pinch-aware stroke widths: thicker bones when actively
+  // pinching, so the user gets a subtle "I see your gesture" hint.
+  const rightStroke = rightHand?.isPinching ? 3.5 : 2.5;
+  const leftStroke = leftHand?.isPinching ? 3.5 : 2.5;
 
   return (
     <>
       {/*
-        Skeleton overlay — renders the full 21-point hand mesh
-        whenever landmarks are available. SVG sized to the viewport
-        so coordinates can be used directly without per-frame
-        re-projection. ``pointer-events: none`` is critical: the
-        synthetic-event dispatcher relies on ``elementFromPoint``
-        seeing widgets *under* the overlay, not the overlay itself.
+        Skeleton overlay — renders both hand meshes when available.
+        SVG sized to the viewport so coordinates can be used directly
+        without per-frame re-projection. ``pointer-events: none`` is
+        critical: the synthetic-event dispatcher relies on
+        ``elementFromPoint`` seeing widgets *under* the overlay, not
+        the overlay itself.
       */}
-      {landmarks && landmarks.length === 21 ? (
-        <svg
-          aria-hidden
-          style={{
-            position: "fixed",
-            inset: 0,
-            width: "100vw",
-            height: "100vh",
-            pointerEvents: "none",
-            zIndex: 99998,
-          }}
-        >
-          <defs>
-            <filter id="hand-cursor-glow">
-              <feGaussianBlur stdDeviation="2.5" result="blur" />
-              <feMerge>
-                <feMergeNode in="blur" />
-                <feMergeNode in="SourceGraphic" />
-              </feMerge>
-            </filter>
-          </defs>
-          <g filter="url(#hand-cursor-glow)">
-            {HAND_CONNECTIONS.map(([a, b], i) => {
-              const pa = landmarks[a];
-              const pb = landmarks[b];
-              if (!pa || !pb) return null;
-              return (
-                <line
-                  key={i}
-                  x1={pa.x}
-                  y1={pa.y}
-                  x2={pb.x}
-                  y2={pb.y}
-                  stroke={cyan}
-                  strokeWidth={stroke}
-                  strokeLinecap="round"
-                />
-              );
-            })}
-            {landmarks.map((p, i) => {
-              const isTip = (FINGERTIPS as readonly number[]).includes(i);
-              const isThumbOrIndexTip = i === 4 || i === 8;
-              const r = isTip ? (isPinching && isThumbOrIndexTip ? 7 : 5) : 3;
-              const fill =
-                isPinching && isThumbOrIndexTip ? gold : cyanFill;
-              const stroke2 =
-                isPinching && isThumbOrIndexTip ? gold : cyan;
-              return (
-                <circle
-                  key={i}
-                  cx={p.x}
-                  cy={p.y}
-                  r={r}
-                  fill={fill}
-                  stroke={stroke2}
-                  strokeWidth={1.5}
-                />
-              );
-            })}
-          </g>
-        </svg>
-      ) : null}
+      <svg
+        aria-hidden
+        style={{
+          position: "fixed",
+          inset: 0,
+          width: "100vw",
+          height: "100vh",
+          pointerEvents: "none",
+          zIndex: 99998,
+        }}
+      >
+        <defs>
+          <filter id="hand-cursor-glow-right">
+            <feGaussianBlur stdDeviation="2.5" result="blur" />
+            <feMerge>
+              <feMergeNode in="blur" />
+              <feMergeNode in="SourceGraphic" />
+            </feMerge>
+          </filter>
+          <filter id="hand-cursor-glow-left">
+            <feGaussianBlur stdDeviation="2.5" result="blur" />
+            <feMerge>
+              <feMergeNode in="blur" />
+              <feMergeNode in="SourceGraphic" />
+            </feMerge>
+          </filter>
+        </defs>
+        {leftHand && leftHand.landmarks.length === 21 ? (
+          <HandSkeleton
+            landmarks={leftHand.landmarks}
+            stroke={GOLD_STROKE}
+            fill={GOLD_FILL}
+            pinching={leftHand.isPinching}
+            baseStroke={leftStroke}
+            filterId="hand-cursor-glow-left"
+          />
+        ) : null}
+        {rightHand && rightHand.landmarks.length === 21 ? (
+          <HandSkeleton
+            landmarks={rightHand.landmarks}
+            stroke={CYAN_STROKE}
+            fill={CYAN_FILL}
+            pinching={rightHand.isPinching}
+            baseStroke={rightStroke}
+            filterId="hand-cursor-glow-right"
+          />
+        ) : null}
+      </svg>
 
       {/*
-        Cursor dot — the index-fingertip indicator. Even with the
-        full skeleton drawn, a dedicated dot helps the user track
-        exactly where their click/grab will land (the index-tip
-        landmark in the skeleton is the same point but smaller and
-        easier to lose at a glance).
+        Cursor dot — the right-hand index-fingertip indicator. Even
+        with the full skeleton drawn, a dedicated dot helps the user
+        track exactly where their click/grab will land. Only the
+        right (cursor) hand gets one — the left hand is the modifier
+        / tool hand and isn't a pointer.
       */}
       {cursor ? (
         <div
@@ -343,11 +405,11 @@ export function HandCursor({
             width: cursorSize,
             height: cursorSize,
             borderRadius: "50%",
-            border: `${cursorRing}px solid ${cyan}`,
-            boxShadow: isPinching
+            border: `${cursorRing}px solid ${CYAN_STROKE}`,
+            boxShadow: visualPinch
               ? "0 0 18px 4px rgba(0, 229, 255, 0.55), 0 0 38px 12px rgba(255, 200, 60, 0.35)"
               : "0 0 14px 3px rgba(0, 229, 255, 0.45)",
-            background: isPinching
+            background: visualPinch
               ? "rgba(255, 200, 60, 0.30)"
               : "rgba(0, 229, 255, 0.10)",
             // The cursor must NOT eat the events it dispatches —

@@ -39,6 +39,10 @@ export interface ComposerHandle {
   attachImage: (
     image: ChatImage & { label?: string },
   ) => boolean;
+  /** Move keyboard focus to the text input. Used by the
+   *  Quick-Tools "Keyboard" item so the user can hand off from
+   *  hand-tracking to physical typing without grabbing the mouse. */
+  focus: () => void;
 }
 
 type MicState = "idle" | "recording" | "transcribing";
@@ -75,6 +79,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   // proceed to transcription on a normal trailing-silence stop).
   const stopReasonRef = useRef<SilenceReason | "manual" | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
   // Mirror of `images` state for the unmount cleanup. The cleanup runs
   // exactly once with the dependency-array-captured value, which would be
   // the empty initial state — using a ref keeps it pointing at the live
@@ -418,6 +423,9 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
         if (startingRef.current) return;
         void startRecording();
       },
+      focus: () => {
+        textareaRef.current?.focus();
+      },
       attachImage: (img) => {
         if (disabledRef.current) return false;
         const attached: AttachedImage = {
@@ -587,6 +595,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
         />
 
         <textarea
+          ref={textareaRef}
           value={text}
           onChange={(e) => setText(e.target.value)}
           onKeyDown={onKeyDown}
