@@ -74,23 +74,37 @@ export function HandCursor({ enabled, cursor, isPinching }: Props) {
   // original target during the gesture.
   const downTargetRef = useRef<Element | null>(null);
 
+  // Fire a clean (pointerup, pointercancel) pair on the captured
+  // down target if a pinch is currently active. Used by both
+  // teardown paths (tracking toggled off, hand left the frame).
+  // Routing to ``downTargetRef`` rather than ``elementAt(x, y)`` is
+  // critical: during a drag the cursor may have moved off the
+  // original widget, so events sent to the current hover target
+  // would never reach the HudWidget that owns the gesture, leaving
+  // its drag state stuck.
+  function releasePinch() {
+    if (!prevPinchRef.current) return;
+    const last = lastPosRef.current;
+    const target = downTargetRef.current;
+    if (!target || !last) return;
+    target.dispatchEvent(
+      new PointerEvent("pointerup", buildPointerInit(last.x, last.y, 0)),
+    );
+    target.dispatchEvent(
+      new PointerEvent("pointercancel", buildPointerInit(last.x, last.y, 0)),
+    );
+  }
+
   useEffect(() => {
     if (!enabled) {
       // If hand tracking gets toggled off mid-pinch, fire a
-      // synthetic pointerup so the widget cleans up its
-      // setPointerCapture / drag state.
-      if (prevPinchRef.current && lastPosRef.current) {
-        const { x, y } = lastPosRef.current;
-        const target = elementAt(x, y);
-        if (target) {
-          target.dispatchEvent(
-            new PointerEvent("pointerup", buildPointerInit(x, y, 0)),
-          );
-          target.dispatchEvent(
-            new PointerEvent("pointercancel", buildPointerInit(x, y, 0)),
-          );
-        }
-      }
+      // synthetic pointerup on the *down target* (not whatever's
+      // under the cursor right now) so the widget that owns the
+      // drag sees a matched up event and cleans up its
+      // setPointerCapture / drag state. Otherwise dragRef stays
+      // non-null and isDragging never clears, leaving the widget
+      // stuck "grabbing" until reload.
+      releasePinch();
       prevPinchRef.current = false;
       lastPosRef.current = null;
       downTargetRef.current = null;
@@ -98,19 +112,8 @@ export function HandCursor({ enabled, cursor, isPinching }: Props) {
     }
 
     if (!cursor) {
-      // Hand left the frame — drop any active pinch the same way.
-      if (prevPinchRef.current && lastPosRef.current) {
-        const { x, y } = lastPosRef.current;
-        const target = elementAt(x, y);
-        if (target) {
-          target.dispatchEvent(
-            new PointerEvent("pointerup", buildPointerInit(x, y, 0)),
-          );
-          target.dispatchEvent(
-            new PointerEvent("pointercancel", buildPointerInit(x, y, 0)),
-          );
-        }
-      }
+      // Hand left the frame — same release path as toggle-off.
+      releasePinch();
       prevPinchRef.current = false;
       lastPosRef.current = null;
       downTargetRef.current = null;
