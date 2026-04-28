@@ -86,6 +86,14 @@ const SPEED_FOR_FULL_RESPONSE = 25;
 // hand still and the inference jitters from frame to frame.
 const DEAD_ZONE_PX = 1.5;
 
+// Per-landmark dedup threshold (viewport pixels). MediaPipe's
+// raw landmarks jitter slightly every frame even when the hand
+// is still, so naively committing each frame's projection to
+// React state forces ~60 re-renders/s of the whole ChatWindow
+// tree. Skip the commit unless at least one landmark has
+// actually moved by this much.
+const LANDMARK_DEDUP_PX = 0.5;
+
 export type HandTrackingStatus =
   | "off"
   | "starting"
@@ -153,6 +161,10 @@ export function useHandTracking(
   // without forcing a re-render every frame. We commit to React
   // state when the value actually changes by a meaningful amount.
   const smoothedRef = useRef<CursorPoint | null>(null);
+  // Last landmark array we actually committed to React state.
+  // Used to deduplicate frame-to-frame inference jitter so we
+  // don't re-render the parent tree at the detection rate.
+  const lastLandmarksRef = useRef<CursorPoint[] | null>(null);
   // Latched pinch state with hysteresis so flicker doesn't drop /
   // recreate the pinch every other frame.
   const pinchLatchedRef = useRef(false);
@@ -184,6 +196,7 @@ export function useHandTracking(
       detectorRef.current = null;
     }
     smoothedRef.current = null;
+    lastLandmarksRef.current = null;
     pinchLatchedRef.current = false;
     setCursor(null);
     setLandmarks(null);
@@ -347,11 +360,39 @@ export function useHandTracking(
                 // so the visual layer can render the whole hand,
                 // not just the cursor. Same mirror as the cursor
                 // so the rendered hand matches what the user sees.
+                //
+                // Skip the React state commit when no landmark has
+                // visibly moved (≥ LANDMARK_DEDUP_PX). MediaPipe
+                // returns slightly different coordinates every
+                // frame even when the hand is perfectly still,
+                // and without this guard we'd push a fresh array
+                // ~60×/s, blowing up the useMemo identity and
+                // re-rendering the whole ChatWindow tree even when
+                // the cursor's own dead-zone has frozen the dot.
                 const projected: CursorPoint[] = landmarks.map((lm) => ({
                   x: (1 - lm.x) * vw,
                   y: lm.y * vh,
                 }));
-                setLandmarks(projected);
+                const prevProjected = lastLandmarksRef.current;
+                let landmarksChanged = true;
+                if (prevProjected && prevProjected.length === projected.length) {
+                  landmarksChanged = false;
+                  for (let i = 0; i < projected.length; i++) {
+                    const a = projected[i];
+                    const b = prevProjected[i];
+                    if (
+                      Math.abs(a.x - b.x) >= LANDMARK_DEDUP_PX ||
+                      Math.abs(a.y - b.y) >= LANDMARK_DEDUP_PX
+                    ) {
+                      landmarksChanged = true;
+                      break;
+                    }
+                  }
+                }
+                if (landmarksChanged) {
+                  lastLandmarksRef.current = projected;
+                  setLandmarks(projected);
+                }
               } else {
                 // No hand visible. Stop holding pinch (drops a
                 // drag gesture if one was active) and clear the
@@ -364,6 +405,7 @@ export function useHandTracking(
                   smoothedRef.current = null;
                   setCursor(null);
                   setLandmarks(null);
+                  lastLandmarksRef.current = null;
                 }
               }
             } catch {
