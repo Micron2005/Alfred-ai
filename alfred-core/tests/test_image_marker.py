@@ -60,6 +60,37 @@ def test_two_blocks_are_independent() -> None:
     assert [r.prompt for r in reqs] == ["first prompt", "second prompt"]
 
 
+def test_returns_results_in_document_order() -> None:
+    """Both block and inline forms should be interleaved in the order
+    they appear in the LLM reply — NOT block-first then inline-after.
+
+    This matters because ``_process_image_requests`` iterates the list
+    and only honours the first ``_MAX_IMAGES_PER_TURN`` (2) successful
+    images. Without document order, a later block marker could be
+    honoured while an earlier inline one is refused.
+    """
+
+    reply = (
+        "First: [GENERATE_IMAGE: inline-A].\n"
+        "Then a block:\n"
+        "[GENERATE_IMAGE]\nblock-B\n[/GENERATE_IMAGE]\n"
+        "Finally: [GENERATE_IMAGE: inline-C]."
+    )
+    reqs = extract_requests(reply)
+    assert [r.prompt for r in reqs] == ["inline-A", "block-B", "inline-C"]
+
+
+def test_inline_before_block_is_not_swapped() -> None:
+    """The original bug: inline-then-block was returned as block-then-inline."""
+
+    reply = (
+        "[GENERATE_IMAGE: inline first] then "
+        "[GENERATE_IMAGE]\nblock second\n[/GENERATE_IMAGE]"
+    )
+    reqs = extract_requests(reply)
+    assert [r.prompt for r in reqs] == ["inline first", "block second"]
+
+
 def test_inline_inside_block_is_not_double_counted() -> None:
     """An inline-shaped sequence inside a block prompt must not match twice."""
 

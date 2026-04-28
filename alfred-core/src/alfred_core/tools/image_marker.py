@@ -66,32 +66,43 @@ def extract_requests(reply: str) -> list[ImageRequest]:
     just produce a useless image.
     """
 
-    out: list[ImageRequest] = []
-    seen_spans: list[tuple[int, int]] = []
+    # We collect (start_position, ImageRequest) pairs from each pass and
+    # sort at the end so the returned list is in **document order**.
+    # That matters because the chat handler iterates this list and only
+    # honours the first ``_MAX_IMAGES_PER_TURN`` (2) requests — without
+    # this sort, a later block marker could be honoured while an
+    # earlier inline one is refused.
+    found: list[tuple[int, ImageRequest]] = []
+    block_spans: list[tuple[int, int]] = []
 
-    def _is_inside(start: int, end: int) -> bool:
-        return any(s <= start and end <= e for s, e in seen_spans)
+    def _is_inside_block(start: int, end: int) -> bool:
+        return any(s <= start and end <= e for s, e in block_spans)
 
-    # Block form first — it's anchored on tags, so we can safely
-    # exclude its inner text from the inline pass below (otherwise an
-    # inline-looking sequence inside a block prompt would be matched
-    # twice).
+    # Block form first because it's anchored on tags — running it first
+    # lets us safely exclude its inner text from the inline pass below
+    # (otherwise an inline-looking sequence inside a block prompt would
+    # be matched twice).
     for m in _BLOCK_RE.finditer(reply):
         prompt = m.group(1).strip()
+        block_spans.append((m.start(), m.end()))
         if not prompt:
             continue
-        out.append(ImageRequest(prompt=prompt, raw_match=m.group(0)))
-        seen_spans.append((m.start(), m.end()))
+        found.append(
+            (m.start(), ImageRequest(prompt=prompt, raw_match=m.group(0)))
+        )
 
     for m in _INLINE_RE.finditer(reply):
-        if _is_inside(m.start(), m.end()):
+        if _is_inside_block(m.start(), m.end()):
             continue
         prompt = m.group(1).strip()
         if not prompt:
             continue
-        out.append(ImageRequest(prompt=prompt, raw_match=m.group(0)))
+        found.append(
+            (m.start(), ImageRequest(prompt=prompt, raw_match=m.group(0)))
+        )
 
-    return out
+    found.sort(key=lambda pair: pair[0])
+    return [request for _, request in found]
 
 
 def replace_marker(reply: str, request: ImageRequest, replacement: str) -> str:
