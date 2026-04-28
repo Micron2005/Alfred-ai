@@ -650,7 +650,21 @@ async def chat(req: ChatRequest, session: AsyncSession = Depends(get_session)) -
     msgs: list[ChatMessage] = [ChatMessage(role="system", content=system_prompt)]
     for m in history:
         if m.role in ("user", "assistant"):
-            msgs.append(ChatMessage(role=m.role, content=m.content))
+            content = m.content
+            # Anthropic (and most providers) reject empty user/assistant
+            # messages outright. The most common case is a past user turn
+            # that was image-only (no caption): the stored content is the
+            # empty string. We don't re-attach the image — re-shipping
+            # every past image every turn would balloon size and bills,
+            # and the assistant's earlier reply has already absorbed
+            # whatever it needed from it. So substitute a placeholder
+            # that preserves alternating-role structure without losing
+            # the fact that an image was there.
+            if not content.strip():
+                content = (
+                    "[image attached]" if m.role == "user" else "[no reply]"
+                )
+            msgs.append(ChatMessage(role=m.role, content=content))
     # Only attach images to the *current* user turn — re-shipping every
     # past image on every subsequent turn would balloon request size and
     # bills. The assistant's text reply has already absorbed whatever it
