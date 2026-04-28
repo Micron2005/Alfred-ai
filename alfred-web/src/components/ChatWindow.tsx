@@ -24,6 +24,7 @@ import { Orb } from "@/components/Orb";
 import { SpotifyPlayer } from "@/components/SpotifyPlayer";
 import { CameraPreview } from "@/components/CameraPreview";
 import { HudWidget } from "@/components/HudWidget";
+import { InstallPwaButton } from "@/components/InstallPwaButton";
 import {
   useHudLayout,
   WIDGET_LABELS,
@@ -770,6 +771,7 @@ export function ChatWindow() {
             >
               {hud.customEnabled ? "🎛 CUSTOM · ON" : "🎛 CUSTOMIZE"}
             </button>
+            <InstallPwaButton />
             <ModeIndicator mode={mode} />
           </div>
         </header>

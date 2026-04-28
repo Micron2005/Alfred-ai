@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Alfred · Offline</title>
+    <meta name="theme-color" content="#060912" />
+    <link rel="icon" type="image/png" sizes="32x32" href="/icons/favicon-32.png" />
+    <style>
+      :root {
+        --bg: #060912;
+        --fg: #e6ecf5;
+        --hud: #6cd6ff;
+        --accent: #d6a85a;
+        --muted: #8a96ad;
+      }
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        background: var(--bg);
+        color: var(--fg);
+        font-family:
+          ui-sans-serif,
+          system-ui,
+          -apple-system,
+          "Segoe UI",
+          Roboto,
+          sans-serif;
+      }
+      body {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 24px;
+        text-align: center;
+      }
+      .panel {
+        max-width: 420px;
+        border: 1px solid rgba(108, 214, 255, 0.18);
+        border-radius: 12px;
+        padding: 32px 28px;
+        background:
+          radial-gradient(
+            circle at top,
+            rgba(108, 214, 255, 0.08),
+            transparent 60%
+          ),
+          #0c1220;
+        box-shadow: 0 1px 24px rgba(0, 0, 0, 0.45);
+      }
+      h1 {
+        font-family: ui-monospace, "JetBrains Mono", "Fira Code", monospace;
+        margin: 0 0 12px;
+        letter-spacing: 4px;
+        font-size: 22px;
+        color: var(--hud);
+        text-shadow: 0 0 12px rgba(108, 214, 255, 0.45);
+      }
+      p {
+        margin: 0 0 18px;
+        color: var(--muted);
+        line-height: 1.5;
+      }
+      .accent {
+        color: var(--accent);
+      }
+      button {
+        font: inherit;
+        background: transparent;
+        color: var(--hud);
+        border: 1px solid var(--hud);
+        padding: 10px 20px;
+        border-radius: 6px;
+        cursor: pointer;
+        letter-spacing: 2px;
+        text-transform: uppercase;
+        font-size: 12px;
+      }
+      button:hover {
+        background: rgba(108, 214, 255, 0.08);
+      }
+    </style>
+  </head>
+  <body>
+    <main class="panel">
+      <h1>ALFRED · OFFLINE</h1>
+      <p>
+        I cannot reach the network at present, <span class="accent">sir</span>.
+        I shall be available again the moment connectivity is restored.
+      </p>
+      <button onclick="location.reload()">Try again</button>
+    </main>
+  </body>
+</html>
