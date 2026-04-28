@@ -142,6 +142,23 @@ class Settings(BaseSettings):
         return bool(self.anthropic_api_key and self.anthropic_api_key.strip())
 
     @property
+    def has_local_chat(self) -> bool:
+        """Whether a local Ollama chat model is configured.
+
+        Setting ``LOCAL_MODEL_CHAT=""`` in ``.env`` disables the local
+        path entirely. The router then routes every text turn through
+        cloud (Anthropic). Useful when the host doesn't have enough
+        RAM / VRAM to run a chat model — for instance on WSL2 with a
+        small memory cap, or on a machine without a usable GPU.
+
+        As with ``has_local_vision``, we don't ping Ollama to verify
+        the named model is pulled — if it isn't, the chat request
+        404s at runtime and surfaces as a normal LLM error.
+        """
+
+        return bool(self.local_model_chat and self.local_model_chat.strip())
+
+    @property
     def has_local_vision(self) -> bool:
         """Whether a local Ollama vision model is configured.
 

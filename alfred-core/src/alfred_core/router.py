@@ -7,9 +7,16 @@ Rules of thumb:
   If neither is wired, raise ``VisionUnavailableError`` so the chat
   endpoint can surface a polite "I can't see images yet" message
   rather than silently dropping the attachment.
-- If the user's request looks like a hard coding task AND the cloud backend
-  is enabled, send it to Claude.
+- If local chat is disabled (``LOCAL_MODEL_CHAT=""``) but cloud is
+  available, every text turn goes to cloud. Useful on hosts that
+  don't have enough RAM / VRAM to run a chat model locally.
+- Else if the user's request looks like a hard coding task AND the
+  cloud backend is enabled, send it to Claude.
 - Otherwise stay local (chat model).
+
+If neither local chat nor cloud is wired, ``LLMUnavailableError`` is
+raised so the chat endpoint can surface a clear "no chat backend
+configured" message rather than crashing on a None.
 
 This is a deliberately small heuristic. As we add real tool-calling in later
 phases, this module will grow into something smarter (e.g. a fast classifier
@@ -40,18 +47,29 @@ class VisionUnavailableError(RuntimeError):
     """Raised when an image-bearing turn arrives but no vision backend is wired."""
 
 
+class LLMUnavailableError(RuntimeError):
+    """Raised when no chat backend (local or cloud) is configured."""
+
+
 @dataclass
 class Router:
-    local: LLMBackend
+    local: LLMBackend | None
     cloud: LLMBackend | None
     local_vision: LLMBackend | None
     use_cloud_for_coding: bool
 
     @classmethod
     def from_settings(cls, settings: Settings) -> Router:
-        local = OllamaBackend(
-            host=settings.ollama_host, default_model=settings.local_model_chat
-        )
+        # Local chat is opt-in — disabling it (``LOCAL_MODEL_CHAT=""``)
+        # is the right move on hosts that lack the RAM / VRAM to run a
+        # chat model locally. The router then routes every text turn
+        # through cloud.
+        local: LLMBackend | None = None
+        if settings.has_local_chat:
+            local = OllamaBackend(
+                host=settings.ollama_host,
+                default_model=settings.local_model_chat,
+            )
         cloud: LLMBackend | None = None
         if settings.has_cloud:
             cloud = AnthropicBackend(
@@ -98,7 +116,20 @@ class Router:
             and _CODE_SIGNALS.search(last_user_message)
         ):
             return self.cloud
-        return self.local
+        if self.local is not None:
+            return self.local
+        # No local — fall through to cloud. This is the
+        # ``LOCAL_MODEL_CHAT=""`` path: the user has explicitly
+        # disabled local chat and Anthropic now carries every text
+        # turn.
+        if self.cloud is not None:
+            return self.cloud
+        raise LLMUnavailableError(
+            "No chat backend is configured, sir. Either set "
+            "LOCAL_MODEL_CHAT in .env to a model you've pulled, or "
+            "set ANTHROPIC_API_KEY for cloud chat, then restart the "
+            "containers."
+        )
 
     async def complete(self, messages: list[ChatMessage]) -> ChatResponse:
         last_user_msg = next(

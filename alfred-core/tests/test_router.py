@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 
 from alfred_core.llm.base import ChatImage, ChatMessage, ChatResponse, LLMBackend
-from alfred_core.router import Router, VisionUnavailableError
+from alfred_core.router import LLMUnavailableError, Router, VisionUnavailableError
 
 
 class _StubBackend(LLMBackend):
@@ -21,11 +21,12 @@ class _StubBackend(LLMBackend):
 def _router(
     *,
     with_cloud: bool,
+    with_local: bool = True,
     with_local_vision: bool = False,
     use_cloud_for_coding: bool = True,
 ) -> Router:
     return Router(
-        local=_StubBackend("local"),
+        local=_StubBackend("local") if with_local else None,
         cloud=_StubBackend("cloud") if with_cloud else None,
         local_vision=_StubBackend("local-vision") if with_local_vision else None,
         use_cloud_for_coding=use_cloud_for_coding,
@@ -106,6 +107,42 @@ def test_local_vision_does_not_steal_text_only_turns() -> None:
     — local chat model handles those (faster, no vision overhead)."""
     r = _router(with_cloud=True, with_local_vision=True)
     assert r.pick("what's the weather like?").name == "local"
+
+
+def test_text_turn_falls_back_to_cloud_when_local_disabled() -> None:
+    """``LOCAL_MODEL_CHAT=""`` disables local chat. With the cloud key
+    set, every plain-text turn should now go to cloud rather than
+    crashing or 404ing on a missing local model."""
+
+    r = _router(with_cloud=True, with_local=False)
+    assert r.pick("what's the weather like?").name == "cloud"
+    assert r.pick("draw me a sunset").name == "cloud"
+
+
+def test_coding_turn_uses_cloud_when_local_disabled() -> None:
+    """Coding-flagged turns already prefer cloud; this just confirms we
+    don't try to instantiate a local backend on the way through."""
+
+    r = _router(with_cloud=True, with_local=False)
+    assert r.pick("refactor this Python function").name == "cloud"
+
+
+def test_text_turn_with_neither_local_nor_cloud_raises() -> None:
+    """If neither local chat nor cloud is wired, fail loudly with a
+    clear ``LLMUnavailableError`` rather than crashing on a None
+    backend in the chat handler."""
+
+    r = _router(with_cloud=False, with_local=False)
+    with pytest.raises(LLMUnavailableError):
+        r.pick("hello")
+
+
+def test_image_turn_still_works_when_local_chat_disabled() -> None:
+    """Disabling local chat must not affect vision routing — vision is
+    its own independent backend."""
+
+    r = _router(with_cloud=False, with_local=False, with_local_vision=True)
+    assert r.pick("describe this", has_images=True).name == "local-vision"
 
 
 @pytest.mark.asyncio

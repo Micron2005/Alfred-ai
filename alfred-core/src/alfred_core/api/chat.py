@@ -40,7 +40,7 @@ from alfred_core.memory_archive import (
     summarise_and_persist_conversation,
 )
 from alfred_core.persona import ContextBundle, Mode, build_persona
-from alfred_core.router import Router, VisionUnavailableError
+from alfred_core.router import LLMUnavailableError, Router, VisionUnavailableError
 from alfred_core.tools.email import EmailError, send_email
 from alfred_core.tools.email_marker import EmailDraft, extract_drafts, replace_marker
 from alfred_core.tools.image_gen import (
@@ -696,6 +696,8 @@ async def chat(req: ChatRequest, session: AsyncSession = Depends(get_session)) -
     try:
         outcome = await _run_search_loop(msgs, settings)
     except VisionUnavailableError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except LLMUnavailableError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(
