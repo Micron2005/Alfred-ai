@@ -44,11 +44,15 @@ self.addEventListener("install", (event) => {
   event.waitUntil(
     caches
       .open(SHELL_CACHE)
-      .then((cache) => cache.addAll(SHELL_ASSETS))
-      .catch(() => {
-        // Non-fatal: a single 404 (e.g. an icon was renamed mid-deploy)
-        // shouldn't block the worker from installing.
-      })
+      .then((cache) =>
+        // `cache.addAll` is atomic: a single 404 (e.g. an icon
+        // renamed mid-deploy) rejects the whole batch and leaves
+        // the cache empty — which would lose `/offline.html` and
+        // defeat the entire app-shell cache. Add each asset
+        // individually with `Promise.allSettled` so failures are
+        // isolated to the specific asset that 404'd.
+        Promise.allSettled(SHELL_ASSETS.map((asset) => cache.add(asset))),
+      )
       .then(() => self.skipWaiting()),
   );
 });
@@ -98,11 +102,14 @@ async function staleWhileRevalidate(request) {
   // always truthy (it's a Promise), so a naive `cached || networkPromise`
   // would resolve to `null` on a cache-miss + network-error and reach
   // `event.respondWith(Promise<null>)`, which TypeErrors. Fall through to
-  // a fresh `fetch(request)` that the browser can surface as a real
-  // network error instead of a silent null response.
+  // the pre-cached SHELL_CACHE for icons/manifest before retrying the
+  // network so the app shell still works on a cold runtime cache.
   if (cached) return cached;
   const fresh = await networkPromise;
   if (fresh) return fresh;
+  const shell = await caches.open(SHELL_CACHE);
+  const shellCached = await shell.match(request);
+  if (shellCached) return shellCached;
   return fetch(request);
 }
 
