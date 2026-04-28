@@ -29,6 +29,7 @@ it's cloud-only.
 
 from __future__ import annotations
 
+import asyncio
 import urllib.parse
 from dataclasses import dataclass
 
@@ -61,6 +62,15 @@ _DEFAULT_QUERY: dict[str, str] = {
     "private": "true",
 }
 
+# Pollinations occasionally returns a transient error (connection
+# reset, 5xx from the upstream, brief queue-stall) that clears on
+# the very next request. Retrying once or twice eliminates almost
+# all of those user-visible failures without meaningfully delaying
+# real failures. We backoff briefly between attempts so we don't
+# stampede the upstream when it's already stressed.
+_MAX_ATTEMPTS = 3
+_BACKOFF_S = 2.0
+
 
 @dataclass(frozen=True)
 class GeneratedImage:
@@ -85,12 +95,60 @@ class ImageGenError(RuntimeError):
     """
 
 
+def _describe_exc(exc: BaseException) -> str:
+    """Return a non-empty single-line description of ``exc``.
+
+    Some httpx exceptions (notably bare ``ConnectError`` /
+    ``RemoteProtocolError`` from a reset) carry an empty
+    ``str()``. Falling back to the class name gives the user
+    something diagnostic to read instead of an empty pair of
+    parens in Alfred's apology.
+    """
+
+    text = str(exc).strip()
+    if text:
+        return text
+    return type(exc).__name__
+
+
+async def _fetch_once(url: str) -> httpx.Response:
+    """Single Pollinations request. Raises on network/HTTP failure."""
+
+    # ``follow_redirects=True`` is essential — ``image.pollinations.ai``
+    # is CDN-fronted and routinely answers with a 302 to the actual
+    # PNG payload. httpx defaulted to NOT following redirects from
+    # 0.23 onwards, so without this flag the chat handler would see
+    # an empty redirect body and surface "non-image response. Try
+    # again." every single time.
+    async with httpx.AsyncClient(
+        timeout=_TIMEOUT_S, follow_redirects=True
+    ) as client:
+        return await client.get(url, params=_DEFAULT_QUERY)
+
+
+def _is_retryable(response: httpx.Response) -> bool:
+    """Whether an HTTP-level failure should trigger another attempt.
+
+    5xx responses and 429 (rate-limit) are inherently transient and
+    almost always clear on a retry. 4xx other than 429 are caller
+    errors (bad prompt, banned content, etc.) and won't clear no
+    matter how many times we ask.
+    """
+
+    if response.status_code == 429:
+        return True
+    return 500 <= response.status_code < 600
+
+
 async def generate_image(prompt: str) -> GeneratedImage:
     """Generate one image from ``prompt`` and return its bytes.
 
     Pollinations encodes the prompt in the URL path, so we URL-encode
     it carefully. They accept a few thousand characters — well past
-    anything an LLM would normally emit.
+    anything an LLM would normally emit. Transient network and
+    server errors are retried up to ``_MAX_ATTEMPTS`` times with a
+    short backoff; non-retryable failures (bad prompt, content
+    rejected, malformed body) surface immediately.
     """
 
     cleaned = prompt.strip()
@@ -100,43 +158,53 @@ async def generate_image(prompt: str) -> GeneratedImage:
     encoded_prompt = urllib.parse.quote(cleaned, safe="")
     url = _POLLINATIONS_BASE + encoded_prompt
 
-    try:
-        # ``follow_redirects=True`` is essential — ``image.pollinations.ai``
-        # is CDN-fronted and routinely answers with a 302 to the actual
-        # PNG payload. httpx defaulted to NOT following redirects from
-        # 0.23 onwards, so without this flag the chat handler would see
-        # an empty redirect body and surface "non-image response. Try
-        # again." every single time.
-        async with httpx.AsyncClient(
-            timeout=_TIMEOUT_S, follow_redirects=True
-        ) as client:
-            response = await client.get(url, params=_DEFAULT_QUERY)
-    except httpx.HTTPError as exc:
-        raise ImageGenError(
-            f"couldn't reach the image-generation service ({exc})"
-        ) from exc
+    last_error: str | None = None
 
-    if response.status_code >= 400:
-        # Pollinations surfaces errors as plain-text bodies, often a
-        # one-liner like "queue full" or "model busy". Truncate to
-        # keep the reply readable but include enough to diagnose.
-        raise ImageGenError(
-            f"image service returned HTTP {response.status_code}: "
-            f"{response.text[:200]}"
+    for attempt in range(1, _MAX_ATTEMPTS + 1):
+        try:
+            response = await _fetch_once(url)
+        except httpx.HTTPError as exc:
+            last_error = (
+                f"couldn't reach the image-generation service "
+                f"({_describe_exc(exc)})"
+            )
+            if attempt < _MAX_ATTEMPTS:
+                await asyncio.sleep(_BACKOFF_S)
+                continue
+            raise ImageGenError(last_error) from exc
+
+        if response.status_code >= 400:
+            # Pollinations surfaces errors as plain-text bodies, often a
+            # one-liner like "queue full" or "model busy". Truncate to
+            # keep the reply readable but include enough to diagnose.
+            last_error = (
+                f"image service returned HTTP {response.status_code}: "
+                f"{response.text[:200]}"
+            )
+            if attempt < _MAX_ATTEMPTS and _is_retryable(response):
+                await asyncio.sleep(_BACKOFF_S)
+                continue
+            raise ImageGenError(last_error)
+
+        content_type = response.headers.get("content-type", "")
+        body = response.content
+        if not body or not content_type.startswith("image/"):
+            # Defensive — if the upstream falls back to a JSON error body
+            # without an HTTP error code, ``response.content`` will be
+            # bytes that aren't a real image. Treat as transient and
+            # retry; on final attempt, surface the error.
+            last_error = "image service returned a non-image response."
+            if attempt < _MAX_ATTEMPTS:
+                await asyncio.sleep(_BACKOFF_S)
+                continue
+            raise ImageGenError(f"{last_error} Try again.")
+
+        return GeneratedImage(
+            prompt=cleaned,
+            data=body,
+            mime_type=content_type.split(";", 1)[0].strip() or "image/png",
         )
 
-    content_type = response.headers.get("content-type", "")
-    body = response.content
-    if not body or not content_type.startswith("image/"):
-        # Defensive — if the upstream falls back to a JSON error body
-        # without an HTTP error code, ``response.content`` will be
-        # bytes that aren't a real image. Don't store those.
-        raise ImageGenError(
-            "image service returned a non-image response. Try again."
-        )
-
-    return GeneratedImage(
-        prompt=cleaned,
-        data=body,
-        mime_type=content_type.split(";", 1)[0].strip() or "image/png",
-    )
+    # Defensive — the loop above always either returns or raises. This
+    # branch should be unreachable, but covers mypy / future edits.
+    raise ImageGenError(last_error or "image generation failed")
