@@ -59,9 +59,11 @@ def _to_anthropic_message(m: ChatMessage) -> MessageParam:
 
     Plain text messages stay as a string for compactness. Messages with
     images become a list of content blocks: every image first (Anthropic
-    recommends image-before-text for best comprehension), then the text.
-    Empty text is preserved as an empty string block so the request still
-    contains the user's intent (e.g. "describe this").
+    recommends image-before-text for best comprehension), then the text
+    — but ONLY if the user actually typed something. Anthropic now
+    400s on empty text blocks (``messages: text content blocks must
+    be non-empty``), so for an image-only paste we just omit the text
+    block entirely; the image alone is a valid Anthropic message.
     """
     if not m.images:
         return cast(MessageParam, {"role": m.role, "content": m.content})
@@ -78,5 +80,7 @@ def _to_anthropic_message(m: ChatMessage) -> MessageParam:
                 },
             }
         )
-    blocks.append({"type": "text", "text": m.content or ""})
+    text = (m.content or "").strip()
+    if text:
+        blocks.append({"type": "text", "text": text})
     return cast(MessageParam, {"role": m.role, "content": blocks})

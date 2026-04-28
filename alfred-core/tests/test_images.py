@@ -109,10 +109,13 @@ def test_anthropic_multimodal_puts_images_before_text() -> None:
     assert blocks[2]["text"] == "describe these"
 
 
-def test_anthropic_multimodal_keeps_empty_text_block() -> None:
-    """Even if the user attached an image with no caption, we must keep a
-    text block — Anthropic rejects messages whose final content is just
-    images with no accompanying text intent."""
+def test_anthropic_multimodal_omits_empty_text_block() -> None:
+    """If the user pastes an image with no caption, we must NOT include
+    an empty text block. Anthropic now 400s on empty text blocks
+    (``messages: text content blocks must be non-empty``), so an
+    image-only message goes to the wire as just the image block(s).
+    """
+
     msg = ChatMessage(
         role="user",
         content="",
@@ -121,4 +124,38 @@ def test_anthropic_multimodal_keeps_empty_text_block() -> None:
     out = _to_anthropic_message(msg)
     blocks = out["content"]
     assert isinstance(blocks, list)
-    assert blocks[-1] == {"type": "text", "text": ""}
+    assert len(blocks) == 1
+    assert blocks[0]["type"] == "image"
+    assert all(b.get("type") != "text" for b in blocks)
+
+
+def test_anthropic_multimodal_omits_whitespace_only_text_block() -> None:
+    """A caption that's just whitespace ("   ", "\\n\\n") should also be
+    omitted — Anthropic strips and rejects equally."""
+
+    msg = ChatMessage(
+        role="user",
+        content="   \n  ",
+        images=[ChatImage(data="aaa", mime_type="image/png")],
+    )
+    out = _to_anthropic_message(msg)
+    blocks = out["content"]
+    assert isinstance(blocks, list)
+    assert len(blocks) == 1
+    assert blocks[0]["type"] == "image"
+
+
+def test_anthropic_multimodal_strips_caption_whitespace() -> None:
+    """When the caption is real text but has leading/trailing whitespace,
+    we keep it but normalise — Anthropic accepts both, but stripping
+    matches what the user actually typed."""
+
+    msg = ChatMessage(
+        role="user",
+        content="  what's this?  ",
+        images=[ChatImage(data="aaa", mime_type="image/png")],
+    )
+    out = _to_anthropic_message(msg)
+    blocks = out["content"]
+    assert isinstance(blocks, list)
+    assert blocks[-1] == {"type": "text", "text": "what's this?"}
