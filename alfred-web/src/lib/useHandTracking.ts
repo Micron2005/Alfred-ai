@@ -423,11 +423,11 @@ export function useHandTracking(
         const lower = msg.toLowerCase();
         if (lower.includes("permission") || lower.includes("notallowed")) {
           setError(
-            "Camera permission denied. Allow camera access in your browser, then toggle hand tracking off and on.",
+            "Camera permission denied. Allow camera access in your browser, then reload the page.",
           );
         } else if (lower.includes("notfound") || lower.includes("not found")) {
           setError(
-            "No camera found. Plug one in (or ensure your laptop's built-in webcam isn't disabled), then toggle hand tracking off and on.",
+            "No camera found. Plug one in (or ensure your laptop's built-in webcam isn't disabled), then reload the page.",
           );
         } else {
           setError(`Hand tracking setup failed: ${msg}`);
