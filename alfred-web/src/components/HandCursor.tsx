@@ -31,8 +31,54 @@ import type { CursorPoint } from "@/lib/useHandTracking";
 interface Props {
   enabled: boolean;
   cursor: CursorPoint | null;
+  /**
+   * All 21 viewport-pixel landmark positions, in MediaPipe's
+   * hand-landmark order. When provided, the component renders the
+   * full hand skeleton rather than just a fingertip dot. Pass
+   * ``null`` (or omit) to fall back to the dot-only mode.
+   */
+  landmarks?: CursorPoint[] | null;
   isPinching: boolean;
 }
+
+// MediaPipe's official HAND_CONNECTIONS list. Each pair is two
+// landmark indices that should be joined by a bone-segment line
+// when rendering a skeleton.
+// Reference:
+// https://developers.google.com/mediapipe/solutions/vision/hand_landmarker#models
+const HAND_CONNECTIONS: ReadonlyArray<readonly [number, number]> = [
+  // Thumb
+  [0, 1],
+  [1, 2],
+  [2, 3],
+  [3, 4],
+  // Index
+  [0, 5],
+  [5, 6],
+  [6, 7],
+  [7, 8],
+  // Middle
+  [5, 9],
+  [9, 10],
+  [10, 11],
+  [11, 12],
+  // Ring
+  [9, 13],
+  [13, 14],
+  [14, 15],
+  [15, 16],
+  // Pinky
+  [13, 17],
+  [17, 18],
+  [18, 19],
+  [19, 20],
+  // Wrist ↔ pinky base (closes the palm)
+  [0, 17],
+];
+
+// Indices of the five fingertips. Rendered with a slightly bigger
+// dot so the user can see where each finger ends.
+const FINGERTIPS = [4, 8, 12, 16, 20] as const;
 
 const SYNTHETIC_POINTER_ID = 9999;
 
@@ -63,7 +109,12 @@ function buildPointerInit(
   };
 }
 
-export function HandCursor({ enabled, cursor, isPinching }: Props) {
+export function HandCursor({
+  enabled,
+  cursor,
+  landmarks,
+  isPinching,
+}: Props) {
   // Track the previous pinch state and last cursor position so the
   // effect can decide whether each frame is a pointermove, a
   // pointerdown, or a pointerup.
@@ -190,34 +241,124 @@ export function HandCursor({ enabled, cursor, isPinching }: Props) {
     lastPosRef.current = { x, y };
   }, [enabled, cursor, isPinching]);
 
-  if (!enabled || !cursor) return null;
+  if (!enabled) return null;
+  // No hand visible — nothing to draw, but stay mounted so the
+  // gesture-cleanup effect above keeps running.
+  if (!cursor && (!landmarks || landmarks.length === 0)) return null;
 
-  const size = isPinching ? 28 : 22;
-  const ring = isPinching ? 3 : 2;
+  const cursorSize = isPinching ? 28 : 22;
+  const cursorRing = isPinching ? 3 : 2;
+  const stroke = isPinching ? 3.5 : 2.5;
+  const cyan = "rgba(0, 229, 255, 0.95)";
+  const cyanFill = "rgba(0, 229, 255, 0.18)";
+  const gold = "rgba(255, 200, 60, 0.95)";
+
   return (
-    <div
-      aria-hidden
-      style={{
-        position: "fixed",
-        left: cursor.x - size / 2,
-        top: cursor.y - size / 2,
-        width: size,
-        height: size,
-        borderRadius: "50%",
-        border: `${ring}px solid rgba(0, 229, 255, 0.95)`,
-        boxShadow: isPinching
-          ? "0 0 18px 4px rgba(0, 229, 255, 0.55), 0 0 38px 12px rgba(255, 200, 60, 0.18)"
-          : "0 0 14px 3px rgba(0, 229, 255, 0.45)",
-        background: isPinching
-          ? "rgba(0, 229, 255, 0.25)"
-          : "rgba(0, 229, 255, 0.08)",
-        // The cursor must NOT eat the events it dispatches —
-        // ``pointer-events: none`` ensures elementFromPoint sees the
-        // widget below, not the cursor itself.
-        pointerEvents: "none",
-        zIndex: 99999,
-        transition: "width 80ms ease, height 80ms ease",
-      }}
-    />
+    <>
+      {/*
+        Skeleton overlay — renders the full 21-point hand mesh
+        whenever landmarks are available. SVG sized to the viewport
+        so coordinates can be used directly without per-frame
+        re-projection. ``pointer-events: none`` is critical: the
+        synthetic-event dispatcher relies on ``elementFromPoint``
+        seeing widgets *under* the overlay, not the overlay itself.
+      */}
+      {landmarks && landmarks.length === 21 ? (
+        <svg
+          aria-hidden
+          style={{
+            position: "fixed",
+            inset: 0,
+            width: "100vw",
+            height: "100vh",
+            pointerEvents: "none",
+            zIndex: 99998,
+          }}
+        >
+          <defs>
+            <filter id="hand-cursor-glow">
+              <feGaussianBlur stdDeviation="2.5" result="blur" />
+              <feMerge>
+                <feMergeNode in="blur" />
+                <feMergeNode in="SourceGraphic" />
+              </feMerge>
+            </filter>
+          </defs>
+          <g filter="url(#hand-cursor-glow)">
+            {HAND_CONNECTIONS.map(([a, b], i) => {
+              const pa = landmarks[a];
+              const pb = landmarks[b];
+              if (!pa || !pb) return null;
+              return (
+                <line
+                  key={i}
+                  x1={pa.x}
+                  y1={pa.y}
+                  x2={pb.x}
+                  y2={pb.y}
+                  stroke={cyan}
+                  strokeWidth={stroke}
+                  strokeLinecap="round"
+                />
+              );
+            })}
+            {landmarks.map((p, i) => {
+              const isTip = (FINGERTIPS as readonly number[]).includes(i);
+              const isThumbOrIndexTip = i === 4 || i === 8;
+              const r = isTip ? (isPinching && isThumbOrIndexTip ? 7 : 5) : 3;
+              const fill =
+                isPinching && isThumbOrIndexTip ? gold : cyanFill;
+              const stroke2 =
+                isPinching && isThumbOrIndexTip ? gold : cyan;
+              return (
+                <circle
+                  key={i}
+                  cx={p.x}
+                  cy={p.y}
+                  r={r}
+                  fill={fill}
+                  stroke={stroke2}
+                  strokeWidth={1.5}
+                />
+              );
+            })}
+          </g>
+        </svg>
+      ) : null}
+
+      {/*
+        Cursor dot — the index-fingertip indicator. Even with the
+        full skeleton drawn, a dedicated dot helps the user track
+        exactly where their click/grab will land (the index-tip
+        landmark in the skeleton is the same point but smaller and
+        easier to lose at a glance).
+      */}
+      {cursor ? (
+        <div
+          aria-hidden
+          style={{
+            position: "fixed",
+            left: cursor.x - cursorSize / 2,
+            top: cursor.y - cursorSize / 2,
+            width: cursorSize,
+            height: cursorSize,
+            borderRadius: "50%",
+            border: `${cursorRing}px solid ${cyan}`,
+            boxShadow: isPinching
+              ? "0 0 18px 4px rgba(0, 229, 255, 0.55), 0 0 38px 12px rgba(255, 200, 60, 0.35)"
+              : "0 0 14px 3px rgba(0, 229, 255, 0.45)",
+            background: isPinching
+              ? "rgba(255, 200, 60, 0.30)"
+              : "rgba(0, 229, 255, 0.10)",
+            // The cursor must NOT eat the events it dispatches —
+            // ``pointer-events: none`` ensures elementFromPoint sees
+            // the widget below, not the cursor itself.
+            pointerEvents: "none",
+            zIndex: 99999,
+            transition: "width 80ms ease, height 80ms ease",
+          }}
+        />
+      ) : null}
+    </>
   );
 }
