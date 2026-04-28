@@ -519,12 +519,20 @@ export function useHandTracking(
       setRight((curr) => (handStateEqual(curr, nextRight) ? curr : nextRight));
       setLeft((curr) => (handStateEqual(curr, nextLeft) ? curr : nextLeft));
 
-      // Two-hand pinch derived gesture.
+      // Two-hand pinch derived gesture. Treat a fisted left hand
+      // as NOT a deliberate pinch, even if the thumb-to-index
+      // distance falls below threshold (a closed fist tucks the
+      // thumb against the fingers, which incidentally trips the
+      // pinch latch). Without this guard, a left-fist + right-
+      // pinch would silently start scaling the widget under the
+      // cursor while the user thinks they're just opening the
+      // Quick Tools menu.
       const bothPinching =
         !!nextRight &&
         !!nextLeft &&
         nextRight.isPinching &&
-        nextLeft.isPinching;
+        nextLeft.isPinching &&
+        !nextLeft.isFist;
       const prevTwo = twoHandRef.current;
       let nextTwo: TwoHandPinch;
       if (bothPinching && nextRight && nextLeft) {

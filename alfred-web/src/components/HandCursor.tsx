@@ -182,15 +182,26 @@ export function HandCursor({ enabled, rightHand, leftHand }: Props) {
 
   const cursor = rightHand?.cursor ?? null;
   // ``isPinching`` here gates synthetic pointer events. We treat
-  // a two-handed pinch (right + left both pinching) as NOT a click
-  // / drag, because the user's intent is the two-handed resize
-  // gesture, not a single-finger click. If a drag was already in
-  // progress when the user started their second pinch, this will
-  // cleanly release it on the same frame as the second pinch
-  // starts (the existing pointerup path handles ``isPinching``
-  // flipping false mid-gesture).
-  const isPinching =
-    !!rightHand?.isPinching && !leftHand?.isPinching;
+  // a *deliberate* two-handed pinch (both hands pinching, with
+  // the left hand NOT in a fist) as NOT a click — the user's
+  // intent is the two-handed resize gesture, not a single-finger
+  // click. If a drag was already in progress when the user
+  // started their second deliberate pinch, this will cleanly
+  // release it on the same frame as the second pinch starts
+  // (the existing pointerup path handles ``isPinching`` flipping
+  // false mid-gesture).
+  //
+  // The ``!leftHand?.isFist`` guard is critical: a closed fist
+  // tucks the thumb against the fingers, which can put the
+  // thumb-tip ↔ index-tip distance below the pinch threshold and
+  // spuriously set ``leftHand.isPinching = true``. Without this
+  // guard, every left-fist (which opens the Quick Tools menu)
+  // would also suppress all right-hand clicks — making the menu
+  // items unreachable, since the menu's only intended input is
+  // right-hand pinch-click.
+  const leftPinchModifier =
+    !!leftHand?.isPinching && !leftHand?.isFist;
+  const isPinching = !!rightHand?.isPinching && !leftPinchModifier;
 
   // Fire a clean (pointerup, pointercancel) pair on the captured
   // down target if a pinch is currently active. Used by both
@@ -282,6 +293,15 @@ export function HandCursor({ enabled, rightHand, leftHand }: Props) {
     // the cursor at release time so a button hit-test works the way
     // a mouse click does (drag off → no click; release on target →
     // click).
+    //
+    // Edge case: ``isPinching`` can flip false because the right
+    // hand un-pinched (genuine release) OR because the left hand
+    // *just* started pinching (the gate suppressed the right
+    // pinch as the start of a two-hand resize). In the latter
+    // case the user's intent is a resize gesture — firing a click
+    // would wrongly activate whatever's under the cursor (e.g. a
+    // widget's hide button). The pointerup is still correct (it
+    // releases any in-progress drag cleanly), but skip the click.
     if (!isPinching && prevPinchRef.current) {
       const downTarget = downTargetRef.current;
       if (downTarget) {
@@ -290,7 +310,12 @@ export function HandCursor({ enabled, rightHand, leftHand }: Props) {
         );
       }
       const clickTarget = hover ?? downTarget;
-      if (clickTarget && clickTarget === downTarget) {
+      const releaseWasGenuine = !leftPinchModifier;
+      if (
+        releaseWasGenuine &&
+        clickTarget &&
+        clickTarget === downTarget
+      ) {
         clickTarget.dispatchEvent(
           new MouseEvent("click", {
             bubbles: true,
@@ -309,7 +334,7 @@ export function HandCursor({ enabled, rightHand, leftHand }: Props) {
 
     prevPinchRef.current = isPinching;
     lastPosRef.current = { x, y };
-  }, [enabled, cursor, isPinching]);
+  }, [enabled, cursor, isPinching, leftPinchModifier]);
 
   if (!enabled) return null;
   // No hands visible at all — nothing to draw, but stay mounted so
