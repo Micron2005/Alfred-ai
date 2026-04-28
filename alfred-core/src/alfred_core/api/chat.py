@@ -43,12 +43,12 @@ from alfred_core.persona import ContextBundle, Mode, build_persona
 from alfred_core.router import LLMUnavailableError, Router, VisionUnavailableError
 from alfred_core.tools.email import EmailError, send_email
 from alfred_core.tools.email_marker import EmailDraft, extract_drafts, replace_marker
+from alfred_core.tools.history_scrub import scrub_assistant_content
 from alfred_core.tools.image_gen import (
     GeneratedImage,
     ImageGenError,
     generate_image,
 )
-from alfred_core.tools.history_scrub import scrub_assistant_content
 from alfred_core.tools.image_marker import (
     extract_requests as extract_image_requests,
 )
