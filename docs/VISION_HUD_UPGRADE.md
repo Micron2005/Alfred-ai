@@ -6,19 +6,21 @@ tracking work, without disturbing any of it.
 
 ## What's new
 
-### 1. Facial expression tracking 🙂 FACE
+### 1. Facial expression detection (no face mesh) 🙂
 - `alfred-web/src/lib/useFaceTracking.ts`: in-browser MediaPipe
   FaceLandmarker. 478 face landmarks + 52 ARKit-compatible
   blendshape coefficients (smile / frown / brow raise / mouth
   open / etc.) at ~30 fps, all client-side.
-- `FaceMesh` overlay (`components/FaceMesh.tsx`): full-screen SVG
-  drawing the face contours (oval, eyes, brows, lips, nose
-  bridge) plus a JARVIS-style targeting reticle and an
-  "EXPRESSION" panel showing the dominant facial action +
-  top-4 active blendshapes.
-- New header toggle `🙂 FACE` (`data-testid="face-tracking-toggle"`).
+- `ExpressionReadout` (`components/ExpressionReadout.tsx`):
+  small fixed-position HUD pill in the bottom-right corner that
+  shows the dominant expression (e.g. "Smile · 47%"). Auto-hides
+  1.5 s after the face leaves frame. **Does NOT draw on the
+  user's face** — Alfred sees the expression silently.
+- Auto-starts with the page (no toggle button), exactly like
+  hand tracking. Falls back to a no-op overlay if the user
+  denies camera permission.
 
-### 2. Body pose tracking 🦴 POSE
+### 2. Body pose tracking (auto-on, like hand tracking) 🦴
 - `alfred-web/src/lib/usePoseTracking.ts`: in-browser MediaPipe
   PoseLandmarker (BlazePose Lite). 33-point body skeleton +
   pre-computed joint angles (left/right elbow, knee, hip,
@@ -26,7 +28,9 @@ tracking work, without disturbing any of it.
 - `PoseSkeleton` overlay (`components/PoseSkeleton.tsx`):
   visibility-aware skeleton render with a "BIOMECHANICS"
   readout panel showing live joint angles.
-- New header toggle `🦴 POSE` (`data-testid="pose-tracking-toggle"`).
+- **Auto-starts with the page** (same lifecycle as hand
+  tracking — no opt-in button). The skeleton draws on top of
+  the user as they move, identical UX to the hand cursor.
 
 ### 3. 3D orb upgrade 🌐 ORB
 - `Orb3D` (`components/Orb3D.tsx`): drop-in replacement for the

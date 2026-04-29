@@ -24,7 +24,7 @@ import { useHandTracking } from "@/lib/useHandTracking";
 import { useFaceTracking } from "@/lib/useFaceTracking";
 import { usePoseTracking } from "@/lib/usePoseTracking";
 import { HandCursor } from "@/components/HandCursor";
-import { FaceMesh } from "@/components/FaceMesh";
+import { ExpressionReadout } from "@/components/ExpressionReadout";
 import { PoseSkeleton } from "@/components/PoseSkeleton";
 import { QuickToolsMenu } from "@/components/QuickToolsMenu";
 import { Orb } from "@/components/Orb";
@@ -47,8 +47,6 @@ const VOICE_OUT_KEY = "alfred.voiceOutEnabled";
 const HANDS_FREE_KEY = "alfred.handsFreeEnabled";
 const CAMERA_KEY = "alfred.cameraEnabled";
 const FULL_HUD_KEY = "alfred.fullHudEnabled";
-const FACE_TRACKING_KEY = "alfred.faceTrackingEnabled";
-const POSE_TRACKING_KEY = "alfred.poseTrackingEnabled";
 const ORB_3D_KEY = "alfred.orb3dEnabled";
 // v2: the sidebar's role changed (it now hosts the active chat, not
 // just the archive list). Old "collapsed=1" values from v1 would
@@ -80,8 +78,6 @@ export function ChatWindow() {
   const [handsFree, setHandsFree] = useState(false);
   const [cameraOn, setCameraOn] = useState(false);
   const [fullHud, setFullHud] = useState(false);
-  const [faceTrackingOn, setFaceTrackingOn] = useState(false);
-  const [poseTrackingOn, setPoseTrackingOn] = useState(false);
   const [orb3dOn, setOrb3dOn] = useState(true);
   // Default ``false`` (expanded) — the sidebar now hosts the active
   // conversation (CONVERSATION tab) so collapsing it by default
@@ -108,8 +104,6 @@ export function ChatWindow() {
     setVoiceOut(localStorage.getItem(VOICE_OUT_KEY) === "1");
     setHandsFree(localStorage.getItem(HANDS_FREE_KEY) === "1");
     setCameraOn(localStorage.getItem(CAMERA_KEY) === "1");
-    setFaceTrackingOn(localStorage.getItem(FACE_TRACKING_KEY) === "1");
-    setPoseTrackingOn(localStorage.getItem(POSE_TRACKING_KEY) === "1");
     // 3D orb defaults ON (the upgraded look is the new normal); flip
     // to "0" in localStorage to fall back to the legacy 2D orb.
     const orb3dStored = localStorage.getItem(ORB_3D_KEY);
@@ -133,22 +127,21 @@ export function ChatWindow() {
   });
 
   const camera = useCamera({ enabled: cameraOn });
-  // Hand tracking auto-starts — no opt-in toggle. The hook
-  // requests its own getUserMedia stream; if the browser denies
-  // the camera permission, ``hand.status`` lands at ``"error"``
-  // and ``HandCursor`` simply renders nothing. No noisy UI.
+  // Hand / face / pose tracking all auto-start — no opt-in toggles.
+  // Each hook requests its own getUserMedia stream; if the browser
+  // denies the camera permission, ``status`` lands at ``"error"``
+  // and the corresponding overlay simply renders nothing. No noisy
+  // UI. Face tracking runs silently (its data feeds the expression
+  // detector + recognition vector — we deliberately do NOT draw the
+  // face mesh on top of the user). Pose tracking renders the body
+  // skeleton overlay just like the hand cursor does.
   const hand = useHandTracking({ enabled: true });
-  // Face / pose tracking are user-opt-in (each spins up its own
-  // stream + landmark model, so we don't want them running by
-  // default and chewing battery on a phone). When the camera is
-  // already on we share its stream so the user isn't prompted
-  // for camera access twice.
   const face = useFaceTracking({
-    enabled: faceTrackingOn,
+    enabled: true,
     sharedStream: camera.streamRef.current ?? null,
   });
   const pose = usePoseTracking({
-    enabled: poseTrackingOn,
+    enabled: true,
     sharedStream: camera.streamRef.current ?? null,
   });
 
@@ -336,20 +329,6 @@ export function ChatWindow() {
     setFullHud(enabled);
     if (typeof window !== "undefined") {
       localStorage.setItem(FULL_HUD_KEY, enabled ? "1" : "0");
-    }
-  }
-
-  function setFaceTrackingPersisted(enabled: boolean) {
-    setFaceTrackingOn(enabled);
-    if (typeof window !== "undefined") {
-      localStorage.setItem(FACE_TRACKING_KEY, enabled ? "1" : "0");
-    }
-  }
-
-  function setPoseTrackingPersisted(enabled: boolean) {
-    setPoseTrackingOn(enabled);
-    if (typeof window !== "undefined") {
-      localStorage.setItem(POSE_TRACKING_KEY, enabled ? "1" : "0");
     }
   }
 
@@ -978,50 +957,6 @@ export function ChatWindow() {
             <button
               type="button"
               className="hud-button"
-              data-testid="face-tracking-toggle"
-              onClick={() => setFaceTrackingPersisted(!faceTrackingOn)}
-              aria-pressed={faceTrackingOn}
-              title={
-                faceTrackingOn
-                  ? "Disable facial expression tracking"
-                  : "Track 478 facial landmarks + 52 expression coefficients"
-              }
-            >
-              {faceTrackingOn
-                ? face.status === "ready"
-                  ? "🙂 FACE · LIVE"
-                  : face.status === "starting"
-                    ? "🙂 FACE · STARTING"
-                    : face.status === "error"
-                      ? "🙂 FACE · ERR"
-                      : "🙂 FACE"
-                : "🙂 FACE"}
-            </button>
-            <button
-              type="button"
-              className="hud-button"
-              data-testid="pose-tracking-toggle"
-              onClick={() => setPoseTrackingPersisted(!poseTrackingOn)}
-              aria-pressed={poseTrackingOn}
-              title={
-                poseTrackingOn
-                  ? "Disable body pose tracking"
-                  : "Track 33-point body skeleton for workouts & form"
-              }
-            >
-              {poseTrackingOn
-                ? pose.status === "ready"
-                  ? "🦴 POSE · LIVE"
-                  : pose.status === "starting"
-                    ? "🦴 POSE · STARTING"
-                    : pose.status === "error"
-                      ? "🦴 POSE · ERR"
-                      : "🦴 POSE"
-                : "🦴 POSE"}
-            </button>
-            <button
-              type="button"
-              className="hud-button"
               data-testid="orb-3d-toggle"
               onClick={() => setOrb3dPersisted(!orb3dOn)}
               aria-pressed={orb3dOn}
@@ -1260,7 +1195,7 @@ export function ChatWindow() {
 
             {fullHud ? <WeatherWidget variant="strip" /> : null}
 
-            {poseTrackingOn || faceTrackingOn ? (
+            {cameraOn ? (
               <div
                 style={{
                   display: "flex",
@@ -1270,18 +1205,14 @@ export function ChatWindow() {
                   flexWrap: "wrap",
                 }}
               >
-                {poseTrackingOn ? (
-                  <WorkoutCoachWidget
-                    pose={pose.pose}
-                    poseStatus={pose.status}
-                  />
-                ) : null}
-                {faceTrackingOn ? (
-                  <FaceRecognitionWidget
-                    face={face.face}
-                    faceStatus={face.status}
-                  />
-                ) : null}
+                <WorkoutCoachWidget
+                  pose={pose.pose}
+                  poseStatus={pose.status}
+                />
+                <FaceRecognitionWidget
+                  face={face.face}
+                  faceStatus={face.status}
+                />
               </div>
             ) : null}
 
@@ -1383,13 +1314,16 @@ export function ChatWindow() {
           rightHand={hand.right}
           leftHand={hand.left}
         />
-        <FaceMesh
-          enabled={faceTrackingOn && face.status === "ready"}
-          face={face.face}
-        />
         <PoseSkeleton
-          enabled={poseTrackingOn && pose.status === "ready"}
+          enabled={pose.status === "ready"}
           pose={pose.pose}
+        />
+        {/* Expression readout — small fixed-position HUD strip showing
+            the dominant facial expression. NOT a face mesh — Alfred
+            sees the expression but doesn't draw on top of the user. */}
+        <ExpressionReadout
+          enabled={face.status === "ready"}
+          face={face.face}
         />
         <QuickToolsMenu
           visible={quickTools.visible}
