@@ -1,25 +1,19 @@
 "use client";
 
 /**
- * DesignView — the third tab. Embeds OnShape's web app in an
- * iframe so the user can do real CAD work, with a small Alfred
- * chat overlay docked to the right side for assistance and a
- * printer-status strip docked to the bottom showing live K1 Max
- * status from Moonraker.
+ * DesignView — third tab. OnShape blocks iframe embedding via
+ * ``X-Frame-Options: SAMEORIGIN``, so we don't try; instead we
+ * present a launcher card that opens OnShape in a new tab and
+ * keep Alfred's chat assist + printer strip alongside it.
  *
- * OnShape requires the user to sign in inside the iframe. Their
- * docs/CAD work persists in their OnShape account — Alfred never
- * touches it, only sits alongside.
+ * The launcher card is large + central so the tab feels
+ * intentional, not like a placeholder. As soon as the user
+ * clicks "Open OnShape", the new tab takes them to cad.onshape.com
+ * and they keep this tab open for Alfred chat / printer status.
  *
- * The chat overlay calls the same ``/chat`` endpoint as the main
- * Chat tab but uses a **separate conversation thread** named
- * "Design Studio" so design-related back-and-forth doesn't
- * pollute the user's general chat history.
- *
- * If OnShape's iframe X-Frame-Options policy ever rejects the
- * embed (some users see this depending on their corporate
- * account), we fall back to a simple "Open OnShape in a new tab"
- * button — the chat overlay still works.
+ * The chat overlay calls the backend ``/chat`` endpoint with a
+ * separate conversation thread so design back-and-forth doesn't
+ * pollute the main chat.
  */
 
 import { useEffect, useRef, useState } from "react";
@@ -37,32 +31,61 @@ interface Props {
 
 const ONSHAPE_URL = "https://cad.onshape.com/documents";
 
+/**
+ * Useful third-party launchers we surface alongside OnShape, so
+ * the Design tab is a hub for "find or build a model to print"
+ * not just a single-app launcher. All open in a new tab.
+ */
+const LAUNCHERS: ReadonlyArray<{
+  id: string;
+  name: string;
+  blurb: string;
+  url: string;
+  icon: string;
+}> = [
+  {
+    id: "onshape",
+    name: "OnShape",
+    blurb:
+      "Full parametric CAD in the browser. Sign in once and your designs sync to every device on your account.",
+    url: ONSHAPE_URL,
+    icon: "📐",
+  },
+  {
+    id: "thingiverse",
+    name: "Thingiverse",
+    blurb:
+      "Largest free library of printable models. Search what you need, download the .stl, drop it in your slicer.",
+    url: "https://www.thingiverse.com/search",
+    icon: "🔎",
+  },
+  {
+    id: "printables",
+    name: "Printables",
+    blurb:
+      "Prusa-curated model library. Often higher print-quality than Thingiverse.",
+    url: "https://www.printables.com/search/models",
+    icon: "🧩",
+  },
+  {
+    id: "makerworld",
+    name: "MakerWorld",
+    blurb:
+      "Bambu's library — heavy on optimised, multi-colour-ready prints.",
+    url: "https://makerworld.com/en/3d-models",
+    icon: "🌐",
+  },
+];
+
 export function DesignView({ conversationId, onConversationCreated }: Props) {
-  const [iframeBlocked, setIframeBlocked] = useState(false);
   const [chatExpanded, setChatExpanded] = useState(true);
   const [input, setInput] = useState("");
-  // Local message log — design-chat is intentionally lightweight
-  // and ephemeral (the persistent record lives in the backend
-  // conversation row keyed by conversationId; this state only
-  // covers the visible scrollback in the overlay).
   const [messages, setMessages] = useState<
     Array<{ role: "user" | "assistant"; content: string }>
   >([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
-
-  // OnShape sometimes refuses iframe embedding for certain
-  // accounts — detect by waiting 6s for a load event and showing
-  // the fallback if nothing happened. (Pure heuristic; X-Frame
-  // rejection doesn't fire onerror in modern browsers.)
-  const iframeLoadedRef = useRef(false);
-  useEffect(() => {
-    const t = window.setTimeout(() => {
-      if (!iframeLoadedRef.current) setIframeBlocked(true);
-    }, 6000);
-    return () => window.clearTimeout(t);
-  }, []);
 
   useEffect(() => {
     const el = scrollRef.current;
@@ -103,38 +126,156 @@ export function DesignView({ conversationId, onConversationCreated }: Props) {
         flexDirection: "column",
         minHeight: 0,
         overflow: "hidden",
+        background:
+          "radial-gradient(1200px 600px at 50% 30%, rgba(108,214,255,0.06) 0%, transparent 70%), #06090f",
       }}
     >
-      {iframeBlocked ? (
-        <BlockedFallback />
-      ) : (
-        <iframe
-          data-testid="onshape-iframe"
-          src={ONSHAPE_URL}
-          title="OnShape CAD"
-          onLoad={() => {
-            iframeLoadedRef.current = true;
-          }}
-          // ``allow`` covers the bits OnShape actually uses inside
-          // their iframe (file pickers, clipboard, fullscreen, the
-          // device's GPU for WebGL CAD rendering).
-          allow="clipboard-read; clipboard-write; fullscreen; web-share"
-          style={{
-            flex: 1,
-            width: "100%",
-            border: "none",
-            background: "#1a1f2c",
-          }}
-        />
-      )}
+      <div
+        style={{
+          flex: 1,
+          overflowY: "auto",
+          padding: "32px 24px 96px",
+          // Leave room on the right for the fixed chat overlay.
+          paddingRight: chatExpanded ? 360 : 80,
+        }}
+      >
+        <div style={{ maxWidth: 980, margin: "0 auto" }}>
+          <h2
+            className="mono"
+            style={{
+              fontSize: 22,
+              letterSpacing: 6,
+              color: "var(--hud)",
+              textShadow: "0 0 12px var(--orb-glow)",
+              fontWeight: 500,
+              margin: 0,
+            }}
+          >
+            DESIGN STUDIO
+          </h2>
+          <p
+            style={{
+              color: "var(--muted)",
+              fontStyle: "italic",
+              fontSize: 13,
+              margin: "4px 0 28px",
+            }}
+          >
+            For the things you&rsquo;d like to print, sir.
+          </p>
 
-      {/* Bottom strip — printer status. Always visible across the
-          design view since 3D-printing is the natural endpoint for
-          most things designed here. */}
+          <div
+            style={{
+              display: "grid",
+              gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))",
+              gap: 14,
+            }}
+          >
+            {LAUNCHERS.map((l) => (
+              <a
+                key={l.id}
+                href={l.url}
+                target="_blank"
+                rel="noreferrer"
+                data-testid={`launcher-${l.id}`}
+                style={{
+                  display: "flex",
+                  flexDirection: "column",
+                  gap: 8,
+                  padding: 16,
+                  background:
+                    "linear-gradient(135deg, rgba(108,214,255,0.06) 0%, rgba(8,14,24,0.85) 100%)",
+                  border: "1px solid var(--border)",
+                  borderRadius: 6,
+                  color: "var(--hud)",
+                  textDecoration: "none",
+                  cursor: "pointer",
+                  transition: "transform 200ms ease, box-shadow 200ms ease, border-color 200ms ease",
+                  position: "relative",
+                  overflow: "hidden",
+                }}
+                onMouseEnter={(e) => {
+                  e.currentTarget.style.transform = "translateY(-3px)";
+                  e.currentTarget.style.boxShadow =
+                    "0 8px 24px rgba(108,214,255,0.18), 0 0 0 1px var(--orb)";
+                  e.currentTarget.style.borderColor = "var(--orb)";
+                }}
+                onMouseLeave={(e) => {
+                  e.currentTarget.style.transform = "translateY(0)";
+                  e.currentTarget.style.boxShadow = "none";
+                  e.currentTarget.style.borderColor = "var(--border)";
+                }}
+              >
+                <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                  <span style={{ fontSize: 28 }}>{l.icon}</span>
+                  <span
+                    style={{
+                      fontFamily:
+                        'ui-monospace, SFMono-Regular, "JetBrains Mono", monospace',
+                      fontSize: 14,
+                      letterSpacing: 2.5,
+                      textTransform: "uppercase",
+                      fontWeight: 600,
+                      color: "var(--hud)",
+                    }}
+                  >
+                    {l.name}
+                  </span>
+                </div>
+                <p
+                  style={{
+                    margin: 0,
+                    color: "var(--muted)",
+                    fontSize: 12,
+                    lineHeight: 1.55,
+                  }}
+                >
+                  {l.blurb}
+                </p>
+                <span
+                  style={{
+                    position: "absolute",
+                    top: 12,
+                    right: 12,
+                    fontSize: 11,
+                    color: "var(--muted)",
+                    opacity: 0.7,
+                  }}
+                >
+                  ↗
+                </span>
+              </a>
+            ))}
+          </div>
+
+          <div
+            style={{
+              marginTop: 32,
+              padding: 14,
+              borderLeft: "2px solid var(--orb-soft)",
+              background: "rgba(108,214,255,0.04)",
+              fontFamily:
+                'ui-monospace, SFMono-Regular, "JetBrains Mono", monospace',
+              fontSize: 11,
+              lineHeight: 1.7,
+              color: "var(--muted)",
+            }}
+          >
+            <strong style={{ color: "var(--hud)", letterSpacing: 1.5 }}>
+              TIP
+            </strong>
+            <span style={{ marginLeft: 8 }}>
+              Describe what you want in the chat panel and I&rsquo;ll suggest
+              dimensions, search queries, or remix ideas. Show me a photo with
+              the camera and I&rsquo;ll talk you through what to model.
+            </span>
+          </div>
+        </div>
+      </div>
+
       <PrinterWidget />
 
-      {/* Right-docked chat overlay — collapsed when not in use to
-          give the CAD canvas maximum room. */}
+      {/* Right-docked chat overlay */}
       <div
         data-testid="design-chat-overlay"
         style={{
@@ -284,49 +425,6 @@ export function DesignView({ conversationId, onConversationCreated }: Props) {
           </>
         ) : null}
       </div>
-    </div>
-  );
-}
-
-function BlockedFallback() {
-  return (
-    <div
-      data-testid="onshape-blocked"
-      style={{
-        flex: 1,
-        display: "flex",
-        flexDirection: "column",
-        alignItems: "center",
-        justifyContent: "center",
-        gap: 14,
-        color: "var(--muted)",
-        fontFamily:
-          'ui-monospace, SFMono-Regular, "JetBrains Mono", monospace',
-        textAlign: "center",
-        padding: 32,
-      }}
-    >
-      <div style={{ fontSize: 13, letterSpacing: 2, textTransform: "uppercase" }}>
-        OnShape blocked the embed
-      </div>
-      <div style={{ fontSize: 12, maxWidth: 480, lineHeight: 1.6 }}>
-        Some OnShape accounts (notably enterprise ones) refuse iframe
-        embedding via X-Frame-Options. Open OnShape in its own tab and
-        I&rsquo;ll keep helping from over here.
-      </div>
-      <a
-        href={ONSHAPE_URL}
-        target="_blank"
-        rel="noreferrer"
-        className="hud-button"
-        style={{
-          textDecoration: "none",
-          padding: "8px 16px",
-          letterSpacing: 1.5,
-        }}
-      >
-        OPEN ONSHAPE ↗
-      </a>
     </div>
   );
 }

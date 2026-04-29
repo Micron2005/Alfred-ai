@@ -19,6 +19,34 @@ interface Props {
   showAnglePanel?: boolean;
 }
 
+/** Joints that must ALL be visible (visibility >= ``MIN_FULL_BODY_VIS``)
+ *  before we consider this a real "full body in frame" pose. Without
+ *  this gate the skeleton renders even when only the upper torso
+ *  is visible — and the partial skeleton looks like a glitch. */
+const FULL_BODY_REQUIRED_JOINTS: ReadonlyArray<number> = [
+  POSE_LM.NOSE,
+  POSE_LM.LEFT_SHOULDER,
+  POSE_LM.RIGHT_SHOULDER,
+  POSE_LM.LEFT_HIP,
+  POSE_LM.RIGHT_HIP,
+  POSE_LM.LEFT_KNEE,
+  POSE_LM.RIGHT_KNEE,
+  POSE_LM.LEFT_ANKLE,
+  POSE_LM.RIGHT_ANKLE,
+];
+const MIN_FULL_BODY_VIS = 0.55;
+
+function isFullBodyVisible(pose: PoseState | null): boolean {
+  if (!pose) return false;
+  for (const idx of FULL_BODY_REQUIRED_JOINTS) {
+    const lm = pose.landmarks[idx];
+    if (!lm) return false;
+    const vis = lm.visibility ?? 1;
+    if (vis < MIN_FULL_BODY_VIS) return false;
+  }
+  return true;
+}
+
 // Bone connections — pairs of landmark indices joined by a line.
 const POSE_CONNECTIONS: ReadonlyArray<readonly [number, number]> = [
   // Torso
@@ -100,6 +128,11 @@ export function PoseSkeleton({
   }, [pose]);
 
   if (!enabled || !pose) return null;
+  // Only render when the user's full body is in frame. If they
+  // step closer to the camera (so legs leave the view), the
+  // skeleton vanishes silently rather than rendering a stubbed
+  // upper-body skeleton that looks broken.
+  if (!isFullBodyVisible(pose)) return null;
 
   return (
     <>

@@ -26,6 +26,7 @@ import { usePoseTracking } from "@/lib/usePoseTracking";
 import { useTwoHandSwipe } from "@/lib/useTwoHandSwipe";
 import { loadTab, neighbourTab, persistTab, type TabId } from "@/lib/tabs";
 import { TabBar } from "@/components/TabBar";
+import { HudFrame } from "@/components/HudFrame";
 import { DesignView } from "@/components/DesignView";
 import { HandCursor } from "@/components/HandCursor";
 import { ExpressionReadout } from "@/components/ExpressionReadout";
@@ -843,6 +844,7 @@ export function ChatWindow() {
       }}
     >
       <TabBar active={activeTab} onChange={setActiveTabPersisted} />
+      <HudFrame enabled={activeTab === "hud"} />
       {activeTab === "design" ? (
         <DesignView
           conversationId={designConversationId}

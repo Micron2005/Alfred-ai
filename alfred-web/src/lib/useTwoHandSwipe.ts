@@ -4,28 +4,37 @@
  * useTwoHandSwipe — detects a two-handed sliding-door gesture
  * for swiping between tabs.
  *
- * The user described it as: "use both hands and kinda pull it
- * to the side with my fingers slightly bent like im moving a
- * sliding door". So we look for:
+ * Rewritten to be RAF-driven instead of effect-driven so React
+ * doesn't re-run the whole detector every frame the hand state
+ * object identity changes. The hands are read from a ``useRef``
+ * that the caller updates on every render — the detector itself
+ * runs at exactly the same cadence the hand tracker emits frames
+ * (roughly 30 fps).
  *
- *   1. Both hands present in frame, simultaneously, for at least
- *      ``MIN_DUAL_FRAMES`` consecutive frames.
- *   2. Both hands "slightly bent" — i.e. neither pinching tight
- *      nor making a fist (we exclude the existing pinch / fist
- *      gestures so the existing pointer-cursor flows aren't
- *      hijacked).
- *   3. Both hands moving in the SAME horizontal direction with a
- *      meaningful velocity (>= ``MIN_VEL_PX_PER_FRAME``) for at
- *      least ``MIN_SWIPE_FRAMES`` consecutive frames.
- *   4. Net horizontal travel >= ``MIN_SWIPE_PX`` since gesture
- *      start.
+ * Detection rules (tightened from the first pass to feel
+ * predictable):
  *
- * On detection, fires the supplied ``onSwipe`` callback with a
- * direction ("left" or "right") then enters a 700ms cooldown so a
- * single sliding motion doesn't double-trigger.
+ *   1. Both hands present, and BOTH have a clearly OPEN palm (no
+ *      pinch, no fist). Pinches drive the existing pointer cursor;
+ *      fists drive the existing scroll/zoom flows; we don't want
+ *      to hijack either.
+ *   2. Both hands inside the central horizontal band (top 25-75%
+ *      of the viewport) so a "wave hello" with one hand near the
+ *      head doesn't register as the start of a swipe.
+ *   3. Total horizontal travel >= ``MIN_SWIPE_PX`` (250 px) within
+ *      a 700 ms window since the gesture started.
+ *   4. Both hands moving in the SAME horizontal direction the
+ *      whole way through (no zig-zag).
+ *   5. Average vertical drift < ``MAX_VERT_DRIFT_PX`` (140 px) so a
+ *      diagonal motion doesn't trigger.
  *
- * Designed to read directly from the existing ``useHandTracking``
- * hook's two-hand output — no extra camera stream, no extra cost.
+ * On detection: fires ``onSwipe`` with "left" or "right", then
+ * locks for 900 ms so the same continuous wave doesn't re-trigger.
+ *
+ * Direction convention: hands moving RIGHT in the viewport
+ * (positive screen x) emits ``"right"`` — i.e. "next tab". This
+ * matches a real sliding door where you'd push the right panel
+ * outward to reveal the next room on the right.
  */
 
 import { useEffect, useRef } from "react";
@@ -43,30 +52,42 @@ export interface UseTwoHandSwipeOptions {
   leftHand: SwipeHand | null;
   rightHand: SwipeHand | null;
   onSwipe: (direction: "left" | "right") => void;
+  /** Optional log callback for debugging — we wire this up to a
+   *  small overlay in dev mode so the user can see why the
+   *  gesture isn't firing if the timing is off. */
+  onDebug?: (msg: string) => void;
 }
 
-const MIN_DUAL_FRAMES = 4;
-const MIN_VEL_PX_PER_FRAME = 6;
-const MIN_SWIPE_FRAMES = 5;
-const MIN_SWIPE_PX = 180;
-const COOLDOWN_MS = 700;
+const MIN_SWIPE_PX = 250;
+const MAX_VERT_DRIFT_PX = 140;
+const MAX_GESTURE_MS = 700;
+const COOLDOWN_MS = 900;
 
 interface SwipeState {
   startX_left: number;
   startX_right: number;
-  framesAlive: number;
-  framesMoving: number;
+  startY_left: number;
+  startY_right: number;
+  startedAt: number;
   direction: 1 | -1 | 0;
-  prevX_left: number;
-  prevX_right: number;
 }
 
 export function useTwoHandSwipe(opts: UseTwoHandSwipeOptions) {
-  const { enabled, leftHand, rightHand, onSwipe } = opts;
+  const { enabled, onSwipe, onDebug } = opts;
+
+  // Mirror the latest hand props into refs so the RAF loop can
+  // read them without React re-running the effect.
+  const leftRef = useRef<SwipeHand | null>(null);
+  const rightRef = useRef<SwipeHand | null>(null);
+  leftRef.current = opts.leftHand;
+  rightRef.current = opts.rightHand;
+
   const stateRef = useRef<SwipeState | null>(null);
   const cooldownUntilRef = useRef(0);
   const onSwipeRef = useRef(onSwipe);
+  const onDebugRef = useRef(onDebug);
   onSwipeRef.current = onSwipe;
+  onDebugRef.current = onDebug;
 
   useEffect(() => {
     if (!enabled) {
@@ -74,81 +95,103 @@ export function useTwoHandSwipe(opts: UseTwoHandSwipeOptions) {
       return;
     }
 
-    const now = performance.now();
-    if (now < cooldownUntilRef.current) return;
+    let raf = 0;
+    const tick = () => {
+      const now = performance.now();
+      const left = leftRef.current;
+      const right = rightRef.current;
 
-    const bothPresent =
-      leftHand &&
-      rightHand &&
-      !leftHand.isCommitted &&
-      !rightHand.isCommitted;
+      // Both hands have to be open palms. Either one missing or
+      // committed (pinch/fist) clears the in-progress gesture.
+      const bothOpen =
+        left &&
+        right &&
+        !left.isCommitted &&
+        !right.isCommitted;
 
-    if (!bothPresent || !leftHand || !rightHand) {
-      // Reset if we lose either hand — partial detections shouldn't
-      // partially commit a swipe.
-      stateRef.current = null;
-      return;
-    }
+      if (!bothOpen || !left || !right) {
+        stateRef.current = null;
+        raf = requestAnimationFrame(tick);
+        return;
+      }
 
-    const s = stateRef.current;
-    if (!s) {
-      stateRef.current = {
-        startX_left: leftHand.x,
-        startX_right: rightHand.x,
-        framesAlive: 1,
-        framesMoving: 0,
-        direction: 0,
-        prevX_left: leftHand.x,
-        prevX_right: rightHand.x,
-      };
-      return;
-    }
+      // Cooldown — accept new readings but don't act.
+      if (now < cooldownUntilRef.current) {
+        raf = requestAnimationFrame(tick);
+        return;
+      }
 
-    s.framesAlive++;
-    const dxL = leftHand.x - s.prevX_left;
-    const dxR = rightHand.x - s.prevX_right;
+      // Reject if either hand is too high (above 25%) or too low
+      // (below 75%) — this filters out wave-hello-near-the-face
+      // motions and accidental low gestures.
+      const vh = window.innerHeight;
+      const lo = vh * 0.25;
+      const hi = vh * 0.75;
+      const inBand =
+        left.y >= lo && left.y <= hi && right.y >= lo && right.y <= hi;
+      if (!inBand) {
+        stateRef.current = null;
+        raf = requestAnimationFrame(tick);
+        return;
+      }
 
-    // Both hands have to be moving in the same direction with
-    // enough speed to count as a swipe frame.
-    const sameDirection =
-      Math.sign(dxL) === Math.sign(dxR) && Math.sign(dxL) !== 0;
-    const fastEnough =
-      Math.abs(dxL) >= MIN_VEL_PX_PER_FRAME &&
-      Math.abs(dxR) >= MIN_VEL_PX_PER_FRAME;
+      let s = stateRef.current;
+      if (!s) {
+        s = {
+          startX_left: left.x,
+          startX_right: right.x,
+          startY_left: left.y,
+          startY_right: right.y,
+          startedAt: now,
+          direction: 0,
+        };
+        stateRef.current = s;
+        raf = requestAnimationFrame(tick);
+        return;
+      }
 
-    if (sameDirection && fastEnough) {
-      s.framesMoving++;
-      s.direction = Math.sign(dxL) as 1 | -1;
-    } else {
-      // Don't reset on a single slow frame — give the user the
-      // benefit of natural deceleration mid-swipe. But more than
-      // a couple of "still" frames means they probably stopped.
-      if (s.framesMoving > 0) s.framesMoving--;
-    }
+      // Window expired without a swipe — restart.
+      if (now - s.startedAt > MAX_GESTURE_MS) {
+        stateRef.current = {
+          startX_left: left.x,
+          startX_right: right.x,
+          startY_left: left.y,
+          startY_right: right.y,
+          startedAt: now,
+          direction: 0,
+        };
+        raf = requestAnimationFrame(tick);
+        return;
+      }
 
-    s.prevX_left = leftHand.x;
-    s.prevX_right = rightHand.x;
-
-    if (
-      s.framesAlive >= MIN_DUAL_FRAMES &&
-      s.framesMoving >= MIN_SWIPE_FRAMES &&
-      s.direction !== 0
-    ) {
-      const travelL = leftHand.x - s.startX_left;
-      const travelR = rightHand.x - s.startX_right;
+      const travelL = left.x - s.startX_left;
+      const travelR = right.x - s.startX_right;
+      const driftL = Math.abs(left.y - s.startY_left);
+      const driftR = Math.abs(right.y - s.startY_right);
+      const avgDrift = (driftL + driftR) / 2;
+      const sameDir =
+        Math.sign(travelL) === Math.sign(travelR) && Math.sign(travelL) !== 0;
       const avgTravel = (travelL + travelR) / 2;
-      if (Math.abs(avgTravel) >= MIN_SWIPE_PX) {
-        // Note the inversion: hand-mirror means moving hands to
-        // the right (positive x in viewport) feels like pulling a
-        // sliding door TO THE RIGHT, which is the natural gesture
-        // for "previous tab" (move content rightwards = move
-        // viewport leftwards = previous). Confirm with users; flip
-        // if it feels backwards.
+
+      if (
+        sameDir &&
+        Math.abs(avgTravel) >= MIN_SWIPE_PX &&
+        avgDrift <= MAX_VERT_DRIFT_PX
+      ) {
         const direction: "left" | "right" = avgTravel > 0 ? "right" : "left";
+        if (onDebugRef.current) {
+          onDebugRef.current(
+            `swipe ${direction} (Δx=${avgTravel.toFixed(0)}, drift=${avgDrift.toFixed(0)})`,
+          );
+        }
         onSwipeRef.current(direction);
         stateRef.current = null;
-        cooldownUntilRef.current = performance.now() + COOLDOWN_MS;
+        cooldownUntilRef.current = now + COOLDOWN_MS;
       }
-    }
-  }, [enabled, leftHand, rightHand]);
+
+      raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, [enabled]);
 }
