@@ -110,15 +110,21 @@ export function useFaceIdentity({
     })();
   }, [face, faceStatus, identity, enabled]);
 
-  // When the camera goes off, drop the cached identity so a new
-  // session starts from scratch (otherwise the name would linger
-  // for a moment when the user opens the camera again).
+  // Clear the cached identity the moment no face is in frame —
+  // otherwise covering the camera would leave a stale "admin"
+  // match lingering, which would let someone bypass the
+  // Nightfall gate just by enrolling once and then covering
+  // the lens. Also clear on camera off / error for the same
+  // reason (fail-closed on any vision signal loss).
   useEffect(() => {
-    if (!enabled) {
+    if (!enabled || !face || faceStatus !== "ready") {
       setIdentity(null);
       pendingMatchRef.current = null;
+      // Next frame that re-acquires a face should trigger an
+      // immediate identify, not wait for the 1.5 s cadence.
+      lastIdentifyAt.current = 0;
     }
-  }, [enabled]);
+  }, [enabled, face, faceStatus]);
 
   const match = identity?.match ?? null;
   const enrollment = match?.enrollment as

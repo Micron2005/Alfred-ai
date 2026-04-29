@@ -888,15 +888,31 @@ export function ChatWindow() {
       // "Activate nightfall protocol" — flips into Nightfall mode,
       // but ONLY if an admin face is currently in frame. Otherwise
       // Alfred refuses politely (the whole point of the gate).
+      // Belt-and-braces: we require BOTH a live face at this moment
+      // AND the useFaceIdentity hook to have resolved that face as
+      // an admin. Either alone is not enough — useFaceIdentity is
+      // already wired to clear its cache on face loss, but
+      // double-checking here means a single stale-state bug can't
+      // bypass the gate.
       const nightfallIntent = detectNightfallIntent(text);
       if (nightfallIntent) {
         const willEnable = nightfallIntent.enable;
-        if (willEnable && !faceIdentity.isAdmin) {
+        const liveAdminFace =
+          willEnable &&
+          cameraOn &&
+          face.status === "ready" &&
+          face.face !== null &&
+          faceIdentity.isAdmin;
+        if (willEnable && !liveAdminFace) {
           const reason = !cameraOn
             ? "the camera is off"
-            : !face.face
-              ? "I don't see you"
-              : "you're not registered as an admin";
+            : face.status !== "ready"
+              ? "the camera isn't ready"
+              : !face.face
+                ? "I don't see a face in frame"
+                : !faceIdentity.match
+                  ? "I don't recognise the face in frame"
+                  : "that face isn't registered as an admin";
           const msg = `Nightfall protocol is keyed to an administrator's face, sir. Access denied — ${reason}.`;
           setMessages((prev) => [
             ...prev,
