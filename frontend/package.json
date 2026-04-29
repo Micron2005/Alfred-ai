@@ -1,0 +1,9 @@
+{
+  "name": "alfred-web-wrapper",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "start": "cd /app/alfred-web && yarn dev",
+    "build": "cd /app/alfred-web && yarn build"
+  }
+}
