@@ -67,6 +67,12 @@ Single user — Mukarram Mohammad Alam. Alfred is a dry, witty British butler.
 - ✅ NAV_VERB hard-required as the very first token — plain greetings can never be mis-classified as nav commands
 - ✅ Trailing `setActiveTabPersisted` syntax bug fixed (function declaration was missing newline → minor parse-time hazard)
 
+### LLM 502 ReadTimeout fix (Feb 2026 — NEW)
+**Symptom:** "Alfred is unreachable: 502 — LLM backend failed: ReadTimeout" on every greeting ("hello"/"hello alfred") and every Nightfall message, even though other prompts worked. Root cause was the local Ollama (Llama 3.1 8B) looping forever on the long multi-tool persona prompt, never returning before the 120 s timeout.
+- ✅ **`alfred-core/src/alfred_core/llm/local.py`** — added `num_predict: 1024` (hard cap on generated tokens) + `repeat_penalty: 1.15` (discourage exact-token loops). Lowered HTTP timeout 120 s → 90 s so failures fail fast.
+- ✅ **`alfred-core/src/alfred_core/router.py`** — `Router.complete()` now catches `httpx.TimeoutException` / `HTTPError` / `HTTPStatusError` from the local backend and **transparently falls back to the cloud Anthropic backend** when one is configured. Logs the original failure as a warning so it shows up in `docker compose logs`.
+- ✅ **`alfred-core/tests/test_router.py`** — 4 new tests pin: (a) read-timeout falls back to cloud, (b) 5xx falls back to cloud, (c) propagates when no cloud is wired, (d) doesn't loop back to local when cloud itself fails. All 117 LLM/router tests still pass.
+
 ## Backlog (P0 / P1 / P2)
 
 ### P0 — for next session

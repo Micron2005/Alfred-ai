@@ -25,13 +25,18 @@ model or an LLM-based router). For now, simple is fine.
 
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass
+
+import httpx
 
 from alfred_core.config import Settings
 from alfred_core.llm.anthropic_backend import AnthropicBackend
 from alfred_core.llm.base import ChatMessage, ChatResponse, LLMBackend
 from alfred_core.llm.local import OllamaBackend
+
+_log = logging.getLogger(__name__)
 
 _CODE_SIGNALS = re.compile(
     r"\b("
@@ -139,4 +144,23 @@ class Router:
         last_user_text = last_user_msg.content if last_user_msg else ""
         has_images = bool(last_user_msg and last_user_msg.images)
         backend = self.pick(last_user_text, has_images=has_images)
-        return await backend.complete(messages)
+        try:
+            return await backend.complete(messages)
+        except (httpx.TimeoutException, httpx.HTTPError, httpx.HTTPStatusError) as exc:
+            # Local Ollama fell over — most commonly a ReadTimeout when
+            # the model gets stuck looping on a tricky prompt. If the
+            # cloud (Anthropic) backend is configured AND we weren't
+            # already on it, transparently fall through. The user's
+            # turn still lands; he just gets a Claude reply instead of
+            # an Ollama one. Without this, the chat handler 502s and
+            # the user thinks Alfred is broken when in reality the
+            # local model just needed a poke.
+            is_local = backend is self.local or backend is self.local_vision
+            if is_local and self.cloud is not None:
+                _log.warning(
+                    "Local LLM failed (%s: %s) — falling back to cloud.",
+                    type(exc).__name__,
+                    exc,
+                )
+                return await self.cloud.complete(messages)
+            raise

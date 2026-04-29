@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import httpx
 import pytest
 
 from alfred_core.llm.base import ChatImage, ChatMessage, ChatResponse, LLMBackend
@@ -16,6 +17,20 @@ class _StubBackend(LLMBackend):
         self, messages: list[ChatMessage], *, model: str | None = None
     ) -> ChatResponse:
         return ChatResponse(content="stub", model="stub", backend=self.name)
+
+
+class _FailingBackend(LLMBackend):
+    """Always raises the configured exception — used to exercise the
+    local→cloud fallback path on read-timeouts / HTTP errors."""
+
+    def __init__(self, name: str, exc: Exception) -> None:
+        self.name = name
+        self._exc = exc
+
+    async def complete(
+        self, messages: list[ChatMessage], *, model: str | None = None
+    ) -> ChatResponse:
+        raise self._exc
 
 
 def _router(
@@ -168,3 +183,72 @@ async def test_complete_inspects_last_user_message_for_images() -> None:
     )
     resp = await r.complete(history)
     assert resp.backend == "cloud"
+
+
+# ─── Local→Cloud fallback on timeout / HTTP error ─────────────────────────
+#
+# The user hit "Alfred is unreachable: 502 — LLM backend failed: ReadTimeout"
+# every time he greeted Alfred or activated Nightfall. Root cause was a
+# small local Ollama looping on the multi-tool persona prompt; the chat
+# handler bubbled the failure up as a 502 instead of falling through to
+# the perfectly-good Anthropic key. These tests pin the new transparent
+# fallback behaviour so we don't regress.
+
+
+@pytest.mark.asyncio
+async def test_complete_falls_back_to_cloud_when_local_times_out() -> None:
+    cloud = _StubBackend("cloud")
+    r = Router(
+        local=_FailingBackend("local", httpx.ReadTimeout("read timed out")),
+        cloud=cloud,
+        local_vision=None,
+        use_cloud_for_coding=True,
+    )
+    resp = await r.complete([ChatMessage(role="user", content="hello")])
+    assert resp.backend == "cloud"
+
+
+@pytest.mark.asyncio
+async def test_complete_falls_back_when_local_returns_5xx() -> None:
+    cloud = _StubBackend("cloud")
+    err = httpx.HTTPStatusError(
+        "500 server error",
+        request=httpx.Request("POST", "http://x"),
+        response=httpx.Response(500),
+    )
+    r = Router(
+        local=_FailingBackend("local", err),
+        cloud=cloud,
+        local_vision=None,
+        use_cloud_for_coding=True,
+    )
+    resp = await r.complete([ChatMessage(role="user", content="hi alfred")])
+    assert resp.backend == "cloud"
+
+
+@pytest.mark.asyncio
+async def test_complete_propagates_when_no_cloud_to_fall_back_to() -> None:
+    """Without a configured cloud key the failure must surface — silently
+    swallowing it would leave the chat hanging with no useful error."""
+    r = Router(
+        local=_FailingBackend("local", httpx.ReadTimeout("read timed out")),
+        cloud=None,
+        local_vision=None,
+        use_cloud_for_coding=True,
+    )
+    with pytest.raises(httpx.ReadTimeout):
+        await r.complete([ChatMessage(role="user", content="hello")])
+
+
+@pytest.mark.asyncio
+async def test_complete_does_not_fallback_when_cloud_itself_fails() -> None:
+    """When the cloud backend was the one we picked AND it fails, we
+    should not loop back to local. The failure surfaces as-is."""
+    r = Router(
+        local=None,
+        cloud=_FailingBackend("cloud", httpx.ReadTimeout("read timed out")),
+        local_vision=None,
+        use_cloud_for_coding=True,
+    )
+    with pytest.raises(httpx.ReadTimeout):
+        await r.complete([ChatMessage(role="user", content="hello")])
