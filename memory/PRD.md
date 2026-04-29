@@ -27,7 +27,11 @@ Single user — Mukarram Mohammad Alam. Alfred is a dry, witty British butler wi
 - ✅ **Facial recognition** — pgvector-backed enrollment + cosine-similarity match (96-D geometric identity vectors)
 - ✅ **Backend `/vision/*` API** — face enroll/identify/list/delete, coach
 - ✅ **`FaceEnrollment` model** with `face_enrollments` table + Vector(96) column
-- ✅ **Documented** in `docs/VISION_HUD_UPGRADE.md`
+- ✅ **Self-hosting hardened** — multi-arch Dockerfiles (amd64 + arm64 + armv7), HEALTHCHECKs on alfred-core & alfred-web, alfred-web now waits for alfred-core to be healthy
+- ✅ **Smoke test** — `scripts/smoke-test.sh` runs 6 readiness checks (compose, Postgres+pgvector, /health, /vision router end-to-end, Ollama, frontend HTML)
+- ✅ **systemd auto-start** — `scripts/install-systemd.sh` drops `alfred.service` so Alfred boots with the machine
+- ✅ **Documented** in `docs/VISION_HUD_UPGRADE.md` and `docs/SELF_HOSTING.md` (covers x86 desktop, WSL2, and Raspberry Pi 5 path with OOM mitigation, smaller LLM choices, cross-compile workflow)
+- ✅ **Preview shim** — `/app/frontend` proxy package + `/app/backend/server.py` stub so Emergent's supervisor renders the HUD for visual validation
 
 Static checks passed:
 - `yarn typecheck` (TypeScript) ✅
