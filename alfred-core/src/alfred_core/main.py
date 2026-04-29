@@ -16,6 +16,7 @@ from alfred_core.api import (
     facts,
     health,
     memory,
+    printer,
     spotify,
     vision,
     voice,
@@ -55,6 +56,7 @@ app.include_router(spotify.router)
 app.include_router(weather.router)
 app.include_router(memory.router)
 app.include_router(vision.router)
+app.include_router(printer.router)
 
 
 @app.get("/")

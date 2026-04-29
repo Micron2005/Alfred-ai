@@ -125,7 +125,8 @@ export function Orb3D({ size = 240, caption }: Orb3DProps) {
           overflow: "visible",
         }}
       >
-        {/* Background atmospheric glow — non-rotating */}
+        {/* Background atmospheric glow — non-rotating, intentionally
+            subtle so the see-through orb keeps its glass look. */}
         <div
           ref={haloRef}
           style={{
@@ -133,9 +134,9 @@ export function Orb3D({ size = 240, caption }: Orb3DProps) {
             inset: 0,
             borderRadius: "50%",
             background:
-              "radial-gradient(circle at 50% 50%, var(--orb) 0%, var(--orb-soft) 30%, transparent 70%)",
-            filter: "blur(20px)",
-            opacity: 0.5,
+              "radial-gradient(circle at 50% 50%, var(--orb-soft) 0%, transparent 60%)",
+            filter: "blur(28px)",
+            opacity: 0.4,
             transition: "opacity 80ms linear",
             pointerEvents: "none",
           }}
@@ -210,24 +211,64 @@ export function Orb3D({ size = 240, caption }: Orb3DProps) {
             phaseDeg={240}
           />
 
-          {/* Glowing core */}
+          {/* Glass core — translucent sphere that refracts the
+              rings behind it instead of being a solid ball. The
+              user asked for "more see-through, like a 4D sphere"
+              — we get that effect by using radial gradients with
+              alpha falloff rather than a solid fill, plus a thin
+              high-contrast rim where the gradient meets the edge,
+              plus inset highlights to suggest curvature without
+              opaqueness. */}
           <div
             ref={coreRef}
             style={{
               position: "absolute",
               left: "50%",
               top: "50%",
-              width: size * 0.32,
-              height: size * 0.32,
+              width: size * 0.42,
+              height: size * 0.42,
               marginLeft: 0,
               marginTop: 0,
               transform: "translate3d(-50%, -50%, 30px)",
               borderRadius: "50%",
               background:
-                "radial-gradient(circle at 35% 35%, #ffffff 0%, var(--orb) 25%, var(--orb-soft) 60%, transparent 100%)",
+                // Outer rim glow + faint volumetric haze, no solid centre.
+                "radial-gradient(circle at 50% 50%, " +
+                "rgba(255,255,255,0.0) 0%, " +
+                "rgba(108,214,255,0.04) 30%, " +
+                "rgba(108,214,255,0.10) 55%, " +
+                "rgba(108,214,255,0.32) 80%, " +
+                "rgba(108,214,255,0.55) 96%, " +
+                "rgba(108,214,255,0.0) 100%)",
               boxShadow:
-                "0 0 24px var(--orb-glow), 0 0 60px var(--orb-soft), inset 0 0 20px rgba(255,255,255,0.3)",
+                // Inner rim catch-light + outer halo
+                "inset 0 0 18px rgba(108,214,255,0.45), " +
+                "inset 6px 8px 22px rgba(255,255,255,0.18), " +
+                "inset -6px -8px 22px rgba(0,0,0,0.35), " +
+                "0 0 28px var(--orb-glow), " +
+                "0 0 70px var(--orb-soft)",
+              backdropFilter: "blur(2px)",
+              WebkitBackdropFilter: "blur(2px)",
               transition: "transform 80ms linear",
+              pointerEvents: "none",
+            }}
+          />
+          {/* Specular highlight — the "wet glass" sheen that sells
+              the see-through-sphere illusion. */}
+          <div
+            style={{
+              position: "absolute",
+              left: "50%",
+              top: "50%",
+              width: size * 0.16,
+              height: size * 0.10,
+              transform: "translate3d(-90%, -130%, 36px) rotate(-25deg)",
+              borderRadius: "50%",
+              background:
+                "radial-gradient(circle, rgba(255,255,255,0.85) 0%, rgba(255,255,255,0.0) 70%)",
+              filter: "blur(1.5px)",
+              opacity: 0.85,
+              pointerEvents: "none",
             }}
           />
 

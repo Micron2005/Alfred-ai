@@ -36,9 +36,17 @@ logger = logging.getLogger(__name__)
 
 # ─── Piper (offline) ─────────────────────────────────────────────────────────
 PIPER_BIN = Path(os.environ.get("ALFRED_PIPER_BIN", "/opt/piper/piper"))
+# Default voice changed to ``en_GB-northern_english_male-medium`` —
+# silkier and more conversational than the older ``alan-medium`` so
+# Alfred sounds smoother and less synthesised. Override via the
+# ``ALFRED_PIPER_VOICE`` env var; the Dockerfile sets
+# ``ALFRED_TTS_VOICE`` to the chosen voice name as a hint.
+_DEFAULT_VOICE = os.environ.get(
+    "ALFRED_TTS_VOICE", "en_GB-northern_english_male-medium"
+)
 PIPER_VOICE = Path(
     os.environ.get(
-        "ALFRED_PIPER_VOICE", "/opt/piper/voices/en_GB-alan-medium.onnx"
+        "ALFRED_PIPER_VOICE", f"/opt/piper/voices/{_DEFAULT_VOICE}.onnx"
     )
 )
 

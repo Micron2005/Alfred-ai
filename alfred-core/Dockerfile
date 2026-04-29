@@ -17,13 +17,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       build-essential ca-certificates curl ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
-# ─── Piper TTS (British male voice) ─────────────────────────────────────────
-# Piper ships separate tarballs per arch. We pick the right one based
-# on Docker's TARGETARCH so the same Dockerfile produces a working
-# image on x86_64 desktops AND ARM64 SBCs (Raspberry Pi 5, Apple
-# Silicon devs, Oracle Ampere, etc.).
+# ─── Piper TTS (smoother British male voice) ────────────────────────────────
+# We use the "northern_english_male-medium" voice — silkier and more
+# conversational than the default "alan-medium". The user explicitly
+# asked for a "smoother, more flowy" Alfred voice. The trade-off:
+# this voice is medium quality (22 kHz sample rate) which keeps the
+# .onnx model small enough to run snappily on a Pi 5; if you later want
+# studio-grade quality, swap to "en_GB-aru-medium" or move to
+# ElevenLabs cloud TTS via the integration playbook.
 ARG PIPER_VERSION=2023.11.14-2
-ARG PIPER_VOICE=en_GB-alan-medium
+ARG PIPER_VOICE=en_GB-northern_english_male-medium
+ARG PIPER_VOICE_PATH=en/en_GB/northern_english_male/medium
 RUN set -eux; \
     case "${TARGETARCH:-amd64}" in \
         amd64)  PIPER_ARCH=linux_x86_64 ;; \
@@ -36,10 +40,11 @@ RUN set -eux; \
         | tar -xz -C /opt; \
     mkdir -p /opt/piper/voices; \
     curl -fsSL -o "/opt/piper/voices/${PIPER_VOICE}.onnx" \
-        "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_GB/alan/medium/${PIPER_VOICE}.onnx?download=true"; \
+        "https://huggingface.co/rhasspy/piper-voices/resolve/main/${PIPER_VOICE_PATH}/${PIPER_VOICE}.onnx?download=true"; \
     curl -fsSL -o "/opt/piper/voices/${PIPER_VOICE}.onnx.json" \
-        "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_GB/alan/medium/${PIPER_VOICE}.onnx.json?download=true"
-ENV PATH="/opt/piper:${PATH}"
+        "https://huggingface.co/rhasspy/piper-voices/resolve/main/${PIPER_VOICE_PATH}/${PIPER_VOICE}.onnx.json?download=true"
+ENV PATH="/opt/piper:${PATH}" \
+    ALFRED_TTS_VOICE="${PIPER_VOICE}"
 
 COPY pyproject.toml ./
 COPY src ./src

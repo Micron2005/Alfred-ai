@@ -23,11 +23,14 @@ import { useCamera } from "@/lib/useCamera";
 import { useHandTracking } from "@/lib/useHandTracking";
 import { useFaceTracking } from "@/lib/useFaceTracking";
 import { usePoseTracking } from "@/lib/usePoseTracking";
+import { useTwoHandSwipe } from "@/lib/useTwoHandSwipe";
+import { loadTab, neighbourTab, persistTab, type TabId } from "@/lib/tabs";
+import { TabBar } from "@/components/TabBar";
+import { DesignView } from "@/components/DesignView";
 import { HandCursor } from "@/components/HandCursor";
 import { ExpressionReadout } from "@/components/ExpressionReadout";
 import { PoseSkeleton } from "@/components/PoseSkeleton";
 import { QuickToolsMenu } from "@/components/QuickToolsMenu";
-import { Orb } from "@/components/Orb";
 import { Orb3D } from "@/components/Orb3D";
 import { SpotifyPlayer } from "@/components/SpotifyPlayer";
 import { CameraPreview } from "@/components/CameraPreview";
@@ -47,7 +50,6 @@ const VOICE_OUT_KEY = "alfred.voiceOutEnabled";
 const HANDS_FREE_KEY = "alfred.handsFreeEnabled";
 const CAMERA_KEY = "alfred.cameraEnabled";
 const FULL_HUD_KEY = "alfred.fullHudEnabled";
-const ORB_3D_KEY = "alfred.orb3dEnabled";
 // v2: the sidebar's role changed (it now hosts the active chat, not
 // just the archive list). Old "collapsed=1" values from v1 would
 // hide the conversation from existing users post-upgrade, so we use
@@ -78,7 +80,14 @@ export function ChatWindow() {
   const [handsFree, setHandsFree] = useState(false);
   const [cameraOn, setCameraOn] = useState(false);
   const [fullHud, setFullHud] = useState(false);
-  const [orb3dOn, setOrb3dOn] = useState(true);
+  // Top-level tab — HUD / CHAT / DESIGN. Loaded from localStorage
+  // so a refresh keeps you on the tab you were last using.
+  const [activeTab, setActiveTab] = useState<TabId>("hud");
+  // Separate conversation thread for the design-tab chat overlay,
+  // so design back-and-forth doesn't pollute general chat.
+  const [designConversationId, setDesignConversationId] = useState<
+    string | null
+  >(null);
   // Default ``false`` (expanded) — the sidebar now hosts the active
   // conversation (CONVERSATION tab) so collapsing it by default
   // would hide the chat entirely. Users can collapse it manually
@@ -102,12 +111,15 @@ export function ChatWindow() {
   useEffect(() => {
     if (typeof window === "undefined") return;
     setVoiceOut(localStorage.getItem(VOICE_OUT_KEY) === "1");
-    setHandsFree(localStorage.getItem(HANDS_FREE_KEY) === "1");
+    // Default hands-free ON unless the user has explicitly turned
+    // it off. Per the user's request: "i want to be able to talk
+    // to him like he is just a normal person and not have to press
+    // any buttons to talk to him." The wake-word + voice-loop
+    // pipeline is already in place; we just flip its default.
+    const handsFreeStored = localStorage.getItem(HANDS_FREE_KEY);
+    setHandsFree(handsFreeStored === null ? true : handsFreeStored === "1");
     setCameraOn(localStorage.getItem(CAMERA_KEY) === "1");
-    // 3D orb defaults ON (the upgraded look is the new normal); flip
-    // to "0" in localStorage to fall back to the legacy 2D orb.
-    const orb3dStored = localStorage.getItem(ORB_3D_KEY);
-    setOrb3dOn(orb3dStored === null ? true : orb3dStored === "1");
+    setActiveTab(loadTab());
     // Now that the chat lives in the sidebar, the main pane would
     // be nearly empty without the HUD widgets — default the full HUD
     // *on* for users who haven't explicitly turned it off. Existing
@@ -143,6 +155,32 @@ export function ChatWindow() {
   const pose = usePoseTracking({
     enabled: true,
     sharedStream: camera.streamRef.current ?? null,
+  });
+
+  // Two-hand "sliding-door" gesture switches between the HUD,
+  // CHAT, and DESIGN tabs. We feed it the same hand state the
+  // HandCursor uses; the gesture handler is gated on hand
+  // tracking being ready so we don't fire on noisy startup
+  // frames.
+  useTwoHandSwipe({
+    enabled: hand.status === "ready",
+    leftHand: hand.left
+      ? {
+          x: hand.left.cursor.x,
+          y: hand.left.cursor.y,
+          isCommitted: hand.left.isPinching || hand.left.isFist,
+        }
+      : null,
+    rightHand: hand.right
+      ? {
+          x: hand.right.cursor.x,
+          y: hand.right.cursor.y,
+          isCommitted: hand.right.isPinching || hand.right.isFist,
+        }
+      : null,
+    onSwipe: (direction) => {
+      setActiveTabPersisted(neighbourTab(activeTab, direction));
+    },
   });
 
   // Customizable-HUD state. ``customEnabled`` is the user-facing
@@ -332,11 +370,9 @@ export function ChatWindow() {
     }
   }
 
-  function setOrb3dPersisted(enabled: boolean) {
-    setOrb3dOn(enabled);
-    if (typeof window !== "undefined") {
-      localStorage.setItem(ORB_3D_KEY, enabled ? "1" : "0");
-    }
+  function setActiveTabPersisted(tab: TabId) {
+    setActiveTab(tab);
+    persistTab(tab);
   }
 
   // Items rendered inside the QuickToolsMenu when the left fist
@@ -799,20 +835,45 @@ export function ChatWindow() {
   );
 
   return (
-    <div style={{ display: "flex", minHeight: "100vh" }}>
-      <ConversationSidebar
-        conversations={conversations}
-        activeId={convoId}
-        onSelect={(id) => {
-          if (id !== convoId) void loadConversation(id);
-        }}
-        onNewChat={handleNewChat}
-        onDelete={(id) => void handleDelete(id)}
-        busy={busy || loadingConvo}
-        collapsed={sidebarCollapsed}
-        onToggleCollapsed={toggleSidebar}
-        chatPane={chatPane}
-      />
+    <div
+      style={{
+        display: "flex",
+        flexDirection: "column",
+        minHeight: "100vh",
+      }}
+    >
+      <TabBar active={activeTab} onChange={setActiveTabPersisted} />
+      {activeTab === "design" ? (
+        <DesignView
+          conversationId={designConversationId}
+          onConversationCreated={setDesignConversationId}
+        />
+      ) : (
+        <div
+          style={{
+            display: "flex",
+            flex: 1,
+            minHeight: 0,
+          }}
+          data-active-tab={activeTab}
+        >
+          {/* Sidebar — only visible in the CHAT tab. The HUD tab is
+              the JARVIS view; conversation list would crowd it. */}
+          {activeTab === "chat" ? (
+            <ConversationSidebar
+              conversations={conversations}
+              activeId={convoId}
+              onSelect={(id) => {
+                if (id !== convoId) void loadConversation(id);
+              }}
+              onNewChat={handleNewChat}
+              onDelete={(id) => void handleDelete(id)}
+              busy={busy || loadingConvo}
+              collapsed={sidebarCollapsed}
+              onToggleCollapsed={toggleSidebar}
+              chatPane={chatPane}
+            />
+          ) : null}
 
       <div
         style={{
@@ -957,20 +1018,6 @@ export function ChatWindow() {
             <button
               type="button"
               className="hud-button"
-              data-testid="orb-3d-toggle"
-              onClick={() => setOrb3dPersisted(!orb3dOn)}
-              aria-pressed={orb3dOn}
-              title={
-                orb3dOn
-                  ? "Use the legacy 2D orb"
-                  : "Use the new 3D orb"
-              }
-            >
-              {orb3dOn ? "🌐 ORB · 3D" : "🌐 ORB · 2D"}
-            </button>
-            <button
-              type="button"
-              className="hud-button"
               onClick={() => hud.setCustomEnabled(!hud.customEnabled)}
               aria-pressed={hud.customEnabled}
               title={
@@ -1073,37 +1120,20 @@ export function ChatWindow() {
                       justifyContent: "center",
                     }}
                   >
-                    {orb3dOn ? (
-                      <Orb3D
-                        size={Math.max(
-                          80,
-                          Math.min(
-                            typeof hud.layout.orb.w === "number"
-                              ? hud.layout.orb.w
-                              : 360,
-                            typeof hud.layout.orb.h === "number"
-                              ? hud.layout.orb.h
-                              : 200,
-                          ) - 20,
-                        )}
-                        caption={orbCaption}
-                      />
-                    ) : (
-                      <Orb
-                        size={Math.max(
-                          80,
-                          Math.min(
-                            typeof hud.layout.orb.w === "number"
-                              ? hud.layout.orb.w
-                              : 360,
-                            typeof hud.layout.orb.h === "number"
-                              ? hud.layout.orb.h
-                              : 200,
-                          ) - 20,
-                        )}
-                        caption={orbCaption}
-                      />
-                    )}
+                    {(() => {
+                      const orbSize = Math.max(
+                        80,
+                        Math.min(
+                          typeof hud.layout.orb.w === "number"
+                            ? hud.layout.orb.w
+                            : 360,
+                          typeof hud.layout.orb.h === "number"
+                            ? hud.layout.orb.h
+                            : 200,
+                        ) - 20,
+                      );
+                      return <Orb3D size={orbSize} caption={orbCaption} />;
+                    })()}
                   </div>
                 </HudWidget>
                 <HudWidget
@@ -1186,11 +1216,7 @@ export function ChatWindow() {
                 padding: "18px 0 8px",
               }}
             >
-              {orb3dOn ? (
-                <Orb3D size={200} caption={orbCaption} />
-              ) : (
-                <Orb size={180} caption={orbCaption} />
-              )}
+              <Orb3D size={200} caption={orbCaption} />
             </div>
 
             {fullHud ? <WeatherWidget variant="strip" /> : null}
@@ -1332,6 +1358,8 @@ export function ChatWindow() {
           onActivated={quickTools.dismiss}
         />
       </div>
+        </div>
+      )}
     </div>
   );
 }

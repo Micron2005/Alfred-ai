@@ -104,6 +104,18 @@ class Settings(BaseSettings):
         default="http://127.0.0.1:8000/api/spotify/callback"
     )
 
+    # ─── 3D printer (Klipper / Moonraker — Creality K1, K1 Max, etc.) ───
+    # Base URL of the printer's Moonraker HTTP API. K1 / K1 Max ship
+    # with this exposed on port 7125 of the printer's LAN IP. Leave
+    # blank to disable printer integration entirely (the frontend
+    # widget then folds into a "configure printer" hint instead).
+    # Example: ``http://192.168.1.42:7125``
+    alfred_printer_url: str = Field(default="")
+    # Optional API key, if the user has put Moonraker behind a
+    # reverse-proxy with a token. The K1 / K1 Max stock firmware
+    # doesn't enforce one; leave empty there.
+    alfred_printer_api_key: str = Field(default="")
+
     # ─── Long-term memory archive (Phase 12b) ───────────────────────────
     # Container-side directory where Alfred mirrors each memory note as
     # a Markdown file. Mounted from the host via docker-compose so the
