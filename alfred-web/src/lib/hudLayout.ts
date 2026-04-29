@@ -39,7 +39,8 @@ export type HudWidgetId =
   | "spotify"
   | "camera"
   | "workout-coach"
-  | "face-recognition";
+  | "face-recognition"
+  | "earth-hologram";
 
 export interface WidgetLayout {
   /** Top-left X position (px) inside the main pane. */
@@ -71,6 +72,7 @@ export const DEFAULT_LAYOUT: HudLayoutState = {
   camera: { x: 660, y: 16, w: 240, h: 180, visible: true },
   "workout-coach": { x: 660, y: 220, w: 320, h: 360, visible: false },
   "face-recognition": { x: 660, y: 600, w: 280, h: "auto", visible: false },
+  "earth-hologram": { x: 200, y: 280, w: 420, h: 360, visible: true },
 };
 
 const ALL_IDS: HudWidgetId[] = [
@@ -82,6 +84,7 @@ const ALL_IDS: HudWidgetId[] = [
   "camera",
   "workout-coach",
   "face-recognition",
+  "earth-hologram",
 ];
 
 export const WIDGET_LABELS: Record<HudWidgetId, string> = {
@@ -93,6 +96,7 @@ export const WIDGET_LABELS: Record<HudWidgetId, string> = {
   camera: "Camera",
   "workout-coach": "Form Coach",
   "face-recognition": "Recognition",
+  "earth-hologram": "Earth",
 };
 
 function cloneDefault(): HudLayoutState {

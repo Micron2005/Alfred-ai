@@ -1344,6 +1344,18 @@ export function ChatWindow() {
                     faceStatus={face.status}
                   />
                 </HudWidget>
+                <HudWidget
+                  id="earth-hologram"
+                  label={WIDGET_LABELS["earth-hologram"]}
+                  layout={hud.layout["earth-hologram"]}
+                  customEnabled
+                  scale={scale}
+                  onMove={(p) => hud.updateWidget("earth-hologram", p)}
+                  onHide={() => hud.hideWidget("earth-hologram")}
+                  hidden={!hud.layout["earth-hologram"].visible}
+                >
+                  <EarthHologramWidget />
+                </HudWidget>
               </>
             )}
           </ResponsiveHudCanvas>

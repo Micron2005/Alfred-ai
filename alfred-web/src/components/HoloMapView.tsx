@@ -1,48 +1,36 @@
 "use client";
 
 /**
- * HoloMapView — full-screen Leaflet map shown when the user clicks
- * a point on the holographic Earth (or searches for a place).
+ * HoloMapView — full-screen 3D fly-over view shown when the user
+ * clicks a point on the holographic Earth (or searches for a place).
  *
- * Why Leaflet + OSM?
- *   - No API key required.
- *   - Lightweight (~40 KB).
- *   - Native pan + pinch-zoom + double-tap zoom.
- *   - Works offline once tiles are cached by the browser.
+ * Engine: **MapLibre GL** with a vector-tile source from
+ * **OpenFreeMap** (free, no API key) plus a fill-extrusion layer
+ * fed from OpenMapTiles' building heights — so buildings render as
+ * actual 3D blocks rather than flat shapes. Camera is tilted to
+ * 60° pitch so the city reads like Google-Earth fly-over instead
+ * of a flat top-down map. Drag rotates / tilts; scroll or pinch
+ * zooms in & out.
  *
- * Lazy-loaded by the parent so the ~150 KB Leaflet bundle (+ CSS)
- * isn't paid by users who never open the globe.
+ * The whole map is run through a CSS `hue-rotate` filter so the
+ * imagery comes out cyan, matching Alfred's JARVIS hologram
+ * aesthetic. (For photorealistic Google-Earth-grade tiles with
+ * actual building textures, plug a Cesium ion token in — see the
+ * P1 follow-up note in PRD.md.)
+ *
+ * Lazy-loaded by ``EarthHologramWidget`` so the ~700 KB MapLibre
+ * bundle isn't paid by users who never open the globe.
  */
 
 import { useEffect, useRef, useState } from "react";
-import L from "leaflet";
-import "leaflet/dist/leaflet.css";
-
-// Leaflet's default marker images are referenced from the CSS as
-// relative URLs, which Webpack/Next can't resolve out of the box —
-// the result is broken-image icons. Point Leaflet at the CDN copies
-// once at module load. Done at module scope so we only do it
-// once per page lifetime.
-if (typeof window !== "undefined") {
-  // ``_getIconUrl`` is the internal hook used by L.Icon.Default;
-  // deleting it forces Leaflet to fall back to the static URLs
-  // we set immediately after.
-  delete (L.Icon.Default.prototype as unknown as { _getIconUrl?: unknown })
-    ._getIconUrl;
-  L.Icon.Default.mergeOptions({
-    iconRetinaUrl:
-      "https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/images/marker-icon-2x.png",
-    iconUrl:
-      "https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/images/marker-icon.png",
-    shadowUrl:
-      "https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/images/marker-shadow.png",
-  });
-}
+import maplibregl, { type Map as MlMap } from "maplibre-gl";
+import "maplibre-gl/dist/maplibre-gl.css";
 
 interface Props {
-  /** Center coords. ``null`` shows the world view. */
+  /** Center coords. ``null`` shows a global view. */
   center: { lat: number; lon: number } | null;
-  /** Initial zoom — 0 (whole world) to 18 (street). Default 6. */
+  /** Initial zoom — 0 (whole world) to 22 (very close). Default 14
+   *  so buildings extrude visibly on first paint. */
   initialZoom?: number;
   onClose: () => void;
 }
@@ -53,14 +41,20 @@ interface Suggestion {
   lon: string;
 }
 
-// Public Nominatim endpoint — free, no API key, but rate-limited
-// (1 req/sec). Use sparingly; fine for a manual search box.
 const NOMINATIM = "https://nominatim.openstreetmap.org/search";
 
-export function HoloMapView({ center, onClose, initialZoom = 6 }: Props) {
+// OpenFreeMap is a free, no-API-key vector-tile host. Their
+// "dark" style ships a building layer with ``height`` /
+// ``min_height`` properties — and the dark background pairs
+// beautifully with the cyan hologram CSS filter so the city
+// reads as a true Tony-Stark fly-over hologram. We override
+// the default styling to extrude buildings into 3D blocks.
+const OFM_STYLE = "https://tiles.openfreemap.org/styles/dark";
+
+export function HoloMapView({ center, onClose, initialZoom = 14 }: Props) {
   const mapDivRef = useRef<HTMLDivElement>(null);
-  const mapRef = useRef<L.Map | null>(null);
-  const markerRef = useRef<L.Marker | null>(null);
+  const mapRef = useRef<MlMap | null>(null);
+  const markerRef = useRef<maplibregl.Marker | null>(null);
   const [query, setQuery] = useState("");
   const [suggestions, setSuggestions] = useState<Suggestion[]>([]);
   const [searching, setSearching] = useState(false);
@@ -68,54 +62,106 @@ export function HoloMapView({ center, onClose, initialZoom = 6 }: Props) {
     center,
   );
 
-  // Initialize the map exactly once. Subsequent center changes are
-  // applied via map.flyTo, NOT by re-mounting.
+  // Mount the map exactly once. Subsequent center changes apply via
+  // map.flyTo, NOT by re-mounting.
   useEffect(() => {
     if (!mapDivRef.current || mapRef.current) return;
-    const startCenter: L.LatLngExpression = center
-      ? [center.lat, center.lon]
-      : [20, 0];
-    const map = L.map(mapDivRef.current, {
+    const startCenter: [number, number] = center
+      ? [center.lon, center.lat]
+      : [0, 20];
+
+    const map = new maplibregl.Map({
+      container: mapDivRef.current,
+      style: OFM_STYLE,
       center: startCenter,
       zoom: center ? initialZoom : 2,
-      worldCopyJump: true,
-      // Pinch-zoom + scroll-zoom + double-tap zoom are all on by
-      // default.
-      zoomControl: true,
-      attributionControl: true,
+      // 3D fly-over feel — pitch tilts the camera, bearing rotates it.
+      pitch: center ? 60 : 0,
+      bearing: -20,
     });
 
-    L.tileLayer(
-      "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
-      {
-        attribution:
-          "Imagery &copy; Esri &mdash; Source: Esri, i-cubed, USDA, USGS, AEX, GeoEye, Getmapping, Aerogrid, IGN, IGP, UPR-EGP, and the GIS User Community",
-        maxZoom: 19,
-      },
-    ).addTo(map);
+    // ``canvasContextAttributes`` is the public way to ask for
+    // antialiasing — passing ``antialias`` directly into the
+    // constructor was removed in MapLibre v5.
+    void map;
 
-    // Place / road labels overlay — keeps the satellite imagery
-    // looking like Google Earth fly-over but with searchable
-    // landmark + city labels on top.
-    L.tileLayer(
-      "https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}",
-      {
-        attribution: "Labels &copy; Esri",
-        maxZoom: 19,
-        opacity: 0.85,
-      },
-    ).addTo(map);
+    map.addControl(new maplibregl.NavigationControl({ visualizePitch: true }));
+    map.addControl(new maplibregl.ScaleControl({ unit: "metric" }), "bottom-left");
+
+    map.on("load", () => {
+      // Try to add a 3D building extrusion layer. The OFM/OMT
+      // schema uses a source-layer named "building" with a
+      // numeric "render_height" / "render_min_height". We push
+      // it just before the topmost label layer so labels stay
+      // legible above the buildings.
+      try {
+        const layers = map.getStyle().layers ?? [];
+        let labelLayerId: string | undefined;
+        for (const l of layers) {
+          if (l.type === "symbol" && (l.layout as { "text-field"?: unknown })?.["text-field"]) {
+            labelLayerId = l.id;
+            break;
+          }
+        }
+        if (!map.getLayer("alfred-3d-buildings")) {
+          map.addLayer(
+            {
+              id: "alfred-3d-buildings",
+              source: "openmaptiles",
+              "source-layer": "building",
+              type: "fill-extrusion",
+              minzoom: 13,
+              paint: {
+                "fill-extrusion-color": "#6cd6ff",
+                "fill-extrusion-height": [
+                  "interpolate",
+                  ["linear"],
+                  ["zoom"],
+                  13,
+                  0,
+                  15.05,
+                  ["coalesce", ["get", "render_height"], ["get", "height"], 0],
+                ],
+                "fill-extrusion-base": [
+                  "interpolate",
+                  ["linear"],
+                  ["zoom"],
+                  13,
+                  0,
+                  15.05,
+                  [
+                    "coalesce",
+                    ["get", "render_min_height"],
+                    ["get", "min_height"],
+                    0,
+                  ],
+                ],
+                "fill-extrusion-opacity": 0.85,
+              },
+            },
+            labelLayerId,
+          );
+        }
+      } catch {
+        // Source layer name may differ — tolerate; flat map still works.
+      }
+    });
 
     if (center) {
-      markerRef.current = L.marker(startCenter as L.LatLngTuple).addTo(map);
+      markerRef.current = new maplibregl.Marker({ color: "#6cd6ff" })
+        .setLngLat(startCenter)
+        .addTo(map);
     }
 
     map.on("click", (e) => {
-      setCoords({ lat: e.latlng.lat, lon: e.latlng.lng });
+      setCoords({ lat: e.lngLat.lat, lon: e.lngLat.lng });
+      const lngLat: [number, number] = [e.lngLat.lng, e.lngLat.lat];
       if (markerRef.current) {
-        markerRef.current.setLatLng(e.latlng);
+        markerRef.current.setLngLat(lngLat);
       } else {
-        markerRef.current = L.marker(e.latlng).addTo(map);
+        markerRef.current = new maplibregl.Marker({ color: "#6cd6ff" })
+          .setLngLat(lngLat)
+          .addTo(map);
       }
     });
 
@@ -129,16 +175,25 @@ export function HoloMapView({ center, onClose, initialZoom = 6 }: Props) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // When the parent passes a new ``center`` prop, fly to it instead
-  // of re-mounting the map.
+  // Fly-to on subsequent center prop changes.
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !center) return;
-    map.flyTo([center.lat, center.lon], initialZoom, { duration: 0.8 });
+    map.flyTo({
+      center: [center.lon, center.lat],
+      zoom: initialZoom,
+      pitch: 60,
+      bearing: -20,
+      duration: 1400,
+      essential: true,
+    });
+    const lngLat: [number, number] = [center.lon, center.lat];
     if (markerRef.current) {
-      markerRef.current.setLatLng([center.lat, center.lon]);
+      markerRef.current.setLngLat(lngLat);
     } else {
-      markerRef.current = L.marker([center.lat, center.lon]).addTo(map);
+      markerRef.current = new maplibregl.Marker({ color: "#6cd6ff" })
+        .setLngLat(lngLat)
+        .addTo(map);
     }
     setCoords(center);
   }, [center, initialZoom]);
@@ -170,11 +225,21 @@ export function HoloMapView({ center, onClose, initialZoom = 6 }: Props) {
     if (Number.isNaN(lat) || Number.isNaN(lon)) return;
     const map = mapRef.current;
     if (map) {
-      map.flyTo([lat, lon], 12, { duration: 1.0 });
+      map.flyTo({
+        center: [lon, lat],
+        zoom: 16,
+        pitch: 60,
+        bearing: -20,
+        duration: 1800,
+        essential: true,
+      });
+      const lngLat: [number, number] = [lon, lat];
       if (markerRef.current) {
-        markerRef.current.setLatLng([lat, lon]);
+        markerRef.current.setLngLat(lngLat);
       } else {
-        markerRef.current = L.marker([lat, lon]).addTo(map);
+        markerRef.current = new maplibregl.Marker({ color: "#6cd6ff" })
+          .setLngLat(lngLat)
+          .addTo(map);
       }
     }
     setCoords({ lat, lon });
@@ -182,14 +247,24 @@ export function HoloMapView({ center, onClose, initialZoom = 6 }: Props) {
     setQuery(s.display_name);
   }
 
-  // Submit search on Enter — debounced live search would be nicer
-  // but Nominatim's strict rate limit (1 req/sec public) makes
-  // explicit Enter the safer default.
   function handleKey(e: React.KeyboardEvent<HTMLInputElement>) {
     if (e.key === "Enter") {
       e.preventDefault();
       void handleSearch(query);
     }
+  }
+
+  function handleResetView() {
+    const map = mapRef.current;
+    if (!map || !coords) return;
+    map.flyTo({
+      center: [coords.lon, coords.lat],
+      zoom: 16,
+      pitch: 60,
+      bearing: -20,
+      duration: 800,
+      essential: true,
+    });
   }
 
   return (
@@ -206,7 +281,6 @@ export function HoloMapView({ center, onClose, initialZoom = 6 }: Props) {
         flexDirection: "column",
       }}
     >
-      {/* Top toolbar — title, search, coords readout, close. */}
       <div
         style={{
           display: "flex",
@@ -228,7 +302,7 @@ export function HoloMapView({ center, onClose, initialZoom = 6 }: Props) {
             textShadow: "0 0 8px var(--orb-glow)",
           }}
         >
-          HOLOMAP
+          HOLOMAP · 3D
         </span>
         <span
           className="mono"
@@ -243,7 +317,14 @@ export function HoloMapView({ center, onClose, initialZoom = 6 }: Props) {
             : "—"}
         </span>
 
-        <div style={{ position: "relative", flex: 1, minWidth: 240, maxWidth: 480 }}>
+        <div
+          style={{
+            position: "relative",
+            flex: 1,
+            minWidth: 240,
+            maxWidth: 480,
+          }}
+        >
           <input
             data-testid="holo-map-search"
             type="text"
@@ -253,7 +334,7 @@ export function HoloMapView({ center, onClose, initialZoom = 6 }: Props) {
               if (!e.target.value.trim()) setSuggestions([]);
             }}
             onKeyDown={handleKey}
-            placeholder="Search a place — e.g. 'Tokyo' or 'Wayne Manor, Gotham'"
+            placeholder="Fly to — e.g. 'Tokyo Tower' or '350 5th Ave, NYC'"
             style={{
               width: "100%",
               padding: "8px 12px",
@@ -318,11 +399,7 @@ export function HoloMapView({ center, onClose, initialZoom = 6 }: Props) {
         {searching ? (
           <span
             className="mono"
-            style={{
-              fontSize: 9,
-              color: "var(--hud)",
-              opacity: 0.7,
-            }}
+            style={{ fontSize: 9, color: "var(--hud)", opacity: 0.7 }}
           >
             SEARCHING…
           </span>
@@ -330,6 +407,16 @@ export function HoloMapView({ center, onClose, initialZoom = 6 }: Props) {
 
         <span style={{ flex: 1 }} />
 
+        <button
+          type="button"
+          data-testid="holo-map-reset"
+          className="hud-button"
+          onClick={handleResetView}
+          title="Recenter on the picked location with full 3D tilt"
+          style={{ padding: "4px 10px", fontSize: 10 }}
+        >
+          ↻ RECENTRE
+        </button>
         <button
           type="button"
           data-testid="holo-map-close"
@@ -342,10 +429,10 @@ export function HoloMapView({ center, onClose, initialZoom = 6 }: Props) {
       </div>
 
       {/* The map fills the rest of the viewport. The CSS filter
-          tints satellite imagery toward a JARVIS-cyan hologram —
-          hue-rotate pushes greens/browns toward blue/cyan, contrast
-          boost separates land from sea, slight brightness drop
-          gives the dark holographic look. */}
+          tints the vector imagery + 3D buildings toward a JARVIS-cyan
+          hologram. Hue-rotate centres the colour spectrum on cyan,
+          saturate boosts colour density, contrast separates buildings
+          from the ground plane. */}
       <div
         ref={mapDivRef}
         data-testid="holo-map-leaflet"
@@ -353,10 +440,30 @@ export function HoloMapView({ center, onClose, initialZoom = 6 }: Props) {
           flex: 1,
           minHeight: 0,
           filter:
-            "hue-rotate(165deg) saturate(1.6) brightness(0.78) contrast(1.18)",
+            "hue-rotate(170deg) saturate(1.3) brightness(0.85) contrast(1.15)",
           background: "#02060d",
         }}
       />
+
+      <div
+        style={{
+          position: "absolute",
+          left: 22,
+          bottom: 30,
+          padding: "6px 10px",
+          background: "rgba(8,12,22,0.78)",
+          border: "1px solid var(--border)",
+          backdropFilter: "blur(10px)",
+          fontSize: 9,
+          letterSpacing: 1.4,
+          color: "var(--hud)",
+          opacity: 0.8,
+          pointerEvents: "none",
+        }}
+        className="mono"
+      >
+        DRAG · PAN   RIGHT-DRAG · ROTATE / TILT   PINCH · ZOOM
+      </div>
     </div>
   );
 }

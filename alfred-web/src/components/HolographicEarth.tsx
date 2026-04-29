@@ -21,7 +21,7 @@
  */
 
 import { Canvas, useFrame } from "@react-three/fiber";
-import { OrbitControls, Stars } from "@react-three/drei";
+import { OrbitControls } from "@react-three/drei";
 import { useMemo, useRef } from "react";
 import * as THREE from "three";
 
@@ -74,14 +74,6 @@ export function HolographicEarth({
           position={[-4, -2, -3]}
           intensity={0.4}
           color={HOLO_COLOUR}
-        />
-        <Stars
-          radius={40}
-          depth={30}
-          count={1200}
-          factor={1.5}
-          fade
-          speed={0.3}
         />
         <Globe onPick={onPick} autoRotate={autoRotate} />
         <OrbitControls
