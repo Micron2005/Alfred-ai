@@ -16,6 +16,7 @@ import {
   getConversation,
   listConversations,
   sendMessage,
+  setConversationMode,
   synthesizeSpeech,
 } from "@/lib/api";
 import { useWakeWord } from "@/lib/useWakeWord";
@@ -985,17 +986,44 @@ export function ChatWindow() {
           if (voiceOut) void speak(msg);
           return;
         }
+        // Locally flip mode for instant UI feedback (orb/HUD chrome
+        // updates immediately). The actual persistence happens via
+        // EITHER (a) the conversations PATCH endpoint when we
+        // already have a ``convoId`` — instant and avoids a wasted
+        // LLM round-trip — OR (b) by letting the message itself
+        // go through to the chat handler, whose wake analyzer
+        // catches "activate nightfall protocol" and persists the
+        // change as part of normal flow. Path (b) is what we use
+        // when ``convoId`` is null (brand-new conversation: no
+        // row to PATCH yet) — the backend will create the row in
+        // the right mode and respond with its own LLM nightfall
+        // greeting, so we skip the canned ack on this path.
         setMode(willEnable ? "nightfall" : "standard");
-        const ack = willEnable
-          ? "Nightfall protocol engaged. Welcome, Batman."
-          : "Returning to standard protocol, sir.";
-        setMessages((prev) => [
-          ...prev,
-          { id: crypto.randomUUID(), role: "user", content: text },
-          { id: crypto.randomUUID(), role: "assistant", content: ack },
-        ]);
-        if (voiceOut) void speak(ack);
-        return;
+        if (convoId) {
+          const ack = willEnable
+            ? "Nightfall protocol engaged. Welcome, Batman."
+            : "Returning to standard protocol, sir.";
+          setMessages((prev) => [
+            ...prev,
+            { id: crypto.randomUUID(), role: "user", content: text },
+            { id: crypto.randomUUID(), role: "assistant", content: ack },
+          ]);
+          if (voiceOut) void speak(ack);
+          // Best-effort persist; falls back to letting the next
+          // chat turn re-flip via the wake analyzer if the PATCH
+          // fails for any reason.
+          void setConversationMode(
+            convoId,
+            willEnable ? "nightfall" : "standard",
+          ).catch(() => {
+            /* surfaces only if next-turn persona actually reverts */
+          });
+          return;
+        }
+        // Fall through to the normal chat send path so a brand-new
+        // conversation gets created in the right mode by the chat
+        // handler. (Don't ``return`` — let the rest of handleSend
+        // run.)
       }
     }
 

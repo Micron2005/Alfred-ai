@@ -139,6 +139,30 @@ export async function deleteConversation(id: string): Promise<void> {
   if (!resp.ok) throw new Error("Could not delete conversation");
 }
 
+/**
+ * Persist the conversation's mode column. Used by the frontend's
+ * "activate / deactivate nightfall protocol" intent handler — the
+ * canned acknowledgement path bypasses the chat handler, so without
+ * this the next ordinary message would re-read the conversation in
+ * its OLD mode and silently flip the persona back. Best-effort:
+ * surfaces failures via the returned promise but the caller can
+ * decide whether to abort the local mode change on a failure.
+ */
+export async function setConversationMode(
+  id: string,
+  mode: Mode,
+): Promise<void> {
+  const resp = await fetch(`${API_BASE}/conversations/${id}/mode`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ mode }),
+  });
+  if (!resp.ok) {
+    const detail = await resp.text();
+    throw new Error(`Could not set conversation mode: ${resp.status} — ${detail}`);
+  }
+}
+
 // ─── Long-term memory archive (Phase 12b) ──────────────────────────────
 
 export interface MemoryNote {
