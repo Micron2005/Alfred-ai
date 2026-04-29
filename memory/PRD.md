@@ -47,6 +47,25 @@ Single user — Mukarram Mohammad Alam. Alfred is a dry, witty British butler.
 ### Workout
 - ✅ Dedicated WORKOUT tab with camera preview + form coach (so the HUD stays clean)
 
+### 3D Radial Menu (Feb 2026 — NEW)
+- ✅ **Click central JARVIS orb** → curved horizontal carousel overlay appears (Iron Man HUD aesthetic, full-screen)
+- ✅ Three carousel orbs: SPOTIFY (audio console), CHAT (conversation), WORKOUT (form coach) — each with bespoke 3D-styled glyph (pulsing equaliser bars / speech bubble / rotating wireframe figure)
+- ✅ ESC key + ✕ CLOSE button + backdrop-click all dismiss
+- ✅ Voice intent: "Alfred, open the menu" / "show modules" pops the same overlay
+- ✅ Selecting CHAT/WORKOUT routes to existing tabs; SPOTIFY opens dedicated 3D sub-view
+- ✅ Sub-view takes full HUD space (z-index 8500, opaque radial-gradient backdrop) with its own ← BACK button
+
+### Spotify 3D Audio Console (Feb 2026 — NEW)
+- ✅ **`Spotify3DView.tsx`** — full-screen 3D-styled console with pulsing orb visualiser + 32-bar spectrum ring
+- ✅ **Real Web Audio EQ** — 3-band (BASS lowshelf 200Hz, MID peaking 1kHz Q=1, TREBLE highshelf 3.5kHz), each ±12 dB
+- ✅ Drag-drop / click-to-browse local audio file (mp3/wav/ogg/m4a/flac/aac) → BiquadFilter chain → AnalyserNode → destination
+- ✅ PLAY/PAUSE/RESET transport; explicit copy explaining Spotify SDK streams are DRM-protected so EQ runs on local audio (per user choice 4a)
+
+### Chat regex hardening (Feb 2026)
+- ✅ `detectTabIntent` rewritten with strict whole-utterance match — "hello", "hi alfred", "what is the weather?", "tell me a joke" all return null and route to chat (verified via node script)
+- ✅ NAV_VERB hard-required as the very first token — plain greetings can never be mis-classified as nav commands
+- ✅ Trailing `setActiveTabPersisted` syntax bug fixed (function declaration was missing newline → minor parse-time hazard)
+
 ## Backlog (P0 / P1 / P2)
 
 ### P0 — for next session

@@ -26,6 +26,9 @@ import { orbStore, type OrbMode } from "@/lib/orbState";
 export interface Orb3DProps {
   size?: number;
   caption?: string;
+  /** When provided, the orb becomes clickable (cursor + focus ring)
+   *  and fires this callback. Used by the radial menu trigger. */
+  onClick?: () => void;
 }
 
 function useOrbMode(): OrbMode {
@@ -37,7 +40,7 @@ function useOrbMode(): OrbMode {
   return snapshot.mode;
 }
 
-export function Orb3D({ size = 240, caption }: Orb3DProps) {
+export function Orb3D({ size = 240, caption, onClick }: Orb3DProps) {
   const mode = useOrbMode();
   const coreRef = useRef<HTMLDivElement>(null);
   const haloRef = useRef<HTMLDivElement>(null);
@@ -103,14 +106,30 @@ export function Orb3D({ size = 240, caption }: Orb3DProps) {
   return (
     <div
       data-testid="orb-3d"
+      role={onClick ? "button" : undefined}
+      tabIndex={onClick ? 0 : undefined}
+      onClick={onClick}
+      onKeyDown={
+        onClick
+          ? (e) => {
+              if (e.key === "Enter" || e.key === " ") {
+                e.preventDefault();
+                onClick();
+              }
+            }
+          : undefined
+      }
+      aria-label={onClick ? "Open JARVIS menu" : undefined}
       style={{
         display: "flex",
         flexDirection: "column",
         alignItems: "center",
         gap: 10,
         userSelect: "none",
+        cursor: onClick ? "pointer" : "default",
+        outline: "none",
       }}
-      aria-hidden
+      aria-hidden={onClick ? undefined : true}
     >
       <div
         style={{

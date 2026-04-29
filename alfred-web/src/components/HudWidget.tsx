@@ -48,6 +48,11 @@ interface Props {
    *  pinned to the user's finger when the canvas has been shrunk
    *  to fit a narrower viewport (e.g. when the sidebar is open). */
   scale?: number;
+  /** Optional override z-index for the widget container. Default 1
+   *  (or 20 while dragging). The orb wrapper bumps this so its
+   *  click handler isn't blocked by the floating-Earth widget which
+   *  sits at z=8. */
+  zIndex?: number;
   children: React.ReactNode;
 }
 
@@ -70,6 +75,7 @@ export function HudWidget({
   onHide,
   hidden,
   scale = 1,
+  zIndex,
   children,
 }: Props) {
   const safeScale = scale > 0 ? scale : 1;
@@ -304,7 +310,7 @@ export function HudWidget({
         cursor: isDragging ? "grabbing" : "grab",
         transform: isDragging ? "scale(1.02)" : "none",
         transition: isDragging ? "none" : "transform 120ms ease",
-        zIndex: isDragging ? 20 : 1,
+        zIndex: isDragging ? 20 : (zIndex ?? 1),
       }}
     >
       {children}

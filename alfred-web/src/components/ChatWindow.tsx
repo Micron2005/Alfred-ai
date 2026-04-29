@@ -51,6 +51,8 @@ import {
   type HudWidgetId,
 } from "@/lib/hudLayout";
 import { orbStore } from "@/lib/orbState";
+import { RadialMenu, type RadialMenuItem } from "@/components/RadialMenu";
+import { Spotify3DView } from "@/components/Spotify3DView";
 
 const ACTIVE_CONVO_KEY = "alfred.activeConversationId";
 const VOICE_OUT_KEY = "alfred.voiceOutEnabled";
@@ -99,15 +101,21 @@ const TAB_NOUNS: ReadonlyArray<{ noun: RegExp; tab: TabId; label: string }> = [
 ];
 const NAV_VERB =
   /^(?:go(?:\s+back)?|take\s+me|switch|open|show\s+me|navigate|jump|bring\s+me|pull\s+up|head\s+(?:to|over)|move\s+to)/;
-function detectTabIntent(raw: string): TabIntent | null {  const trimmed = raw.trim().toLowerCase().replace(/[.?!]+$/, "");
+function detectTabIntent(raw: string): TabIntent | null {
+  const trimmed = raw.trim().toLowerCase().replace(/[.?!]+$/, "");
   if (!trimmed) return null;
   // Strip an optional leading "alfred," / "alfred " — wake-word
   // style lead-ins are common when the user is dictating.
   const stripped = trimmed.replace(/^(?:hey\s+|ok\s+)?alfred[,\s]+/, "").trim();
+  if (!stripped) return null;
   // Reject anything that's clearly a conversation, not a command.
   // Tab-switch commands are short — rarely more than 7 words.
   const wordCount = stripped.split(/\s+/).length;
   if (wordCount > 8) return null;
+  // Hard rule: the first token MUST be a navigation verb. Plain
+  // greetings like "hello" / "what's the weather" can never be
+  // mis-classified as nav commands because they don't start with
+  // one of these verbs.
   if (!NAV_VERB.test(stripped)) return null;
   for (const { noun, tab, label } of TAB_NOUNS) {
     // Build a strict tail pattern for this tab: verb-prefix +
@@ -120,6 +128,23 @@ function detectTabIntent(raw: string): TabIntent | null {  const trimmed = raw.t
     if (full.test(stripped)) return { tab, label };
   }
   return null;
+}
+
+/**
+ * "Open the menu" / "show modules" — voice command to pop the
+ * radial-menu overlay (same effect as clicking the JARVIS orb).
+ * Strict whole-utterance match so it can never be confused with
+ * normal chat.
+ */
+function detectMenuIntent(raw: string): boolean {
+  const text = raw.trim().toLowerCase().replace(/[.?!]+$/, "");
+  if (!text) return false;
+  const stripped = text.replace(/^(?:hey\s+|ok\s+)?alfred[,\s]+/, "").trim();
+  if (!stripped) return false;
+  if (stripped.split(/\s+/).length > 6) return false;
+  return /^(?:open|show|bring\s+up|pop)\s+(?:the\s+)?(?:menu|radial(?:\s+menu)?|modules?|app\s+menu|launcher)$/.test(
+    stripped,
+  );
 }
 
 /**
@@ -186,6 +211,16 @@ export function ChatWindow() {
   // Top-level tab — HUD / CHAT / DESIGN. Loaded from localStorage
   // so a refresh keeps you on the tab you were last using.
   const [activeTab, setActiveTab] = useState<TabId>("hud");
+  // Radial-menu / 3D sub-view state. When the user clicks the
+  // central JARVIS orb on the HUD, ``radialOpen`` flips true and
+  // the curved-carousel overlay (RadialMenu) appears. Selecting an
+  // item either switches to an existing tab (CHAT/WORKOUT) or
+  // sets ``subView`` to a dedicated 3D fullscreen experience
+  // (currently only SPOTIFY). Sub-views completely take over the
+  // viewport and dismiss back to the HUD via their own back
+  // button.
+  const [radialOpen, setRadialOpen] = useState(false);
+  const [subView, setSubView] = useState<"spotify" | null>(null);
   // Separate conversation thread for the design-tab chat overlay,
   // so design back-and-forth doesn't pollute general chat.
   const [designConversationId, setDesignConversationId] = useState<
@@ -488,6 +523,21 @@ export function ChatWindow() {
   function setActiveTabPersisted(tab: TabId) {
     setActiveTab(tab);
     persistTab(tab);
+  }
+
+  // Radial-menu item selection — Chat/Workout map to existing tabs
+  // (so they keep their full-screen layouts), Spotify opens the
+  // dedicated 3D Audio Console subview. The radial menu always
+  // closes after a pick.
+  function handleRadialSelect(item: RadialMenuItem) {
+    setRadialOpen(false);
+    if (item === "spotify") {
+      setSubView("spotify");
+    } else if (item === "chat") {
+      setActiveTabPersisted("chat");
+    } else if (item === "workout") {
+      setActiveTabPersisted("workout");
+    }
   }
 
   // Items rendered inside the QuickToolsMenu when the left fist
@@ -822,6 +872,19 @@ export function ChatWindow() {
     // instead of responding with chat. Bypasses LLM round-trip
     // entirely so it feels instant.
     if (images.length === 0) {
+      // "Open the menu" / "show modules" — pop the radial overlay.
+      if (detectMenuIntent(text)) {
+        setRadialOpen(true);
+        const ack = "Opening the module menu, sir.";
+        setMessages((prev) => [
+          ...prev,
+          { id: crypto.randomUUID(), role: "user", content: text },
+          { id: crypto.randomUUID(), role: "assistant", content: ack },
+        ]);
+        if (voiceOut) void speak(ack);
+        return;
+      }
+
       const intent = detectTabIntent(text);
       if (intent) {
         setActiveTabPersisted(intent.tab);
@@ -1188,6 +1251,14 @@ export function ChatWindow() {
         minHeight: "100vh",
       }}
     >
+      <RadialMenu
+        open={radialOpen}
+        onSelect={handleRadialSelect}
+        onClose={() => setRadialOpen(false)}
+      />
+      {subView === "spotify" ? (
+        <Spotify3DView onBack={() => setSubView(null)} />
+      ) : null}
       <TabBar active={activeTab} onChange={setActiveTabPersisted} />
       <HudFrame enabled={activeTab === "hud"} />
       {activeTab === "hud" ? (
@@ -1510,6 +1581,7 @@ export function ChatWindow() {
                   layout={hud.layout.orb}
                   customEnabled={hud.customEnabled}
                   scale={scale}
+                  zIndex={12}
                   onMove={(p) => hud.updateWidget("orb", p)}
                   onHide={() => hud.hideWidget("orb")}
                   hidden={!hud.layout.orb.visible}
@@ -1535,7 +1607,13 @@ export function ChatWindow() {
                             : 200,
                         ) - 20,
                       );
-                      return <Orb3D size={orbSize} caption={orbCaption} />;
+                      return (
+                        <Orb3D
+                          size={orbSize}
+                          caption={orbCaption}
+                          onClick={() => setRadialOpen(true)}
+                        />
+                      );
                     })()}
                   </div>
                 </HudWidget>
