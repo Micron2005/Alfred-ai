@@ -111,6 +111,16 @@ const SPEED_FOR_FULL_RESPONSE = 25;
 // hand still and the inference jitters from frame to frame.
 const DEAD_ZONE_PX = 1.5;
 
+// Skeleton scale factor. The raw projection from normalized 0..1
+// landmark coordinates to viewport pixels makes the rendered hand
+// the same size as the camera frame stretched across the screen
+// — far larger than the user's actual hand. Scaling each landmark
+// toward the index-fingertip cursor (the anchor point) shrinks
+// the visible skeleton without changing where the cursor itself
+// lives. 0.45 ≈ "looks roughly like my actual hand at desk
+// distance" while still being readable.
+const SKELETON_SCALE = 0.45;
+
 // Per-landmark dedup threshold (viewport pixels). MediaPipe's
 // raw landmarks jitter slightly every frame even when the hand
 // is still, so naively committing each frame's projection to
@@ -304,6 +314,16 @@ export function useHandTracking(
   const detectorRef = useRef<HandLandmarker | null>(null);
   const rafRef = useRef<number | null>(null);
   const lastInferAtRef = useRef(0);
+  // Off-screen canvas used to pre-mirror each video frame before
+  // handing it to MediaPipe. The classifier is documented as
+  // "expects selfie-mirrored input" — feeding it a raw camera
+  // stream causes its handedness labels to be flipped from the
+  // user's perspective. By mirroring upstream, the labels and
+  // landmark coordinates BOTH come back in user-perspective
+  // and downstream code can stop second-guessing the camera
+  // pipeline.
+  const mirrorCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const mirrorCtxRef = useRef<CanvasRenderingContext2D | null>(null);
   // Throttle for the optional handedness-debug log
   // (localStorage.alfred_hand_debug='1'). One line per second per
   // detected hand max; spammy console kills perf.
@@ -470,7 +490,40 @@ export function useHandTracking(
           ) {
             lastInferAtRef.current = now;
             try {
-              const res = det.detectForVideo(v, now);
+              // Lazily build the mirror canvas matching the
+              // current frame size. videoWidth/Height are 0
+              // until metadata loads, hence the lazy init.
+              const vw0 = v.videoWidth;
+              const vh0 = v.videoHeight;
+              if (!mirrorCanvasRef.current && vw0 > 0 && vh0 > 0) {
+                const canvas = document.createElement("canvas");
+                canvas.width = vw0;
+                canvas.height = vh0;
+                const ctx = canvas.getContext("2d", { alpha: false });
+                if (ctx) {
+                  mirrorCanvasRef.current = canvas;
+                  mirrorCtxRef.current = ctx;
+                }
+              }
+              const canvas = mirrorCanvasRef.current;
+              const ctx = mirrorCtxRef.current;
+              let target: HTMLVideoElement | HTMLCanvasElement = v;
+              if (canvas && ctx && vw0 > 0 && vh0 > 0) {
+                // Resize canvas if the source frame size changed
+                // (e.g. webcam resolution renegotiated). Drawing
+                // into a stale-sized canvas would crop or stretch.
+                if (canvas.width !== vw0 || canvas.height !== vh0) {
+                  canvas.width = vw0;
+                  canvas.height = vh0;
+                }
+                // Mirror by translating then scaling x by -1.
+                // Reset to identity each frame so transforms don't
+                // accumulate across calls.
+                ctx.setTransform(-1, 0, 0, 1, canvas.width, 0);
+                ctx.drawImage(v, 0, 0, canvas.width, canvas.height);
+                target = canvas;
+              }
+              const res = det.detectForVideo(target, now);
               processFrame(res);
             } catch {
               // Single-frame failure isn't fatal — skip and try
@@ -518,36 +571,20 @@ export function useHandTracking(
 
       let rawRight: RawLandmark[] | null = null;
       let rawLeft: RawLandmark[] | null = null;
-      // Resolve the mirror state once per frame. Webcam stacks
-      // vary: some hardware/driver/OS combos deliver an already-
-      // mirrored selfie stream to the browser, others deliver
-      // raw sensor frames. MediaPipe's handedness classifier is
-      // trained on selfie-mirrored images and labels accordingly,
-      // which means with raw non-mirrored input the labels are
-      // inverted from the user's perspective. We can't reliably
-      // sniff the camera state from JS, so we expose a manual
-      // override: localStorage["alfred_hand_mirror"] === "0"
-      // forces the legacy "raw camera" interpretation,
-      // === "1" forces the mirrored interpretation, anything
-      // else (default) uses the modern default which assumes
-      // the camera stream IS effectively mirrored from the
-      // user's perspective (matches the majority of consumer
-      // webcams + browsers and matches Mukarram's hardware).
-      const mirrorOverride = (() => {
-        try {
-          return window.localStorage.getItem("alfred_hand_mirror");
-        } catch {
-          return null;
-        }
-      })();
-      // Default true (mirrored) unless explicitly disabled.
-      const cameraIsMirrored = mirrorOverride !== "0";
+      // The video frame is pre-mirrored on a canvas before being
+      // handed to MediaPipe (see the tick loop above). That means
+      // MediaPipe is receiving the selfie-style input it was
+      // trained on, so its handedness labels and landmark
+      // coordinates already match the user's perspective:
+      //   - label "Right" => user's right hand
+      //   - lm.x ≈ 0.8     => right side of user's view
+      // No swap, no flip, no per-webcam guessing required.
 
-      // First pass: collect every valid hand with its
-      // wrist-x position and MediaPipe-reported handedness
-      // (after the user-perspective swap). We need both pieces
-      // of info to reliably split hands when MediaPipe collides
-      // their labels (see below).
+      // First pass: collect every valid hand with its handedness
+      // and wrist-x. We still need wristX as a tiebreaker because
+      // MediaPipe's classifier is independent per hand and can
+      // occasionally label both detections the same (e.g. both
+      // "Right" when the user holds the same pose with both hands).
       type Detected = {
         lm: RawLandmark[];
         isUserRight: boolean;
@@ -563,28 +600,17 @@ export function useHandTracking(
         const lm = allHands[i];
         if (!lm || lm.length < 21) continue;
         const label = allLabels[i]?.[0]?.categoryName ?? "Right";
-        // Compute "is this the user's right hand?" from the
-        // MediaPipe label and the resolved mirror state. When
-        // the camera IS effectively mirrored, MediaPipe's
-        // "Right" already means the user's right hand. When
-        // it's NOT mirrored, swap.
-        const isUserRight = cameraIsMirrored
-          ? label === "Right"
-          : label === "Left";
+        const isUserRight = label === "Right";
         const wristX = lm[WRIST]?.x ?? 0.5;
         detected.push({ lm, isUserRight, wristX, origIdx: i });
       }
 
-      // Route detections to right/left slots. MediaPipe's
-      // handedness classifier is independent per hand and
-      // sometimes labels both detections the same (e.g. both
-      // "Right"), especially when hands are mirrored to each
-      // other or one is held palm-out vs. palm-in. Naive
-      // first-match-per-side routing would drop the second
-      // hand entirely. Disambiguate via spatial position when
-      // labels collide: in a mirrored frame the user's right
-      // hand sits at LARGER x (right side of image); in raw
-      // non-mirrored the user's right is at SMALLER x.
+      // Route detections to right/left slots. With pre-mirrored
+      // input, MediaPipe's labels are already in user-perspective
+      // and "user's right hand" sits at LARGER x. If both
+      // detections come back with the same label, fall back to
+      // wrist-x ordering (right hand = larger x) so we still get
+      // both hands on screen.
       if (detected.length === 1) {
         const d = detected[0];
         if (d.isUserRight) rawRight = d.lm;
@@ -592,7 +618,6 @@ export function useHandTracking(
       } else if (detected.length >= 2) {
         const [a, b] = detected;
         if (a.isUserRight !== b.isUserRight) {
-          // Distinct labels — trust them.
           if (a.isUserRight) {
             rawRight = a.lm;
             rawLeft = b.lm;
@@ -601,12 +626,7 @@ export function useHandTracking(
             rawLeft = a.lm;
           }
         } else {
-          // Collision — split by wrist x. Direction depends on
-          // mirror state.
-          const aIsRightSide = cameraIsMirrored
-            ? a.wristX > b.wristX  // mirrored: bigger x = user-right
-            : a.wristX < b.wristX; // raw: smaller x = user-right
-          if (aIsRightSide) {
+          if (a.wristX > b.wristX) {
             rawRight = a.lm;
             rawLeft = b.lm;
           } else {
@@ -632,7 +652,7 @@ export function useHandTracking(
                 allLabels[d.origIdx]?.[0]?.categoryName ?? "?";
               // eslint-disable-next-line no-console
               console.log(
-                `[hand-debug] mediapipe=${rawLabel} userSide=${d.isUserRight ? "right" : "left"} wristX=${d.wristX.toFixed(3)} mirrored=${cameraIsMirrored}`,
+                `[hand-debug] mediapipe=${rawLabel} userSide=${d.isUserRight ? "right" : "left"} wristX=${d.wristX.toFixed(3)}`,
               );
             }
           }
@@ -642,10 +662,10 @@ export function useHandTracking(
       }
 
       const nextRight = rawRight
-        ? computeHandState(rawRight, rightRefs.current, vw, vh, true, cameraIsMirrored)
+        ? computeHandState(rawRight, rightRefs.current, vw, vh, true)
         : null;
       const nextLeft = rawLeft
-        ? computeHandState(rawLeft, leftRefs.current, vw, vh, false, cameraIsMirrored)
+        ? computeHandState(rawLeft, leftRefs.current, vw, vh, false)
         : null;
 
       // Reset per-hand refs when a hand leaves the frame so
@@ -730,7 +750,6 @@ export function useHandTracking(
       vw: number,
       vh: number,
       isRight: boolean,
-      mirrored: boolean,
     ): HandState {
       const thumb = lm[THUMB_TIP];
       const index = lm[INDEX_TIP];
@@ -754,24 +773,21 @@ export function useHandTracking(
         : curled >= FIST_FINGERS_FOR_FIST;     // enter fist at 4/4 curled
       refs.fistLatched = nowFist;
 
-      // Project all landmarks into viewport pixels. The X-axis
-      // direction depends on the camera mirror state: with a
-      // mirrored selfie stream the user's right hand is already at
-      // larger normalized x, so we map it directly to viewport-x.
-      // With a raw non-mirrored stream the user's right hand is
-      // at smaller x, and we flip via (1 - p.x) so that the
-      // cursor still tracks the user's hand correctly. Y is
-      // never flipped — both modes have y=0 at the top of the
-      // image and the user expects the same on screen.
-      const projected: CursorPoint[] = lm.map((p) => ({
-        x: (mirrored ? p.x : 1 - p.x) * vw,
+      // Project all landmarks into viewport pixels. The video
+      // frame is pre-mirrored upstream, so MediaPipe's lm.x is
+      // already in user-perspective: x=0 left of viewport, x=1
+      // right of viewport. Y is never flipped — y=0 is top of
+      // image and top of viewport.
+      const rawProjected: CursorPoint[] = lm.map((p) => ({
+        x: p.x * vw,
         y: p.y * vh,
       }));
 
-      // Pinch midpoint in viewport space (use the projected
-      // values so it matches the rendered hand exactly).
-      const pthumb = projected[THUMB_TIP];
-      const pindex = projected[INDEX_TIP];
+      // Pinch midpoint in viewport space (using raw projection
+      // since it's only used to drive the click point, not the
+      // visible skeleton).
+      const pthumb = rawProjected[THUMB_TIP];
+      const pindex = rawProjected[INDEX_TIP];
       const pinchPoint: CursorPoint = {
         x: (pthumb.x + pindex.x) / 2,
         y: (pthumb.y + pindex.y) / 2,
@@ -803,6 +819,18 @@ export function useHandTracking(
         }
       }
       refs.smoothed = { x: cursorX, y: cursorY };
+
+      // Scale the rendered skeleton toward the index-fingertip
+      // anchor (which IS the cursor). This shrinks the visible
+      // hand to a more natural size without moving the cursor.
+      // For non-cursor (left) hands we use the raw fingertip
+      // since smoothing isn't applied — same anchor either way.
+      const anchorX = isRight ? cursorX : targetX;
+      const anchorY = isRight ? cursorY : targetY;
+      const projected: CursorPoint[] = rawProjected.map((p) => ({
+        x: anchorX + (p.x - pindex.x) * SKELETON_SCALE,
+        y: anchorY + (p.y - pindex.y) * SKELETON_SCALE,
+      }));
 
       // Landmark dedup: reuse the previous projected array
       // identity if no landmark moved >= threshold. Critical
