@@ -25,6 +25,20 @@ interface ComposerProps {
   /** Notified whenever mic recording starts/stops. Used by ChatWindow to
    *  pause the wake-word engine while the user is dictating. */
   onMicStateChange?: (recording: boolean) => void;
+  /** Called when speech recognition couldn't make sense of the
+   *  user's audio — empty transcript, no-speech timeout, network
+   *  error, or a known Whisper-style hallucination. The parent
+   *  typically responds by having Alfred speak "I didn't catch
+   *  that, sir." instead of letting a raw error or a bogus
+   *  transcript reach the chat history. ``reason`` is one of:
+   *    - "no_audio": the mic captured nothing usable
+   *    - "no_words": Whisper returned an empty / whitespace transcript
+   *    - "hallucination": Whisper returned a known stock phrase
+   *      (e.g. "Thanks for watching!") that almost always means
+   *      it heard silence/noise and made something up
+   *    - "error": the transcription request itself failed
+   */
+  onUnclear?: (reason: "no_audio" | "no_words" | "hallucination" | "error") => void;
 }
 
 export interface ComposerHandle {
@@ -60,8 +74,39 @@ const ALLOWED_MIME = /^image\/(png|jpe?g|gif|webp)$/;
 const MAX_BYTES = 5 * 1024 * 1024;
 const MAX_IMAGES = 6;
 
+/**
+ * Whisper has a well-documented tendency to "hallucinate" common
+ * stock phrases when given silence or pure noise — typically
+ * something it heard a million times in training (YouTube outros,
+ * podcast intros, etc.). When it does, the user gets a chat
+ * message they never spoke. We catch the most common offenders
+ * and treat them the same as "no transcript" so Alfred apologises
+ * instead of putting fabricated words in the user's mouth.
+ */
+const WHISPER_HALLUCINATIONS: ReadonlyArray<RegExp> = [
+  /^thanks?\s+(for\s+)?(watching|listening)\.?!?$/i,
+  /^thank\s+you(\s+for\s+watching)?\.?!?$/i,
+  /^please\s+subscribe\.?!?$/i,
+  /^see\s+you\s+(in\s+the\s+)?next\s+(video|episode)\.?!?$/i,
+  /^bye[!.]?$/i,
+  /^you$/i,
+  /^\.+$/,
+  /^[!?]+$/,
+  /^\[.*\]$/, // Whisper sometimes emits "[Music]" / "[Applause]"
+  /^\(.*\)$/,
+];
+
+function isWhisperHallucination(text: string): boolean {
+  const trimmed = text.trim();
+  if (trimmed.length === 0) return true;
+  // Very short transcripts (1-2 chars) from a multi-second clip are
+  // almost always garbage.
+  if (trimmed.length <= 2) return true;
+  return WHISPER_HALLUCINATIONS.some((re) => re.test(trimmed));
+}
+
 export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Composer(
-  { onSend, disabled, onMicStateChange },
+  { onSend, disabled, onMicStateChange, onUnclear },
   ref,
 ) {
   const [text, setText] = useState("");
@@ -322,6 +367,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
             "I didn't hear anything. Try again, a touch closer to the mic.",
           );
           setMic("idle");
+          onUnclear?.("no_audio");
           return;
         }
         if (blob.size === 0) {
@@ -329,13 +375,14 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
             "I didn't pick up any audio. Check that your microphone is selected in Windows Sound settings.",
           );
           setMic("idle");
+          onUnclear?.("no_audio");
           return;
         }
         setMic("transcribing");
         try {
           const transcript = await transcribeAudio(blob);
           const cleaned = transcript.trim();
-          if (cleaned) {
+          if (cleaned && !isWhisperHallucination(cleaned)) {
             // Read from the ref, not the captured `images` state — the
             // user may have added or removed attachments while recording.
             const live = imagesRef.current;
@@ -356,12 +403,28 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
               for (const url of toRevoke) URL.revokeObjectURL(url);
             }
           } else {
+            // Either an empty transcript or a known Whisper-style
+            // stock phrase that almost always means the model
+            // heard silence and made something up. Bubble both
+            // up as "unclear" so Alfred says he didn't catch it
+            // instead of letting a fabricated message land in
+            // the chat history.
+            const reason = cleaned ? "hallucination" : "no_words";
             setMicError(
-              "I couldn't make out any words. Try speaking a bit louder or closer to the mic.",
+              "I didn't quite catch that, sir. Could you say it again?",
             );
+            onUnclear?.(reason);
           }
         } catch (err) {
-          setMicError(err instanceof Error ? err.message : "Transcription failed");
+          // Friendly catch-all — don't expose raw network / decode
+          // errors to the user. Have Alfred apologise instead.
+          setMicError(
+            "I didn't quite catch that, sir. Could you say it again?",
+          );
+          onUnclear?.("error");
+          // Log the underlying error for the developer console only.
+          // eslint-disable-next-line no-console
+          console.warn("[composer] transcription failed", err);
         } finally {
           setMic("idle");
         }

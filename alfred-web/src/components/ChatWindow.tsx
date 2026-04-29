@@ -43,6 +43,7 @@ import { CameraPreview } from "@/components/CameraPreview";
 import { HudWidget } from "@/components/HudWidget";
 import { WorkoutCoachWidget } from "@/components/WorkoutCoachWidget";
 import { FaceRecognitionWidget } from "@/components/FaceRecognitionWidget";
+import { WorkoutTabView } from "@/components/WorkoutTabView";
 import { InstallPwaButton } from "@/components/InstallPwaButton";
 import {
   useHudLayout,
@@ -631,6 +632,28 @@ export function ChatWindow() {
     }
   }, []);
 
+  // Have Alfred verbally apologise when speech recognition couldn't
+  // make sense of the user's audio, instead of letting a raw error
+  // banner appear or a hallucinated transcript reach the chat
+  // history. Dedupes rapid-fire calls (e.g. wake-word retries) so
+  // Alfred doesn't apologise five times in three seconds.
+  const lastUnclearAtRef = useRef(0);
+  const handleSpeechUnclear = useCallback(
+    (reason: "no_audio" | "no_words" | "hallucination" | "error") => {
+      void reason; // currently uniform response; keep arg for future tailoring
+      const now = Date.now();
+      if (now - lastUnclearAtRef.current < 4000) return;
+      lastUnclearAtRef.current = now;
+      // Prefer voice if it's enabled — otherwise leave the inline
+      // mic-error banner as the only feedback.
+      if (voiceOut) {
+        void speak("Apologies, sir — I didn't quite catch that. Could you say it again?");
+      }
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [voiceOut],
+  );
+
   // Load a specific conversation's messages.
   const loadConversation = useCallback(async (id: string) => {
     setLoadingConvo(true);
@@ -922,6 +945,7 @@ export function ChatWindow() {
           onSend={handleSend}
           disabled={busy || loadingConvo}
           onMicStateChange={setRecording}
+          onUnclear={handleSpeechUnclear}
         />
       </div>
     </>
@@ -947,6 +971,18 @@ export function ChatWindow() {
         <DesignView
           conversationId={designConversationId}
           onConversationCreated={setDesignConversationId}
+        />
+      ) : activeTab === "workout" ? (
+        <WorkoutTabView
+          cameraOn={cameraOn}
+          cameraStatus={camera.status}
+          faceCount={camera.faceCount}
+          cameraStreamRef={camera.streamRef}
+          pose={pose.pose}
+          poseStatus={pose.status}
+          face={face.face}
+          faceStatus={face.status}
+          onToggleCamera={() => setCameraPersisted(!cameraOn)}
         />
       ) : (
         <div
@@ -1381,7 +1417,13 @@ export function ChatWindow() {
               </div>
             ) : null}
 
-            {cameraOn ? (
+            {/* Workout coach + face recognition only render on the
+                HUD when the camera is on AND we actually have live
+                pose/face data — otherwise they show up as empty
+                windows pinned to the bottom of the screen. The
+                dedicated WORKOUT tab is the proper place for the
+                form-coach experience. */}
+            {cameraOn && pose.pose && face.face && face.status === "ready" ? (
               <div
                 style={{
                   display: "flex",
@@ -1391,10 +1433,6 @@ export function ChatWindow() {
                   flexWrap: "wrap",
                 }}
               >
-                <WorkoutCoachWidget
-                  pose={pose.pose}
-                  poseStatus={pose.status}
-                />
                 <FaceRecognitionWidget
                   face={face.face}
                   faceStatus={face.status}

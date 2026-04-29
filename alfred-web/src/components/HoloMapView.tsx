@@ -85,10 +85,26 @@ export function HoloMapView({ center, onClose, initialZoom = 6 }: Props) {
       attributionControl: true,
     });
 
-    L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
-      attribution: "&copy; OpenStreetMap contributors",
-      maxZoom: 19,
-    }).addTo(map);
+    L.tileLayer(
+      "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+      {
+        attribution:
+          "Imagery &copy; Esri &mdash; Source: Esri, i-cubed, USDA, USGS, AEX, GeoEye, Getmapping, Aerogrid, IGN, IGP, UPR-EGP, and the GIS User Community",
+        maxZoom: 19,
+      },
+    ).addTo(map);
+
+    // Place / road labels overlay — keeps the satellite imagery
+    // looking like Google Earth fly-over but with searchable
+    // landmark + city labels on top.
+    L.tileLayer(
+      "https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}",
+      {
+        attribution: "Labels &copy; Esri",
+        maxZoom: 19,
+        opacity: 0.85,
+      },
+    ).addTo(map);
 
     if (center) {
       markerRef.current = L.marker(startCenter as L.LatLngTuple).addTo(map);
@@ -326,11 +342,10 @@ export function HoloMapView({ center, onClose, initialZoom = 6 }: Props) {
       </div>
 
       {/* The map fills the rest of the viewport. The CSS filter
-          stack tints OSM tiles to a cyan/blue hologram aesthetic
-          (invert flips light→dark, hue-rotate puts it in the cyan
-          range, saturate boosts the colour). Toggle off by removing
-          the ``filter`` property if you'd rather see the realistic
-          map. */}
+          tints satellite imagery toward a JARVIS-cyan hologram —
+          hue-rotate pushes greens/browns toward blue/cyan, contrast
+          boost separates land from sea, slight brightness drop
+          gives the dark holographic look. */}
       <div
         ref={mapDivRef}
         data-testid="holo-map-leaflet"
@@ -338,7 +353,8 @@ export function HoloMapView({ center, onClose, initialZoom = 6 }: Props) {
           flex: 1,
           minHeight: 0,
           filter:
-            "invert(1) hue-rotate(180deg) brightness(0.95) saturate(1.4) contrast(1.05)",
+            "hue-rotate(165deg) saturate(1.6) brightness(0.78) contrast(1.18)",
+          background: "#02060d",
         }}
       />
     </div>

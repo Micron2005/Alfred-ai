@@ -38,21 +38,20 @@ export function EarthHologramWidget() {
       style={{
         position: "relative",
         margin: "0 auto",
-        maxWidth: 520,
+        maxWidth: 560,
         width: "100%",
+        // Frame-less — the globe floats like Alfred's main orb,
+        // no border or background panel.
         padding: 0,
-        border: "1px solid var(--border)",
-        background:
-          "linear-gradient(180deg, rgba(108,214,255,0.04), rgba(108,214,255,0.01))",
       }}
     >
+      {/* Floating header — purely text, no card. */}
       <div
         style={{
-          padding: "8px 14px",
+          padding: "0 4px 6px",
           display: "flex",
           alignItems: "center",
           justifyContent: "space-between",
-          borderBottom: "1px solid var(--border)",
         }}
       >
         <span
@@ -62,11 +61,12 @@ export function EarthHologramWidget() {
             letterSpacing: 2.5,
             color: "var(--hud)",
             textShadow: "0 0 6px var(--orb-glow)",
+            opacity: 0.85,
           }}
         >
           EARTH · HOLOGRAM
         </span>
-        <div style={{ display: "flex", gap: 6 }}>
+        <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
           {picked ? (
             <span
               className="mono"
@@ -83,10 +83,8 @@ export function EarthHologramWidget() {
             type="button"
             data-testid="earth-hologram-expand"
             className="hud-button"
-            onClick={() =>
-              openMapAt(picked ?? { lat: 20, lon: 0 })
-            }
-            title="Open the detailed map view"
+            onClick={() => openMapAt(picked ?? { lat: 20, lon: 0 })}
+            title="Open the detailed holographic flyover view"
             style={{ padding: "2px 8px", fontSize: 9 }}
           >
             ⤢ EXPAND
@@ -98,7 +96,7 @@ export function EarthHologramWidget() {
         fallback={
           <div
             style={{
-              height: 320,
+              height: 360,
               display: "flex",
               alignItems: "center",
               justifyContent: "center",
@@ -111,7 +109,7 @@ export function EarthHologramWidget() {
           </div>
         }
       >
-        <HolographicEarth onPick={openMapAt} height={320} />
+        <HolographicEarth onPick={openMapAt} height={360} />
       </Suspense>
 
       {mapOpen ? (

@@ -1,14 +1,22 @@
 "use client";
 
-/** Three top-level tabs the user can swipe between with a
- *  two-hand sliding-door gesture (or click). */
-export type TabId = "hud" | "chat" | "design";
+/** Top-level tabs the user can swipe between with a two-hand
+ *  sliding-door gesture (or click). The WORKOUT tab is
+ *  dedicated to the form-coach experience so the HUD stays
+ *  focused on standby / overview. CAD lives behind DESIGN.  */
+export type TabId = "hud" | "chat" | "workout" | "design";
 
-export const TAB_ORDER: ReadonlyArray<TabId> = ["hud", "chat", "design"];
+export const TAB_ORDER: ReadonlyArray<TabId> = [
+  "hud",
+  "chat",
+  "workout",
+  "design",
+];
 
 export const TAB_LABELS: Record<TabId, string> = {
   hud: "HUD",
   chat: "CHAT",
+  workout: "WORKOUT",
   design: "DESIGN",
 };
 
@@ -27,7 +35,7 @@ const TAB_KEY = "alfred.activeTab";
 export function loadTab(): TabId {
   if (typeof window === "undefined") return "hud";
   const v = window.localStorage.getItem(TAB_KEY);
-  if (v === "hud" || v === "chat" || v === "design") return v;
+  if (v === "hud" || v === "chat" || v === "workout" || v === "design") return v;
   return "hud";
 }
 
