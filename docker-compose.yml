@@ -20,6 +20,11 @@ services:
     build:
       context: ./alfred-core
       dockerfile: Dockerfile
+      # Skip the Whisper pre-warm on tiny ARM SBCs (<= 2 GiB RAM)
+      # to avoid OOM during build. Comment out the line below on
+      # an x86 box for the snappier first /voice/stt response.
+      args:
+        ALFRED_SKIP_MODEL_PREFETCH: ${ALFRED_SKIP_MODEL_PREFETCH:-0}
     restart: unless-stopped
     env_file: .env
     environment:
@@ -39,6 +44,9 @@ services:
       - ${ALFRED_MEMORY_HOST_PATH:-./alfred-memory}:/app/alfred-memory
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    # Inherit the HEALTHCHECK from the Dockerfile so `docker compose ps`
+    # shows real readiness — a "running" alfred-core is not the same as
+    # one that's actually finished init_db() and is serving requests.
 
   alfred-web:
     build:
@@ -54,7 +62,11 @@ services:
     environment:
       NEXT_PUBLIC_API_BASE: ${NEXT_PUBLIC_API_BASE}
     depends_on:
-      - alfred-core
+      alfred-core:
+        # Wait for /health to actually return 200, not just for the
+        # process to start. Saves ~10 s of "Alfred is unreachable"
+        # errors in the browser on first boot.
+        condition: service_healthy
     ports:
       - "3000:3000"
 

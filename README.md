@@ -42,7 +42,22 @@ docker compose up --build
 
 Then open http://localhost:3000 and say hello.
 
-See [docs/SETUP_WINDOWS_WSL.md](docs/SETUP_WINDOWS_WSL.md) for the detailed step-by-step.
+After the stack is up, run the smoke test to verify every layer:
+
+```bash
+./scripts/smoke-test.sh
+```
+
+For an auto-start-on-boot install (Linux / Raspberry Pi 5):
+
+```bash
+./scripts/install-systemd.sh
+```
+
+See [docs/SELF_HOSTING.md](docs/SELF_HOSTING.md) for the full
+self-hosting guide — covers x86 desktops, WSL2, and the Raspberry
+Pi 5 path — and [docs/SETUP_WINDOWS_WSL.md](docs/SETUP_WINDOWS_WSL.md)
+for the detailed Windows step-by-step.
 
 ## The persona
 
