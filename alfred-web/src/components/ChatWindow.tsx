@@ -76,31 +76,47 @@ const WAKE_LABEL = WAKE_KEYWORD.replace(/_/g, " ").replace(
 /**
  * Voice / text intent — "Alfred, take me to the workout tab".
  *
- * The matcher is intentionally lenient: it accepts a leading
- * "alfred,?" + a natural-language "go to / switch to / open /
- * show me / take me to / navigate to" phrase + any of the four
- * tab nouns. Both cases like "open the chat tab" and bare "chat"
- * (after "alfred,") are accepted so users don't have to memorise
- * a specific incantation.
+ * Strict matcher: the WHOLE message must be a navigation command,
+ * not just contain navigation-ish words anywhere in a sentence.
+ * Earlier loose version was hijacking normal chat messages like
+ * "talk to me about X" (verb absent + tab noun "talk") or "show me
+ * the home repair guide" (verb "show" + tab noun "home"), making
+ * Alfred silently switch tabs instead of replying.
+ *
+ * The whole utterance, after stripping a leading "alfred,?", must
+ * match: ``[verb] (to|over to|into)? (the)? <tab-noun> (tab|screen|view|page)?``
+ * with at most a few filler words. Anything longer than ~10 words
+ * is treated as conversation.
  */
 type TabIntent = { tab: TabId; label: string };
-const TAB_INTENT_PATTERNS: ReadonlyArray<{ re: RegExp; tab: TabId; label: string }> = [
-  // Order matters — more specific terms (workout / form coach / etc.) first.
-  { re: /\b(?:workout|form\s*coach|exercise|coach|fitness|gym)\b/i, tab: "workout", label: "the Workout tab" },
-  { re: /\b(?:design|cad|cad\s*studio|3d\s*print(?:er|ing)?|model(?:l?ing|ler)?)\b/i, tab: "design", label: "the Design tab" },
-  { re: /\b(?:chat|messages?|conversation|talk|inbox)\b/i, tab: "chat", label: "the Chat tab" },
-  { re: /\b(?:hud|home|standby|main|dashboard|overview)\b/i, tab: "hud", label: "the HUD" },
+const TAB_NOUNS: ReadonlyArray<{ noun: RegExp; tab: TabId; label: string }> = [
+  { noun: /workout|form\s*coach|exercise|fitness|gym/, tab: "workout", label: "the Workout tab" },
+  { noun: /design|cad(?:\s*studio)?|3d\s*print(?:er|ing)?|model(?:l?ing|ler)?/, tab: "design", label: "the Design tab" },
+  { noun: /chat|messages?|conversation|inbox/, tab: "chat", label: "the Chat tab" },
+  { noun: /hud|home|standby|main|dashboard|overview/, tab: "hud", label: "the HUD" },
 ];
+const NAV_VERB =
+  /^(?:go(?:\s+back)?|take\s+me|switch|open|show\s+me|navigate|jump|bring\s+me|pull\s+up|head\s+(?:to|over)|move\s+to)/;
 function detectTabIntent(raw: string): TabIntent | null {
-  const text = raw.trim().toLowerCase();
-  if (!text) return null;
-  // Require a navigation verb so casual mentions ("I'm working out")
-  // don't accidentally hijack the user's chat. Verb list is broad.
-  const VERB =
-    /\b(?:go(?:\s+back)?|take\s+me|switch|open|show|navigate|head|jump|move|bring(?:\s+me)?|pull\s+up)\b/;
-  if (!VERB.test(text)) return null;
-  for (const p of TAB_INTENT_PATTERNS) {
-    if (p.re.test(text)) return { tab: p.tab, label: p.label };
+  const trimmed = raw.trim().toLowerCase().replace(/[.?!]+$/, "");
+  if (!trimmed) return null;
+  // Strip an optional leading "alfred," / "alfred " — wake-word
+  // style lead-ins are common when the user is dictating.
+  const stripped = trimmed.replace(/^(?:hey\s+|ok\s+)?alfred[,\s]+/, "").trim();
+  // Reject anything that's clearly a conversation, not a command.
+  // Tab-switch commands are short — rarely more than 7 words.
+  const wordCount = stripped.split(/\s+/).length;
+  if (wordCount > 8) return null;
+  if (!NAV_VERB.test(stripped)) return null;
+  for (const { noun, tab, label } of TAB_NOUNS) {
+    // Build a strict tail pattern for this tab: verb-prefix +
+    // optional connector + optional "the" + the noun + optional
+    // suffix word. Must consume the whole stripped utterance.
+    const full = new RegExp(
+      `^(?:go(?:\\s+back)?|take\\s+me|switch|open|show\\s+me|navigate|jump|bring\\s+me|pull\\s+up|head\\s+(?:to|over)|move\\s+to)\\s+(?:to\\s+|over\\s+to\\s+|into\\s+|me\\s+to\\s+|on\\s+to\\s+|back\\s+to\\s+)?(?:the\\s+)?(?:${noun.source})(?:\\s+(?:tab|screen|view|page|section))?$`,
+      "i",
+    );
+    if (full.test(stripped)) return { tab, label };
   }
   return null;
 }

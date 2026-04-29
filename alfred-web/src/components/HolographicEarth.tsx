@@ -86,7 +86,6 @@ export function HolographicEarth({
           rotateSpeed={0.6}
         />
       </Canvas>
-      <CornerHints />
     </div>
   );
 }
@@ -252,45 +251,18 @@ function Globe({
           `}
         />
       </mesh>
-    </group>
-  );
-}
 
-function CornerHints() {
-  return (
-    <>
-      <div
-        className="mono"
-        style={{
-          position: "absolute",
-          left: 12,
-          bottom: 10,
-          fontSize: 9,
-          letterSpacing: 1.5,
-          color: "var(--hud)",
-          opacity: 0.7,
-          pointerEvents: "none",
-          textShadow: "0 0 6px var(--orb-glow)",
-        }}
-      >
-        DRAG · ROTATE   PINCH · ZOOM   CLICK · DROP PIN
-      </div>
-      <div
-        className="mono"
-        style={{
-          position: "absolute",
-          right: 12,
-          top: 10,
-          fontSize: 9,
-          letterSpacing: 1.5,
-          color: "var(--hud)",
-          opacity: 0.7,
-          pointerEvents: "none",
-          textShadow: "0 0 6px var(--orb-glow)",
-        }}
-      >
-        EARTH · LIVE
-      </div>
-    </>
+      {/* Orbital rings — two thin angled torus loops around the
+          planet, evoking satellite paths. Tilted on different axes
+          so they read as arcs around the globe in motion. */}
+      <mesh rotation={[Math.PI / 2.4, 0.4, 0.2]}>
+        <torusGeometry args={[RADIUS * 1.18, 0.0035, 8, 96]} />
+        <meshBasicMaterial color={HOLO_COLOUR} transparent opacity={0.55} />
+      </mesh>
+      <mesh rotation={[Math.PI / 1.7, -0.3, 0.6]}>
+        <torusGeometry args={[RADIUS * 1.22, 0.0028, 8, 96]} />
+        <meshBasicMaterial color={HOLO_COLOUR} transparent opacity={0.4} />
+      </mesh>
+    </group>
   );
 }
