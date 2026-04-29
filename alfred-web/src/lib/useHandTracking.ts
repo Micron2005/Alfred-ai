@@ -398,9 +398,20 @@ export function useHandTracking(
           // ~30 fps even tracking both — adds about 4 ms per frame
           // on a mid-range laptop.
           numHands: 2,
-          minHandDetectionConfidence: 0.5,
-          minTrackingConfidence: 0.5,
-          minHandPresenceConfidence: 0.5,
+          // Confidence thresholds tuned for two-hand simultaneous
+          // detection. The default 0.5 is fine for a single hand
+          // dead-centre in frame, but at sit-down distance with
+          // both hands raised the second hand is often partially
+          // out-of-frame or angled, and the per-frame confidence
+          // dips below 0.5 intermittently. Dropping these to 0.3
+          // keeps both hands tracked smoothly at the cost of
+          // accepting a slightly larger "is this even a hand"
+          // false-positive rate (rare in practice — the landmark
+          // model still has to fit 21 points, which is its own
+          // sanity check).
+          minHandDetectionConfidence: 0.3,
+          minTrackingConfidence: 0.3,
+          minHandPresenceConfidence: 0.3,
         });
         if (cancelled) {
           detector.close();
@@ -491,6 +502,13 @@ export function useHandTracking(
 
       let rawRight: RawLandmark[] | null = null;
       let rawLeft: RawLandmark[] | null = null;
+      // First pass: collect every valid hand with its
+      // wrist-x position and MediaPipe-reported handedness
+      // (after the user-perspective swap). We need both pieces
+      // of info to reliably split hands when MediaPipe collides
+      // their labels (see below).
+      type Detected = { lm: RawLandmark[]; isUserRight: boolean; wristX: number };
+      const detected: Detected[] = [];
       for (let i = 0; i < allHands.length; i++) {
         const lm = allHands[i];
         if (!lm || lm.length < 21) continue;
@@ -501,10 +519,45 @@ export function useHandTracking(
         // and gets labelled "Left". Swap so consumers see the
         // hand from the user's perspective.
         const isUserRight = label === "Left";
-        if (isUserRight) {
-          if (!rawRight) rawRight = lm;
+        const wristX = lm[WRIST]?.x ?? 0.5;
+        detected.push({ lm, isUserRight, wristX });
+      }
+
+      // Route detections to right/left slots. MediaPipe's
+      // handedness classifier is independent per hand and
+      // sometimes labels both detections the same (e.g. both
+      // "Right"), especially when hands are mirrored to each
+      // other or one is held palm-out vs. palm-in. Naive
+      // first-match-per-side routing would drop the second
+      // hand entirely. Disambiguate via spatial position when
+      // labels collide: in our non-mirrored camera frame, the
+      // user's right hand sits at SMALLER x (left side of
+      // image), the user's left hand at LARGER x.
+      if (detected.length === 1) {
+        const d = detected[0];
+        if (d.isUserRight) rawRight = d.lm;
+        else rawLeft = d.lm;
+      } else if (detected.length >= 2) {
+        const [a, b] = detected;
+        if (a.isUserRight !== b.isUserRight) {
+          // Distinct labels — trust them.
+          if (a.isUserRight) {
+            rawRight = a.lm;
+            rawLeft = b.lm;
+          } else {
+            rawRight = b.lm;
+            rawLeft = a.lm;
+          }
         } else {
-          if (!rawLeft) rawLeft = lm;
+          // Collision — split by wrist x. Smaller x = user's
+          // right hand (left side of camera frame).
+          if (a.wristX < b.wristX) {
+            rawRight = a.lm;
+            rawLeft = b.lm;
+          } else {
+            rawRight = b.lm;
+            rawLeft = a.lm;
+          }
         }
       }
 
