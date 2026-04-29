@@ -5,34 +5,28 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 /**
  * In-browser hand tracking via MediaPipe HandLandmarker.
  *
- * Detects 21 keypoints per hand at ~30 fps using the same
+ * Detects up to two hands at ~30 fps using the same
  * ``@mediapipe/tasks-vision`` package the face detector uses, so
  * there's no new dependency to bundle. Inference is done entirely
  * client-side in the browser's WASM runtime — no audio/video ever
  * leaves the machine.
  *
- * What the hook exposes:
- *   - ``cursor`` — viewport-pixel coordinates of the user's
- *     dominant index fingertip, mapped from the (mirrored) camera
- *     frame. ``null`` until the first hand is detected.
- *   - ``isPinching`` — true while the thumb tip and index fingertip
- *     are close enough to count as a pinch. Computed in normalized
- *     image-space distance so it scales correctly across resolutions.
- *   - ``status`` / ``error`` — same shape as ``useCamera`` so the
- *     UI can render a "starting / ready / error" indicator.
+ * Phase 12c.3 model: hands are split into "right" (cursor / dominant
+ * pointer) and "left" (modifier / tool palette). Each hand reports
+ * its own landmarks, pinch state, and fist state. The hook also
+ * exposes ``twoHandPinch`` — a derived gesture that fires while
+ * BOTH hands are pinching simultaneously, used for two-handed
+ * resize. The pre-12c.3 single-hand fields (``cursor``,
+ * ``landmarks``, ``isPinching``) are kept on the return type as
+ * aliases for the right hand so existing consumers (HandCursor's
+ * synthetic-event dispatcher) keep working without changes.
  *
- * The hook opens its own ``getUserMedia`` stream rather than sharing
- * with ``useCamera``. Browsers happily multiplex one physical
- * webcam across multiple ``MediaStream`` instances, and keeping
- * the hooks decoupled means hand-tracking can be enabled without
- * the camera-presence feature being on (or vice versa). We
- * revisit stream-sharing once both features ship and we're sure
- * the duplicate inference cost matters.
- *
- * Smoothing: a short exponential moving average is applied to the
- * cursor position so a steady fingertip doesn't jitter pixel-by-
- * pixel. The smoothing is intentionally light (alpha=0.55) — the
- * cursor needs to feel responsive, not floaty.
+ * Handedness mirroring: the user-facing webcam delivers a
+ * non-mirrored image to the detector. From the camera's POV, the
+ * user's right hand appears on the LEFT side of the image, which
+ * MediaPipe labels as "Left". We swap the labels so the rest of the
+ * app sees what the *user* would call their right hand. The visual
+ * cursor X-axis is also flipped (1 - lm.x) for the same reason.
  */
 
 import type { HandLandmarker } from "@mediapipe/tasks-vision";
@@ -44,11 +38,18 @@ const WASM_BASE_URL =
   "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.34/wasm";
 const HAND_MODEL_URL = "/mediapipe/models/hand_landmarker.task";
 
-// Thumb-tip and index-fingertip landmark indices in MediaPipe's
-// 21-point hand model. See:
+// MediaPipe 21-point hand landmark indices.
 // https://developers.google.com/mediapipe/solutions/vision/hand_landmarker
+const WRIST = 0;
 const THUMB_TIP = 4;
 const INDEX_TIP = 8;
+const INDEX_MCP = 5;
+const MIDDLE_MCP = 9;
+const MIDDLE_TIP = 12;
+const RING_MCP = 13;
+const RING_TIP = 16;
+const PINKY_MCP = 17;
+const PINKY_TIP = 20;
 
 // Pinch threshold in normalized image-space units (the landmarks
 // come back as 0..1 ratios of the input frame). Empirically tuned
@@ -61,6 +62,22 @@ const PINCH_DOWN = 0.05;
 // past PINCH_UP. Stops the cursor flickering between pinch-on and
 // pinch-off when fingers hover right at the threshold.
 const PINCH_UP = 0.07;
+
+// Fist detection. A finger is "extended" if its fingertip is
+// significantly farther from the wrist than its MCP knuckle is —
+// straightforward and orientation-independent (works whether the
+// hand is upright, sideways, or upside-down). The thumb is
+// excluded: thumbs sit alongside the palm even in a relaxed open
+// hand, making them noisy as fist signal.
+//
+// The ratio thresholds use hysteresis like pinch: enter a fist
+// when zero non-thumb fingers are extended, leave it once 2+ are
+// extended again. Stops the menu flickering open/closed when the
+// user's hand transitions through a half-curled pose.
+const FIST_RATIO_EXTENDED = 1.6;
+const FIST_FINGERS_FOR_OPEN = 2; // ≥ this count of extended fingers => not a fist
+// Default state when the hand isn't visible at all should still be
+// "no fist" so the menu doesn't spuriously appear.
 
 // Adaptive smoothing for the cursor. The classic exponential
 // moving average is a single trade-off: high alpha = snappy but
@@ -107,6 +124,52 @@ export interface CursorPoint {
   y: number;
 }
 
+/** Per-hand state. Shared shape between left and right hands. */
+export interface HandState {
+  /**
+   * Index-fingertip position in viewport pixels, smoothed and
+   * dead-zoned (right hand only — for the left hand this is the
+   * raw projected fingertip without the cursor smoothing, since
+   * the left hand isn't a pointer).
+   */
+  cursor: CursorPoint;
+  /** All 21 landmarks projected to viewport pixels (mirrored). */
+  landmarks: CursorPoint[];
+  /** Thumb-tip ↔ index-fingertip pinch. Hysteresis applied. */
+  isPinching: boolean;
+  /** Closed-fist gesture (all 4 non-thumb fingers curled in). */
+  isFist: boolean;
+  /**
+   * Midpoint between thumb tip and index fingertip in viewport
+   * pixels. Anchor for pinch-driven gestures (e.g. two-hand
+   * resize). Same value whether or not the hand is currently
+   * pinching — useful for predicting where a future pinch will
+   * land.
+   */
+  pinchPoint: CursorPoint;
+}
+
+export interface TwoHandPinch {
+  /** True only while BOTH hands are pinching simultaneously. */
+  active: boolean;
+  /**
+   * Pixel distance between left and right pinch points right
+   * now. ``0`` when ``active`` is false.
+   */
+  distancePx: number;
+  /**
+   * Pixel distance captured at the instant ``active`` flipped
+   * from false → true. ``null`` when ``active`` is false. Used
+   * by consumers as the denominator for ratio-based scaling.
+   */
+  initialDistancePx: number | null;
+  /**
+   * Midpoint between the two pinches in viewport px, or ``null``
+   * when not active.
+   */
+  midpoint: CursorPoint | null;
+}
+
 export interface UseHandTrackingOptions {
   enabled: boolean;
   /**
@@ -120,15 +183,21 @@ export interface UseHandTrackingOptions {
 export interface UseHandTrackingReturn {
   status: HandTrackingStatus;
   error: string | null;
-  cursor: CursorPoint | null;
+  /** Right-hand state, ``null`` when not visible. */
+  right: HandState | null;
+  /** Left-hand state, ``null`` when not visible. */
+  left: HandState | null;
+  /** Two-handed pinch combo state. */
+  twoHandPinch: TwoHandPinch;
   /**
-   * All 21 hand-landmark positions in viewport-pixel coordinates,
-   * mirrored to match the user-facing camera so the rendered hand
-   * tracks naturally with what the user sees on screen. ``null``
-   * when no hand is visible. The order matches MediaPipe's hand
-   * landmark spec (0=wrist, 4=thumb tip, 8=index tip, etc.).
+   * Backwards-compat alias for the right hand's smoothed cursor.
+   * Pre-12c.3 callers (HandCursor synthetic-event dispatcher)
+   * keep working unchanged.
    */
+  cursor: CursorPoint | null;
+  /** Backwards-compat alias for the right hand's landmarks. */
   landmarks: CursorPoint[] | null;
+  /** Backwards-compat alias for the right hand's pinch state. */
   isPinching: boolean;
   /**
    * Hidden ``<video>`` ref the hook drives. Mount it offscreen so
@@ -140,6 +209,68 @@ export interface UseHandTrackingReturn {
   streamRef: React.RefObject<MediaStream | null>;
 }
 
+interface RawLandmark {
+  x: number;
+  y: number;
+  z?: number;
+}
+
+interface PerHandRefs {
+  smoothed: CursorPoint | null;
+  lastLandmarks: CursorPoint[] | null;
+  pinchLatched: boolean;
+  fistLatched: boolean;
+}
+
+function dist2d(a: RawLandmark, b: RawLandmark): number {
+  return Math.hypot(a.x - b.x, a.y - b.y);
+}
+
+/**
+ * Count how many of the four non-thumb fingers are currently
+ * extended, using fingertip-to-wrist vs MCP-to-wrist distance ratios.
+ */
+function countExtendedFingers(lm: RawLandmark[]): number {
+  if (!lm[WRIST]) return 0;
+  const wrist = lm[WRIST];
+  let extended = 0;
+  const pairs: Array<readonly [number, number]> = [
+    [INDEX_TIP, INDEX_MCP],
+    [MIDDLE_TIP, MIDDLE_MCP],
+    [RING_TIP, RING_MCP],
+    [PINKY_TIP, PINKY_MCP],
+  ];
+  for (const [tipIdx, mcpIdx] of pairs) {
+    const tip = lm[tipIdx];
+    const mcp = lm[mcpIdx];
+    if (!tip || !mcp) continue;
+    const tipDist = dist2d(tip, wrist);
+    const mcpDist = dist2d(mcp, wrist);
+    if (mcpDist > 0 && tipDist / mcpDist >= FIST_RATIO_EXTENDED) {
+      extended++;
+    }
+  }
+  return extended;
+}
+
+function landmarksDiffer(
+  a: CursorPoint[] | null,
+  b: CursorPoint[],
+): boolean {
+  if (!a || a.length !== b.length) return true;
+  for (let i = 0; i < b.length; i++) {
+    const aa = a[i];
+    const bb = b[i];
+    if (
+      Math.abs(aa.x - bb.x) >= LANDMARK_DEDUP_PX ||
+      Math.abs(aa.y - bb.y) >= LANDMARK_DEDUP_PX
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
 export function useHandTracking(
   opts: UseHandTrackingOptions,
 ): UseHandTrackingReturn {
@@ -147,9 +278,14 @@ export function useHandTracking(
 
   const [status, setStatus] = useState<HandTrackingStatus>("off");
   const [error, setError] = useState<string | null>(null);
-  const [cursor, setCursor] = useState<CursorPoint | null>(null);
-  const [landmarks, setLandmarks] = useState<CursorPoint[] | null>(null);
-  const [isPinching, setIsPinching] = useState(false);
+  const [right, setRight] = useState<HandState | null>(null);
+  const [left, setLeft] = useState<HandState | null>(null);
+  const [twoHand, setTwoHand] = useState<TwoHandPinch>({
+    active: false,
+    distancePx: 0,
+    initialDistancePx: null,
+    midpoint: null,
+  });
 
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
@@ -157,17 +293,27 @@ export function useHandTracking(
   const rafRef = useRef<number | null>(null);
   const lastInferAtRef = useRef(0);
 
-  // Smoothed cursor tracked in a ref so the RAF loop can update it
-  // without forcing a re-render every frame. We commit to React
-  // state when the value actually changes by a meaningful amount.
-  const smoothedRef = useRef<CursorPoint | null>(null);
-  // Last landmark array we actually committed to React state.
-  // Used to deduplicate frame-to-frame inference jitter so we
-  // don't re-render the parent tree at the detection rate.
-  const lastLandmarksRef = useRef<CursorPoint[] | null>(null);
-  // Latched pinch state with hysteresis so flicker doesn't drop /
-  // recreate the pinch every other frame.
-  const pinchLatchedRef = useRef(false);
+  // Per-hand stateful refs so the RAF loop can update without
+  // forcing a re-render every frame. We commit to React state
+  // when the value actually changes by a meaningful amount.
+  const rightRefs = useRef<PerHandRefs>({
+    smoothed: null,
+    lastLandmarks: null,
+    pinchLatched: false,
+    fistLatched: false,
+  });
+  const leftRefs = useRef<PerHandRefs>({
+    smoothed: null,
+    lastLandmarks: null,
+    pinchLatched: false,
+    fistLatched: false,
+  });
+  const twoHandRef = useRef<TwoHandPinch>({
+    active: false,
+    distancePx: 0,
+    initialDistancePx: null,
+    midpoint: null,
+  });
 
   const teardown = useCallback(() => {
     if (rafRef.current !== null) {
@@ -195,12 +341,32 @@ export function useHandTracking(
       }
       detectorRef.current = null;
     }
-    smoothedRef.current = null;
-    lastLandmarksRef.current = null;
-    pinchLatchedRef.current = false;
-    setCursor(null);
-    setLandmarks(null);
-    setIsPinching(false);
+    rightRefs.current = {
+      smoothed: null,
+      lastLandmarks: null,
+      pinchLatched: false,
+      fistLatched: false,
+    };
+    leftRefs.current = {
+      smoothed: null,
+      lastLandmarks: null,
+      pinchLatched: false,
+      fistLatched: false,
+    };
+    twoHandRef.current = {
+      active: false,
+      distancePx: 0,
+      initialDistancePx: null,
+      midpoint: null,
+    };
+    setRight(null);
+    setLeft(null);
+    setTwoHand({
+      active: false,
+      distancePx: 0,
+      initialDistancePx: null,
+      midpoint: null,
+    });
   }, []);
 
   useEffect(() => {
@@ -227,12 +393,25 @@ export function useHandTracking(
             delegate: "GPU",
           },
           runningMode: "VIDEO",
-          // One hand for v1 — single-cursor model. Two-hand
-          // gestures (zoom / spread) come in a follow-up.
-          numHands: 1,
-          minHandDetectionConfidence: 0.5,
-          minTrackingConfidence: 0.5,
-          minHandPresenceConfidence: 0.5,
+          // Phase 12c.3: track up to two hands for left/right
+          // asymmetry and two-handed combos. The model is happy at
+          // ~30 fps even tracking both — adds about 4 ms per frame
+          // on a mid-range laptop.
+          numHands: 2,
+          // Confidence thresholds tuned for two-hand simultaneous
+          // detection. The default 0.5 is fine for a single hand
+          // dead-centre in frame, but at sit-down distance with
+          // both hands raised the second hand is often partially
+          // out-of-frame or angled, and the per-frame confidence
+          // dips below 0.5 intermittently. Dropping these to 0.3
+          // keeps both hands tracked smoothly at the cost of
+          // accepting a slightly larger "is this even a hand"
+          // false-positive rate (rare in practice — the landmark
+          // model still has to fit 21 points, which is its own
+          // sanity check).
+          minHandDetectionConfidence: 0.3,
+          minTrackingConfidence: 0.3,
+          minHandPresenceConfidence: 0.3,
         });
         if (cancelled) {
           detector.close();
@@ -276,138 +455,7 @@ export function useHandTracking(
             lastInferAtRef.current = now;
             try {
               const res = det.detectForVideo(v, now);
-              const landmarks = res.landmarks?.[0];
-              if (landmarks && landmarks.length > Math.max(THUMB_TIP, INDEX_TIP)) {
-                const thumb = landmarks[THUMB_TIP];
-                const index = landmarks[INDEX_TIP];
-
-                // Pinch = small Euclidean distance between thumb
-                // tip and index fingertip in normalized 2D space.
-                // Z is ignored — in practice it's noisy and not
-                // needed for clean pinch detection at sit-down
-                // distance.
-                const dx = thumb.x - index.x;
-                const dy = thumb.y - index.y;
-                const dist = Math.hypot(dx, dy);
-                const wasPinching = pinchLatchedRef.current;
-                const nowPinching = wasPinching
-                  ? dist < PINCH_UP
-                  : dist < PINCH_DOWN;
-                if (nowPinching !== wasPinching) {
-                  pinchLatchedRef.current = nowPinching;
-                  setIsPinching(nowPinching);
-                }
-
-                // Mirror X because the camera is the user-facing
-                // one — the user moves their hand right, the
-                // mirrored video shows the hand on the user's
-                // right (which is the screen's right when they're
-                // looking at it). Without the flip the cursor
-                // moves opposite to the user's intent.
-                const vw = window.innerWidth;
-                const vh = window.innerHeight;
-                const targetX = (1 - index.x) * vw;
-                const targetY = index.y * vh;
-
-                // Adaptive smoothing: pick an alpha based on how
-                // fast the raw fingertip is moving. Heavy smoothing
-                // when still, almost no smoothing when fast.
-                const prev = smoothedRef.current;
-                let sx: number;
-                let sy: number;
-                if (prev) {
-                  const speed = Math.hypot(
-                    targetX - prev.x,
-                    targetY - prev.y,
-                  );
-                  const t = Math.min(1, speed / SPEED_FOR_FULL_RESPONSE);
-                  const alpha = ALPHA_MIN + (ALPHA_MAX - ALPHA_MIN) * t;
-                  const candidateX = prev.x + (targetX - prev.x) * alpha;
-                  const candidateY = prev.y + (targetY - prev.y) * alpha;
-                  // Dead-zone: if the smoothed step is smaller
-                  // than DEAD_ZONE_PX, freeze. Stops noise-driven
-                  // drift while the user holds their hand still.
-                  const dx = candidateX - prev.x;
-                  const dy = candidateY - prev.y;
-                  if (Math.hypot(dx, dy) < DEAD_ZONE_PX) {
-                    sx = prev.x;
-                    sy = prev.y;
-                  } else {
-                    sx = candidateX;
-                    sy = candidateY;
-                  }
-                } else {
-                  sx = targetX;
-                  sy = targetY;
-                }
-                smoothedRef.current = { x: sx, y: sy };
-                // Only push the cursor through React state when
-                // it shifts at least a quarter-pixel — sub-pixel
-                // updates trigger needless re-renders without
-                // visibly moving the overlay.
-                setCursor((curr) => {
-                  if (
-                    curr &&
-                    Math.abs(curr.x - sx) < 0.25 &&
-                    Math.abs(curr.y - sy) < 0.25
-                  ) {
-                    return curr;
-                  }
-                  return { x: sx, y: sy };
-                });
-
-                // Project all 21 landmarks into viewport pixels
-                // so the visual layer can render the whole hand,
-                // not just the cursor. Same mirror as the cursor
-                // so the rendered hand matches what the user sees.
-                //
-                // Skip the React state commit when no landmark has
-                // visibly moved (≥ LANDMARK_DEDUP_PX). MediaPipe
-                // returns slightly different coordinates every
-                // frame even when the hand is perfectly still,
-                // and without this guard we'd push a fresh array
-                // ~60×/s, blowing up the useMemo identity and
-                // re-rendering the whole ChatWindow tree even when
-                // the cursor's own dead-zone has frozen the dot.
-                const projected: CursorPoint[] = landmarks.map((lm) => ({
-                  x: (1 - lm.x) * vw,
-                  y: lm.y * vh,
-                }));
-                const prevProjected = lastLandmarksRef.current;
-                let landmarksChanged = true;
-                if (prevProjected && prevProjected.length === projected.length) {
-                  landmarksChanged = false;
-                  for (let i = 0; i < projected.length; i++) {
-                    const a = projected[i];
-                    const b = prevProjected[i];
-                    if (
-                      Math.abs(a.x - b.x) >= LANDMARK_DEDUP_PX ||
-                      Math.abs(a.y - b.y) >= LANDMARK_DEDUP_PX
-                    ) {
-                      landmarksChanged = true;
-                      break;
-                    }
-                  }
-                }
-                if (landmarksChanged) {
-                  lastLandmarksRef.current = projected;
-                  setLandmarks(projected);
-                }
-              } else {
-                // No hand visible. Stop holding pinch (drops a
-                // drag gesture if one was active) and clear the
-                // cursor so the overlay disappears.
-                if (pinchLatchedRef.current) {
-                  pinchLatchedRef.current = false;
-                  setIsPinching(false);
-                }
-                if (smoothedRef.current !== null) {
-                  smoothedRef.current = null;
-                  setCursor(null);
-                  setLandmarks(null);
-                  lastLandmarksRef.current = null;
-                }
-              }
+              processFrame(res);
             } catch {
               // Single-frame failure isn't fatal — skip and try
               // again on the next tick.
@@ -436,22 +484,310 @@ export function useHandTracking(
       }
     })();
 
+    /**
+     * Process a single MediaPipe inference result: split into left
+     * and right hands (with the camera-mirror swap), apply pinch /
+     * fist detection per hand, smooth the right cursor, project
+     * landmarks to viewport pixels, dedupe, and commit any state
+     * changes to React.
+     */
+    function processFrame(res: {
+      landmarks?: RawLandmark[][];
+      handednesses?: Array<Array<{ categoryName?: string }>>;
+    }) {
+      const allHands = res.landmarks ?? [];
+      const allLabels = res.handednesses ?? [];
+      const vw = window.innerWidth;
+      const vh = window.innerHeight;
+
+      let rawRight: RawLandmark[] | null = null;
+      let rawLeft: RawLandmark[] | null = null;
+      // First pass: collect every valid hand with its
+      // wrist-x position and MediaPipe-reported handedness
+      // (after the user-perspective swap). We need both pieces
+      // of info to reliably split hands when MediaPipe collides
+      // their labels (see below).
+      type Detected = { lm: RawLandmark[]; isUserRight: boolean; wristX: number };
+      const detected: Detected[] = [];
+      for (let i = 0; i < allHands.length; i++) {
+        const lm = allHands[i];
+        if (!lm || lm.length < 21) continue;
+        const label = allLabels[i]?.[0]?.categoryName ?? "Right";
+        // MediaPipe's handedness is from the camera's POV. Our
+        // user-facing camera shows a non-mirrored image, so the
+        // user's right hand appears on the LEFT side of the frame
+        // and gets labelled "Left". Swap so consumers see the
+        // hand from the user's perspective.
+        const isUserRight = label === "Left";
+        const wristX = lm[WRIST]?.x ?? 0.5;
+        detected.push({ lm, isUserRight, wristX });
+      }
+
+      // Route detections to right/left slots. MediaPipe's
+      // handedness classifier is independent per hand and
+      // sometimes labels both detections the same (e.g. both
+      // "Right"), especially when hands are mirrored to each
+      // other or one is held palm-out vs. palm-in. Naive
+      // first-match-per-side routing would drop the second
+      // hand entirely. Disambiguate via spatial position when
+      // labels collide: in our non-mirrored camera frame, the
+      // user's right hand sits at SMALLER x (left side of
+      // image), the user's left hand at LARGER x.
+      if (detected.length === 1) {
+        const d = detected[0];
+        if (d.isUserRight) rawRight = d.lm;
+        else rawLeft = d.lm;
+      } else if (detected.length >= 2) {
+        const [a, b] = detected;
+        if (a.isUserRight !== b.isUserRight) {
+          // Distinct labels — trust them.
+          if (a.isUserRight) {
+            rawRight = a.lm;
+            rawLeft = b.lm;
+          } else {
+            rawRight = b.lm;
+            rawLeft = a.lm;
+          }
+        } else {
+          // Collision — split by wrist x. Smaller x = user's
+          // right hand (left side of camera frame).
+          if (a.wristX < b.wristX) {
+            rawRight = a.lm;
+            rawLeft = b.lm;
+          } else {
+            rawRight = b.lm;
+            rawLeft = a.lm;
+          }
+        }
+      }
+
+      const nextRight = rawRight
+        ? computeHandState(rawRight, rightRefs.current, vw, vh, true)
+        : null;
+      const nextLeft = rawLeft
+        ? computeHandState(rawLeft, leftRefs.current, vw, vh, false)
+        : null;
+
+      // Reset per-hand refs when a hand leaves the frame so
+      // re-entry starts from a clean baseline. Without this,
+      // ``smoothed`` keeps the last position (the EMA blend then
+      // drags the cursor in from the old spot for 2-3 frames),
+      // and the pinch / fist latches stay set (a hand re-entering
+      // mid-gesture in the hysteresis band would re-fire the
+      // latched gesture without the user actually pinching).
+      if (!rawRight) {
+        rightRefs.current.smoothed = null;
+        rightRefs.current.pinchLatched = false;
+        rightRefs.current.fistLatched = false;
+        rightRefs.current.lastLandmarks = null;
+      }
+      if (!rawLeft) {
+        leftRefs.current.smoothed = null;
+        leftRefs.current.pinchLatched = false;
+        leftRefs.current.fistLatched = false;
+        leftRefs.current.lastLandmarks = null;
+      }
+
+      // Commit per-hand state if it materially changed.
+      setRight((curr) => (handStateEqual(curr, nextRight) ? curr : nextRight));
+      setLeft((curr) => (handStateEqual(curr, nextLeft) ? curr : nextLeft));
+
+      // Two-hand pinch derived gesture. Treat a fisted left hand
+      // as NOT a deliberate pinch, even if the thumb-to-index
+      // distance falls below threshold (a closed fist tucks the
+      // thumb against the fingers, which incidentally trips the
+      // pinch latch). Without this guard, a left-fist + right-
+      // pinch would silently start scaling the widget under the
+      // cursor while the user thinks they're just opening the
+      // Quick Tools menu.
+      const bothPinching =
+        !!nextRight &&
+        !!nextLeft &&
+        nextRight.isPinching &&
+        nextLeft.isPinching &&
+        !nextLeft.isFist;
+      const prevTwo = twoHandRef.current;
+      let nextTwo: TwoHandPinch;
+      if (bothPinching && nextRight && nextLeft) {
+        const rp = nextRight.pinchPoint;
+        const lp = nextLeft.pinchPoint;
+        const distancePx = Math.hypot(rp.x - lp.x, rp.y - lp.y);
+        const initial = prevTwo.active
+          ? prevTwo.initialDistancePx
+          : distancePx;
+        nextTwo = {
+          active: true,
+          distancePx,
+          initialDistancePx: initial,
+          midpoint: { x: (rp.x + lp.x) / 2, y: (rp.y + lp.y) / 2 },
+        };
+      } else {
+        nextTwo = {
+          active: false,
+          distancePx: 0,
+          initialDistancePx: null,
+          midpoint: null,
+        };
+      }
+      twoHandRef.current = nextTwo;
+      setTwoHand((curr) => (twoHandEqual(curr, nextTwo) ? curr : nextTwo));
+    }
+
+    /**
+     * Build a HandState from a single set of raw MediaPipe
+     * landmarks, applying per-hand smoothing / hysteresis /
+     * landmark dedup. Mutates the ``refs`` object in place so the
+     * next frame sees this frame's tail state.
+     *
+     * ``isRight`` controls cursor smoothing: only the right (cursor)
+     * hand gets the full adaptive-EMA + dead-zone treatment. The
+     * left hand's "cursor" is just the raw projected fingertip,
+     * since it's not driving a pointer.
+     */
+    function computeHandState(
+      lm: RawLandmark[],
+      refs: PerHandRefs,
+      vw: number,
+      vh: number,
+      isRight: boolean,
+    ): HandState {
+      const thumb = lm[THUMB_TIP];
+      const index = lm[INDEX_TIP];
+      const dx = thumb.x - index.x;
+      const dy = thumb.y - index.y;
+      const pinchDist = Math.hypot(dx, dy);
+      const wasPinching = refs.pinchLatched;
+      const nowPinching = wasPinching
+        ? pinchDist < PINCH_UP
+        : pinchDist < PINCH_DOWN;
+      refs.pinchLatched = nowPinching;
+
+      const extended = countExtendedFingers(lm);
+      const wasFist = refs.fistLatched;
+      const nowFist = wasFist
+        ? extended < FIST_FINGERS_FOR_OPEN
+        : extended === 0;
+      refs.fistLatched = nowFist;
+
+      // Project all landmarks into viewport pixels (X mirrored).
+      const projected: CursorPoint[] = lm.map((p) => ({
+        x: (1 - p.x) * vw,
+        y: p.y * vh,
+      }));
+
+      // Pinch midpoint in viewport space (use the projected
+      // values so it matches the rendered hand exactly).
+      const pthumb = projected[THUMB_TIP];
+      const pindex = projected[INDEX_TIP];
+      const pinchPoint: CursorPoint = {
+        x: (pthumb.x + pindex.x) / 2,
+        y: (pthumb.y + pindex.y) / 2,
+      };
+
+      // Cursor: raw target = projected index fingertip. For the
+      // right hand we run it through adaptive EMA + dead-zone for
+      // a smooth pointer feel; for the left hand we just snap to
+      // the raw value (it's a hand-pose indicator, not a pointer).
+      const targetX = pindex.x;
+      const targetY = pindex.y;
+      let cursorX = targetX;
+      let cursorY = targetY;
+      if (isRight) {
+        const prev = refs.smoothed;
+        if (prev) {
+          const speed = Math.hypot(targetX - prev.x, targetY - prev.y);
+          const t = Math.min(1, speed / SPEED_FOR_FULL_RESPONSE);
+          const alpha = ALPHA_MIN + (ALPHA_MAX - ALPHA_MIN) * t;
+          const candX = prev.x + (targetX - prev.x) * alpha;
+          const candY = prev.y + (targetY - prev.y) * alpha;
+          if (Math.hypot(candX - prev.x, candY - prev.y) < DEAD_ZONE_PX) {
+            cursorX = prev.x;
+            cursorY = prev.y;
+          } else {
+            cursorX = candX;
+            cursorY = candY;
+          }
+        }
+      }
+      refs.smoothed = { x: cursorX, y: cursorY };
+
+      // Landmark dedup: reuse the previous projected array
+      // identity if no landmark moved >= threshold. Critical
+      // for re-render perf — see notes on LANDMARK_DEDUP_PX.
+      let landmarksOut = projected;
+      if (!landmarksDiffer(refs.lastLandmarks, projected)) {
+        landmarksOut = refs.lastLandmarks ?? projected;
+      } else {
+        refs.lastLandmarks = projected;
+      }
+
+      return {
+        cursor: { x: cursorX, y: cursorY },
+        landmarks: landmarksOut,
+        isPinching: nowPinching,
+        isFist: nowFist,
+        pinchPoint,
+      };
+    }
+
     return () => {
       cancelled = true;
       teardown();
     };
   }, [enabled, detectionIntervalMs, teardown]);
 
+  // Backwards-compat aliases for pre-12c.3 callers (HandCursor's
+  // synthetic-event dispatcher reads cursor / landmarks /
+  // isPinching directly).
+  const cursor = right?.cursor ?? null;
+  const landmarks = right?.landmarks ?? null;
+  const isPinching = right?.isPinching ?? false;
+
   return useMemo(
     () => ({
       status,
       error,
+      right,
+      left,
+      twoHandPinch: twoHand,
       cursor,
       landmarks,
       isPinching,
       videoRef,
       streamRef,
     }),
-    [status, error, cursor, landmarks, isPinching],
+    [status, error, right, left, twoHand, cursor, landmarks, isPinching],
   );
+}
+
+function handStateEqual(
+  a: HandState | null,
+  b: HandState | null,
+): boolean {
+  if (!a && !b) return true;
+  if (!a || !b) return false;
+  // Cursor: small tolerance, same as pre-12c.3 (sub-quarter-pixel
+  // updates aren't visible and shouldn't trigger renders).
+  if (
+    Math.abs(a.cursor.x - b.cursor.x) >= 0.25 ||
+    Math.abs(a.cursor.y - b.cursor.y) >= 0.25
+  )
+    return false;
+  if (a.isPinching !== b.isPinching) return false;
+  if (a.isFist !== b.isFist) return false;
+  // Landmarks: identity check is enough because the hook reuses
+  // the previous array reference when nothing moved past the
+  // dedup threshold.
+  if (a.landmarks !== b.landmarks) return false;
+  // pinchPoint moves with the landmarks; if the array reference
+  // is the same we can also skip this comparison.
+  return true;
+}
+
+function twoHandEqual(a: TwoHandPinch, b: TwoHandPinch): boolean {
+  if (a.active !== b.active) return false;
+  if (!a.active && !b.active) return true;
+  if (Math.abs(a.distancePx - b.distancePx) >= 0.5) return false;
+  if (a.initialDistancePx !== b.initialDistancePx) return false;
+  return true;
 }

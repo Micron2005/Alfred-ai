@@ -22,6 +22,7 @@ import { useWakeWord } from "@/lib/useWakeWord";
 import { useCamera } from "@/lib/useCamera";
 import { useHandTracking } from "@/lib/useHandTracking";
 import { HandCursor } from "@/components/HandCursor";
+import { QuickToolsMenu } from "@/components/QuickToolsMenu";
 import { Orb } from "@/components/Orb";
 import { SpotifyPlayer } from "@/components/SpotifyPlayer";
 import { CameraPreview } from "@/components/CameraPreview";
@@ -126,6 +127,115 @@ export function ChatWindow() {
   // ``lib/hudLayout.ts`` for the localStorage shape.
   const hud = useHudLayout();
 
+  // Quick-Tools radial menu. Triggered when the LEFT hand closes
+  // into a fist (Phase 12c.3). Items are activated by right-hand
+  // pinch. State lives here (not in a hook of its own) because
+  // the menu items depend on the same handlers (voice / camera /
+  // mode / composer) that ChatWindow already exposes.
+  const [quickToolsVisible, setQuickToolsVisible] = useState(false);
+  const [quickToolsAnchor, setQuickToolsAnchor] = useState<
+    { x: number; y: number } | null
+  >(null);
+  const quickTools = {
+    visible: quickToolsVisible,
+    anchor: quickToolsAnchor,
+    dismiss: useCallback(() => {
+      setQuickToolsVisible(false);
+      setQuickToolsAnchor(null);
+    }, []),
+  };
+
+  // Open the menu the moment the left fist latches; close on
+  // un-fist. Anchor freezes at the *right* cursor's current
+  // position so the user only has to make a small motion to
+  // click an item. Falls back to the viewport center if the
+  // right hand isn't visible (rare but possible if the user
+  // fists their left hand before bringing their right into frame).
+  const leftFist = hand.left?.isFist ?? false;
+  const prevLeftFistRef = useRef(false);
+  const rightCursorRef = useRef(hand.right?.cursor ?? null);
+  rightCursorRef.current = hand.right?.cursor ?? null;
+  useEffect(() => {
+    if (leftFist && !prevLeftFistRef.current) {
+      const anchor =
+        rightCursorRef.current ??
+        (typeof window !== "undefined"
+          ? { x: window.innerWidth / 2, y: window.innerHeight / 2 }
+          : { x: 600, y: 400 });
+      setQuickToolsAnchor(anchor);
+      setQuickToolsVisible(true);
+    } else if (!leftFist && prevLeftFistRef.current) {
+      setQuickToolsVisible(false);
+      setQuickToolsAnchor(null);
+    }
+    prevLeftFistRef.current = leftFist;
+  }, [leftFist]);
+
+  // Two-hand pinch resize. While both hands are pinching, scale
+  // the widget under the right cursor proportional to how much
+  // the user spreads or squeezes the two pinch points.
+  //
+  // Lifecycle:
+  //   - active flips false → true: capture target widget id +
+  //     its initial w/h (resolving ``"auto"`` from the rendered
+  //     element's bounding box) + the initial pinch distance.
+  //   - while active: read the current distance and apply
+  //     ``newSize = initialSize * (currentDistance / initialDistance)``
+  //     to both width and height. Floored at 80 px so a tight
+  //     pinch can't shrink a widget into invisibility.
+  //   - active flips true → false: clear the captured target.
+  //     The last ``updateWidget`` call already committed the
+  //     final size — no extra commit needed.
+  //
+  // Only kicks in when the customizable HUD is enabled
+  // (``hud.customEnabled``) — otherwise widgets render in the
+  // default flow layout where width/height aren't user-driven.
+  const twoHandActive = hand.twoHandPinch.active;
+  const twoHandInitial = hand.twoHandPinch.initialDistancePx;
+  const twoHandDist = hand.twoHandPinch.distancePx;
+  const resizeTargetRef = useRef<{
+    id: HudWidgetId;
+    initialW: number;
+    initialH: number;
+  } | null>(null);
+  // Stable references for callbacks the effect depends on. The
+  // effect must NOT depend on ``hud.layout`` or it would re-run
+  // every frame the widget resizes (which dirties layout).
+  const updateWidgetRef = useRef(hud.updateWidget);
+  updateWidgetRef.current = hud.updateWidget;
+  const layoutRef = useRef(hud.layout);
+  layoutRef.current = hud.layout;
+  const customEnabledRef = useRef(hud.customEnabled);
+  customEnabledRef.current = hud.customEnabled;
+  useEffect(() => {
+    if (!twoHandActive) {
+      resizeTargetRef.current = null;
+      return;
+    }
+    // Capture target on first frame of the gesture.
+    if (!resizeTargetRef.current && customEnabledRef.current) {
+      const cursor = rightCursorRef.current;
+      if (!cursor) return;
+      const el = document.elementFromPoint(cursor.x, cursor.y);
+      const widgetEl = el?.closest("[data-hud-widget]") as HTMLElement | null;
+      const id = widgetEl?.dataset.hudWidget as HudWidgetId | undefined;
+      if (!id) return;
+      const layout = layoutRef.current[id];
+      if (!layout) return;
+      const rect = widgetEl?.getBoundingClientRect();
+      const initialW = layout.w === "auto" ? (rect?.width ?? 240) : layout.w;
+      const initialH = layout.h === "auto" ? (rect?.height ?? 180) : layout.h;
+      resizeTargetRef.current = { id, initialW, initialH };
+    }
+    // Apply the scale.
+    const target = resizeTargetRef.current;
+    if (!target || !twoHandInitial || twoHandInitial <= 0) return;
+    const ratio = twoHandDist / twoHandInitial;
+    const w = Math.max(80, Math.round(target.initialW * ratio));
+    const h = Math.max(80, Math.round(target.initialH * ratio));
+    updateWidgetRef.current(target.id, { w, h });
+  }, [twoHandActive, twoHandDist, twoHandInitial]);
+
   // Tears down the in-flight TTS pipeline (paused audio, analyser
   // graph, object URL, RAF timer) but deliberately does NOT clear
   // the ``speaking`` state — that's the caller's responsibility,
@@ -196,6 +306,50 @@ export function ChatWindow() {
       localStorage.setItem(FULL_HUD_KEY, enabled ? "1" : "0");
     }
   }
+
+  // Items rendered inside the QuickToolsMenu when the left fist
+  // is held. Each maps to an existing toolbar handler so behavior
+  // stays consistent with the on-screen buttons. ⌨ "Keyboard"
+  // simply focuses the composer text input — your physical
+  // keyboard takes over from there. A full air-pinch virtual
+  // keyboard is a follow-up phase if the gesture sticks.
+  const quickToolsItems = [
+    {
+      id: "voice",
+      glyph: "🔊",
+      label: "Voice",
+      active: voiceOut,
+      onActivate: () => setVoiceOutPersisted(!voiceOut),
+    },
+    {
+      id: "wake",
+      glyph: "🎙",
+      label: "Wake",
+      active: handsFree,
+      onActivate: () => setHandsFreePersisted(!handsFree),
+    },
+    {
+      id: "camera",
+      glyph: "📷",
+      label: "Camera",
+      active: cameraOn,
+      onActivate: () => setCameraPersisted(!cameraOn),
+    },
+    {
+      id: "keyboard",
+      glyph: "⌨",
+      label: "Keyboard",
+      active: false,
+      onActivate: () => composerRef.current?.focus(),
+    },
+    {
+      id: "hud",
+      glyph: "🌗",
+      label: "HUD",
+      active: fullHud,
+      onActivate: () => setFullHudPersisted(!fullHud),
+    },
+  ];
 
   function toggleSidebar() {
     setSidebarCollapsed((prev) => {
@@ -1023,9 +1177,14 @@ export function ChatWindow() {
         />
         <HandCursor
           enabled={hand.status === "ready"}
-          cursor={hand.cursor}
-          landmarks={hand.landmarks}
-          isPinching={hand.isPinching}
+          rightHand={hand.right}
+          leftHand={hand.left}
+        />
+        <QuickToolsMenu
+          visible={quickTools.visible}
+          anchor={quickTools.anchor}
+          items={quickToolsItems}
+          onActivated={quickTools.dismiss}
         />
       </div>
     </div>
