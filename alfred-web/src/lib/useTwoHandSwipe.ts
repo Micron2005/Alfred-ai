@@ -61,7 +61,16 @@ export interface UseTwoHandSwipeOptions {
 const MIN_SWIPE_PX = 250;
 const MAX_VERT_DRIFT_PX = 140;
 const MAX_GESTURE_MS = 700;
-const COOLDOWN_MS = 900;
+// Cooldown after a successful swipe — long enough that the user's
+// natural "bring hands back to centre" arm motion doesn't register
+// as an immediate counter-swipe (which would undo the tab change).
+// 1.6 s is comfortable for a deliberate "swipe, settle, swipe again".
+const COOLDOWN_MS = 1600;
+// After a swipe, also require BOTH hands to leave the central
+// detection band (above 25 % or below 75 %) at least once before
+// the next detection arms — a positive "reset" gesture so the
+// detector doesn't latch on the return-swing arm motion.
+const POST_SWIPE_REQUIRES_EXIT = true;
 
 interface SwipeState {
   startX_left: number;
@@ -84,6 +93,11 @@ export function useTwoHandSwipe(opts: UseTwoHandSwipeOptions) {
 
   const stateRef = useRef<SwipeState | null>(null);
   const cooldownUntilRef = useRef(0);
+  // After a successful swipe, this latches ``true`` and only clears
+  // once both hands have left the central detection band — forces
+  // the user to make a deliberate reset gesture between swipes
+  // instead of the detector latching on their return-swing.
+  const armPendingResetRef = useRef(false);
   const onSwipeRef = useRef(onSwipe);
   const onDebugRef = useRef(onDebug);
   onSwipeRef.current = onSwipe;
@@ -129,6 +143,20 @@ export function useTwoHandSwipe(opts: UseTwoHandSwipeOptions) {
       const hi = vh * 0.75;
       const inBand =
         left.y >= lo && left.y <= hi && right.y >= lo && right.y <= hi;
+      // Once a swipe fires we latch ``armPendingResetRef``; only
+      // clear it when BOTH hands exit the central band (the user
+      // raises or lowers their hands — a deliberate reset). This
+      // prevents the post-swipe "return arms to centre" motion
+      // from immediately registering as a counter-swipe.
+      if (POST_SWIPE_REQUIRES_EXIT && armPendingResetRef.current) {
+        if (!inBand) {
+          armPendingResetRef.current = false;
+        } else {
+          stateRef.current = null;
+          raf = requestAnimationFrame(tick);
+          return;
+        }
+      }
       if (!inBand) {
         stateRef.current = null;
         raf = requestAnimationFrame(tick);
@@ -187,6 +215,8 @@ export function useTwoHandSwipe(opts: UseTwoHandSwipeOptions) {
         onSwipeRef.current(direction);
         stateRef.current = null;
         cooldownUntilRef.current = now + COOLDOWN_MS;
+        // Latch — block detection until the user clears the band.
+        armPendingResetRef.current = true;
       }
 
       raf = requestAnimationFrame(tick);

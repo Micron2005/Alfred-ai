@@ -40,7 +40,8 @@ export type HudWidgetId =
   | "camera"
   | "workout-coach"
   | "face-recognition"
-  | "earth-hologram";
+  | "earth-hologram"
+  | "system-status";
 
 export interface WidgetLayout {
   /** Top-left X position (px) inside the main pane. */
@@ -64,15 +65,17 @@ export type HudLayoutState = Record<HudWidgetId, WidgetLayout>;
  *  the main pane so they don't overlap the orb (which sits centred
  *  by default). The user can drag them anywhere from there. */
 export const DEFAULT_LAYOUT: HudLayoutState = {
-  clock: { x: 24, y: 16, w: 280, h: "auto", visible: true },
-  "weather-current": { x: 320, y: 16, w: 320, h: "auto", visible: true },
-  "weather-strip": { x: 24, y: 240, w: 720, h: "auto", visible: true },
-  orb: { x: 220, y: 60, w: 360, h: 200, visible: true },
-  spotify: { x: 24, y: 320, w: 480, h: "auto", visible: true },
-  camera: { x: 660, y: 16, w: 240, h: 180, visible: true },
-  "workout-coach": { x: 660, y: 220, w: 320, h: 360, visible: false },
-  "face-recognition": { x: 660, y: 600, w: 280, h: "auto", visible: false },
-  "earth-hologram": { x: 200, y: 280, w: 420, h: 360, visible: true },
+  clock: { x: 24, y: 80, w: 280, h: "auto", visible: true },
+  "weather-current": { x: 880, y: 80, w: 260, h: "auto", visible: true },
+  "weather-strip": { x: 24, y: 720, w: 720, h: "auto", visible: true },
+  // Orb sits centred — title block & greeting overlay sit above it.
+  orb: { x: 480, y: 240, w: 320, h: 200, visible: true },
+  spotify: { x: 24, y: 540, w: 460, h: "auto", visible: true },
+  camera: { x: 880, y: 480, w: 260, h: 180, visible: true },
+  "workout-coach": { x: 880, y: 240, w: 260, h: 220, visible: true },
+  "face-recognition": { x: 880, y: 700, w: 260, h: "auto", visible: true },
+  "earth-hologram": { x: 320, y: 460, w: 480, h: 320, visible: true },
+  "system-status": { x: 1160, y: 80, w: 200, h: "auto", visible: true },
 };
 
 const ALL_IDS: HudWidgetId[] = [
@@ -85,6 +88,7 @@ const ALL_IDS: HudWidgetId[] = [
   "workout-coach",
   "face-recognition",
   "earth-hologram",
+  "system-status",
 ];
 
 export const WIDGET_LABELS: Record<HudWidgetId, string> = {
@@ -97,6 +101,7 @@ export const WIDGET_LABELS: Record<HudWidgetId, string> = {
   "workout-coach": "Form Coach",
   "face-recognition": "Recognition",
   "earth-hologram": "Earth",
+  "system-status": "System Status",
 };
 
 function cloneDefault(): HudLayoutState {

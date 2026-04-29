@@ -61,6 +61,14 @@ export function HoloMapView({ center, onClose, initialZoom = 14 }: Props) {
   const [coords, setCoords] = useState<{ lat: number; lon: number } | null>(
     center,
   );
+  // ``loading`` stays true until MapLibre fires its ``idle`` event
+  // (= every visible tile decoded). Without this overlay the user
+  // sees a featureless black canvas during the multi-second tile
+  // fetch and assumes the map is broken.
+  const [loading, setLoading] = useState(true);
+  // ``loadError`` is non-null if the style or tile server itself
+  // failed (CORS, offline, 5xx). Shown as a friendly inline banner.
+  const [loadError, setLoadError] = useState<string | null>(null);
 
   // Mount the map exactly once. Subsequent center changes apply via
   // map.flyTo, NOT by re-mounting.
@@ -87,6 +95,29 @@ export function HoloMapView({ center, onClose, initialZoom = 14 }: Props) {
 
     map.addControl(new maplibregl.NavigationControl({ visualizePitch: true }));
     map.addControl(new maplibregl.ScaleControl({ unit: "metric" }), "bottom-left");
+
+    // The container can momentarily mount at 0×0 inside a flexbox
+    // overlay before the browser has computed its final size; map
+    // would render a single black tile. Force a resize on the next
+    // animation frame and again 200 ms later to handle slow layout.
+    requestAnimationFrame(() => map.resize());
+    const resizeTimer = setTimeout(() => map.resize(), 200);
+
+    map.on("idle", () => {
+      // First successful render — drop the overlay.
+      setLoading(false);
+    });
+    map.on("error", (e) => {
+      // Surface tile / style errors so the user gets a real
+      // message instead of an indefinite black screen. We don't
+      // tear the map down — partial styles still render.
+      setLoadError(
+        e.error?.message ??
+          "Could not load 3D map tiles. Check your internet connection.",
+      );
+      // eslint-disable-next-line no-console
+      console.warn("[holomap] map error", e);
+    });
 
     map.on("load", () => {
       // Try to add a 3D building extrusion layer. The OFM/OMT
@@ -167,6 +198,7 @@ export function HoloMapView({ center, onClose, initialZoom = 14 }: Props) {
 
     mapRef.current = map;
     return () => {
+      clearTimeout(resizeTimer);
       map.remove();
       mapRef.current = null;
       markerRef.current = null;
@@ -433,36 +465,105 @@ export function HoloMapView({ center, onClose, initialZoom = 14 }: Props) {
           hologram. Hue-rotate centres the colour spectrum on cyan,
           saturate boosts colour density, contrast separates buildings
           from the ground plane. */}
-      <div
-        ref={mapDivRef}
-        data-testid="holo-map-leaflet"
-        style={{
-          flex: 1,
-          minHeight: 0,
-          filter:
-            "hue-rotate(170deg) saturate(1.3) brightness(0.85) contrast(1.15)",
-          background: "#02060d",
-        }}
-      />
+      <div style={{ position: "relative", flex: 1, minHeight: 0 }}>
+        <div
+          ref={mapDivRef}
+          data-testid="holo-map-leaflet"
+          style={{
+            position: "absolute",
+            inset: 0,
+            filter:
+              "hue-rotate(170deg) saturate(1.3) brightness(0.85) contrast(1.15)",
+            background: "#02060d",
+          }}
+        />
 
-      <div
-        style={{
-          position: "absolute",
-          left: 22,
-          bottom: 30,
-          padding: "6px 10px",
-          background: "rgba(8,12,22,0.78)",
-          border: "1px solid var(--border)",
-          backdropFilter: "blur(10px)",
-          fontSize: 9,
-          letterSpacing: 1.4,
-          color: "var(--hud)",
-          opacity: 0.8,
-          pointerEvents: "none",
-        }}
-        className="mono"
-      >
-        DRAG · PAN   RIGHT-DRAG · ROTATE / TILT   PINCH · ZOOM
+        {/* Loading overlay — shown until the first ``idle`` event.
+            Pulse animation reuses the global ``hud-pulse`` keyframes
+            from globals.css (already used by the orb). */}
+        {loading && !loadError ? (
+          <div
+            data-testid="holo-map-loading"
+            style={{
+              position: "absolute",
+              inset: 0,
+              display: "flex",
+              flexDirection: "column",
+              alignItems: "center",
+              justifyContent: "center",
+              gap: 14,
+              pointerEvents: "none",
+              background: "rgba(2, 6, 13, 0.4)",
+            }}
+          >
+            <span
+              className="mono"
+              style={{
+                fontSize: 12,
+                letterSpacing: 4,
+                color: "var(--hud)",
+                textShadow: "0 0 10px var(--orb-glow)",
+                animation: "hud-pulse 1.6s ease-in-out infinite",
+              }}
+            >
+              INITIALISING 3D MAP …
+            </span>
+            <span
+              className="mono"
+              style={{
+                fontSize: 9,
+                letterSpacing: 1.5,
+                color: "var(--muted)",
+                opacity: 0.7,
+              }}
+            >
+              FETCHING TERRAIN · STREETS · BUILDINGS
+            </span>
+          </div>
+        ) : null}
+
+        {loadError ? (
+          <div
+            data-testid="holo-map-error"
+            style={{
+              position: "absolute",
+              top: 12,
+              left: "50%",
+              transform: "translateX(-50%)",
+              padding: "8px 14px",
+              border: "1px solid var(--accent)",
+              background: "rgba(40, 8, 8, 0.85)",
+              color: "var(--accent)",
+              fontSize: 12,
+              letterSpacing: 0.5,
+              maxWidth: 480,
+              textAlign: "center",
+            }}
+            className="mono"
+          >
+            {loadError}
+          </div>
+        ) : null}
+
+        <div
+          style={{
+            position: "absolute",
+            left: 22,
+            bottom: 30,
+            padding: "6px 10px",
+            background: "rgba(8,12,22,0.78)",
+            border: "1px solid var(--border)",
+            backdropFilter: "blur(10px)",
+            fontSize: 9,
+            letterSpacing: 1.4,
+            color: "var(--hud)",
+            opacity: 0.8,
+            pointerEvents: "none",
+          }}
+          className="mono"
+        >
+          DRAG · PAN   RIGHT-DRAG · ROTATE / TILT   PINCH · ZOOM
+        </div>
       </div>
     </div>
   );

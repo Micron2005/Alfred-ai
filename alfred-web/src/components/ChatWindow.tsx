@@ -963,7 +963,21 @@ export function ChatWindow() {
       <HudFrame enabled={activeTab === "hud"} />
       {activeTab === "hud" ? (
         <>
-          <SystemStatus indicators={systemIndicators} />
+          {/* System status pill — wrapped in a HudWidget so the user
+              can move/resize/hide it just like every other widget on
+              the HUD. */}
+          {hud.layout["system-status"].visible ? (
+            <HudWidget
+              id="system-status"
+              label={WIDGET_LABELS["system-status"]}
+              layout={hud.layout["system-status"]}
+              customEnabled={hud.customEnabled}
+              onMove={(p) => hud.updateWidget("system-status", p)}
+              onHide={() => hud.hideWidget("system-status")}
+            >
+              <SystemStatus indicators={systemIndicators} />
+            </HudWidget>
+          ) : null}
           <OperationsLog entries={opsLog.entries} />
         </>
       ) : null}
@@ -1211,15 +1225,23 @@ export function ChatWindow() {
           />
         ) : null}
 
-        {hud.customEnabled ? (
-          <ResponsiveHudCanvas>
-            {(scale) => (
-              <>
+        {/* The HUD canvas is now ALWAYS rendered, regardless of
+            whether ``customEnabled`` is on. That way widgets stay
+            where the user dragged them — even after they toggle
+            customize off. ``customEnabled`` only controls whether
+            drag/resize/hide handles are visible, not whether the
+            canvas is mounted. (The previous behaviour was that
+            disabling customize reverted the layout to the default
+            flow, which the user reported as "I can move things
+            around but they don't stay".) */}
+        <ResponsiveHudCanvas>
+          {(scale) => (
+            <>
                 <HudWidget
                   id="clock"
                   label={WIDGET_LABELS.clock}
                   layout={hud.layout.clock}
-                  customEnabled
+                  customEnabled={hud.customEnabled}
                   scale={scale}
                   onMove={(p) => hud.updateWidget("clock", p)}
                   onHide={() => hud.hideWidget("clock")}
@@ -1231,7 +1253,7 @@ export function ChatWindow() {
                   id="weather-current"
                   label={WIDGET_LABELS["weather-current"]}
                   layout={hud.layout["weather-current"]}
-                  customEnabled
+                  customEnabled={hud.customEnabled}
                   scale={scale}
                   onMove={(p) => hud.updateWidget("weather-current", p)}
                   onHide={() => hud.hideWidget("weather-current")}
@@ -1243,7 +1265,7 @@ export function ChatWindow() {
                   id="weather-strip"
                   label={WIDGET_LABELS["weather-strip"]}
                   layout={hud.layout["weather-strip"]}
-                  customEnabled
+                  customEnabled={hud.customEnabled}
                   scale={scale}
                   onMove={(p) => hud.updateWidget("weather-strip", p)}
                   onHide={() => hud.hideWidget("weather-strip")}
@@ -1255,7 +1277,7 @@ export function ChatWindow() {
                   id="orb"
                   label={WIDGET_LABELS.orb}
                   layout={hud.layout.orb}
-                  customEnabled
+                  customEnabled={hud.customEnabled}
                   scale={scale}
                   onMove={(p) => hud.updateWidget("orb", p)}
                   onHide={() => hud.hideWidget("orb")}
@@ -1290,7 +1312,7 @@ export function ChatWindow() {
                   id="spotify"
                   label={WIDGET_LABELS.spotify}
                   layout={hud.layout.spotify}
-                  customEnabled
+                  customEnabled={hud.customEnabled}
                   scale={scale}
                   onMove={(p) => hud.updateWidget("spotify", p)}
                   onHide={() => hud.hideWidget("spotify")}
@@ -1302,7 +1324,7 @@ export function ChatWindow() {
                   id="camera"
                   label={WIDGET_LABELS.camera}
                   layout={hud.layout.camera}
-                  customEnabled
+                  customEnabled={hud.customEnabled}
                   scale={scale}
                   onMove={(p) => hud.updateWidget("camera", p)}
                   onHide={() => hud.hideWidget("camera")}
@@ -1318,11 +1340,15 @@ export function ChatWindow() {
                   id="workout-coach"
                   label={WIDGET_LABELS["workout-coach"]}
                   layout={hud.layout["workout-coach"]}
-                  customEnabled
+                  customEnabled={hud.customEnabled}
                   scale={scale}
                   onMove={(p) => hud.updateWidget("workout-coach", p)}
                   onHide={() => hud.hideWidget("workout-coach")}
-                  hidden={!hud.layout["workout-coach"].visible}
+                  hidden={
+                    !hud.layout["workout-coach"].visible ||
+                    !cameraOn ||
+                    !pose.pose
+                  }
                 >
                   <WorkoutCoachWidget
                     pose={pose.pose}
@@ -1333,11 +1359,16 @@ export function ChatWindow() {
                   id="face-recognition"
                   label={WIDGET_LABELS["face-recognition"]}
                   layout={hud.layout["face-recognition"]}
-                  customEnabled
+                  customEnabled={hud.customEnabled}
                   scale={scale}
                   onMove={(p) => hud.updateWidget("face-recognition", p)}
                   onHide={() => hud.hideWidget("face-recognition")}
-                  hidden={!hud.layout["face-recognition"].visible}
+                  hidden={
+                    !hud.layout["face-recognition"].visible ||
+                    !cameraOn ||
+                    !face.face ||
+                    face.status !== "ready"
+                  }
                 >
                   <FaceRecognitionWidget
                     face={face.face}
@@ -1348,7 +1379,7 @@ export function ChatWindow() {
                   id="earth-hologram"
                   label={WIDGET_LABELS["earth-hologram"]}
                   layout={hud.layout["earth-hologram"]}
-                  customEnabled
+                  customEnabled={hud.customEnabled}
                   scale={scale}
                   onMove={(p) => hud.updateWidget("earth-hologram", p)}
                   onHide={() => hud.hideWidget("earth-hologram")}
@@ -1359,140 +1390,31 @@ export function ChatWindow() {
               </>
             )}
           </ResponsiveHudCanvas>
-        ) : (
-          // Default flow layout — the original out-of-the-box JARVIS
-          // arrangement. Untouched except that the camera preview is
-          // now part of the flow whenever the camera is on.
-          <>
-            {fullHud ? (
-              <div className="hud-telemetry">
-                <Clock />
-                <WeatherWidget variant="current" />
-              </div>
-            ) : null}
 
-            {/* JARVIS title-block frame around the wordmark — sits
-                above the orb on the HUD tab so the page reads like
-                an instrument panel rather than a flat dashboard. */}
-            {activeTab === "hud" ? (
-              <div
-                style={{
-                  display: "flex",
-                  justifyContent: "center",
-                  padding: "4px 0 0",
-                }}
-              >
-                <TitleBlock text="ALFRED" subtitle="resident butler · v1" />
-              </div>
-            ) : null}
-
-            <div
-              style={{
-                display: "flex",
-                justifyContent: "center",
-                padding: "18px 0 8px",
-              }}
-            >
-              <Orb3D size={200} caption={orbCaption} />
-            </div>
-
-            {/* Greeting card — a framed "At your service, sir." just
-                under the orb. Only on the HUD tab; the chat tab has
-                its own intro. */}
-            {activeTab === "hud" ? (
-              <div
-                style={{
-                  display: "flex",
-                  justifyContent: "center",
-                  padding: "0 0 12px",
-                }}
-              >
-                <GreetingCard greeting={greeting} />
-              </div>
-            ) : null}
-
-            {fullHud ? <WeatherWidget variant="strip" /> : null}
-
-            {/* Holographic Earth — JARVIS-style 3D globe.
-                Click a point or press EXPAND to open a detailed
-                Leaflet map (full-screen, with pan/pinch zoom and
-                place-name search). Only visible on the HUD tab. */}
-            {activeTab === "hud" ? (
-              <div
-                style={{
-                  display: "flex",
-                  justifyContent: "center",
-                  padding: "0 12px 14px",
-                }}
-              >
-                <EarthHologramWidget />
-              </div>
-            ) : null}
-
-            {/* Workout coach + face recognition only render on the
-                HUD when the camera is on AND we actually have live
-                pose/face data — otherwise they show up as empty
-                windows pinned to the bottom of the screen. The
-                dedicated WORKOUT tab is the proper place for the
-                form-coach experience. */}
-            {cameraOn && pose.pose && face.face && face.status === "ready" ? (
-              <div
-                style={{
-                  display: "flex",
-                  justifyContent: "center",
-                  gap: 12,
-                  padding: "0 12px 12px",
-                  flexWrap: "wrap",
-                }}
-              >
-                <FaceRecognitionWidget
-                  face={face.face}
-                  faceStatus={face.status}
-                />
-              </div>
-            ) : null}
-
-            {/*
-              Live camera preview — visible whenever the camera is on,
-              so the user can see what Alfred sees without opening a
-              separate window. Uses a sibling ``<video>`` that shares
-              the existing MediaStream (see CameraPreview.tsx) — the
-              hidden detection ``<video>`` below is unaffected.
-            */}
-            {cameraOn ? (
-              <div
-                style={{
-                  display: "flex",
-                  justifyContent: "center",
-                  padding: "0 12px 12px",
-                }}
-              >
-                <div
-                  style={{
-                    width: "min(480px, 100%)",
-                    aspectRatio: "16 / 9",
-                  }}
-                >
-                  <CameraPreview
-                    status={camera.status}
-                    faceCount={camera.faceCount}
-                    streamRef={camera.streamRef}
-                  />
-                </div>
-              </div>
-            ) : null}
-
-            <div
-              style={{
-                display: "flex",
-                justifyContent: "center",
-                padding: "0 12px 8px",
-              }}
-            >
-              <SpotifyPlayer nightfall={mode === "nightfall"} />
-            </div>
-          </>
-        )}
+        {/* TitleBlock + GreetingCard render as static (non-widget)
+            HUD chrome on top of the canvas, since they're the
+            visual "header" and shouldn't move. The canvas widgets
+            below them are positioned absolutely from the canvas
+            origin so they don't interfere. */}
+        {activeTab === "hud" ? (
+          <div
+            style={{
+              position: "absolute",
+              top: 50,
+              left: "50%",
+              transform: "translateX(-50%)",
+              display: "flex",
+              flexDirection: "column",
+              alignItems: "center",
+              gap: 8,
+              pointerEvents: "none",
+              zIndex: 5,
+            }}
+          >
+            <TitleBlock text="ALFRED" subtitle="resident butler · v1" />
+            <GreetingCard greeting={greeting} />
+          </div>
+        ) : null}
 
         {/*
           Hidden <video> for the camera feed. Kept in the main pane

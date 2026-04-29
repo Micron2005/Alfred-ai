@@ -38,10 +38,10 @@ export function SystemStatus({ title = "SYSTEM STATUS", indicators }: Props) {
     <div
       data-testid="system-status-pill"
       style={{
-        position: "fixed",
-        top: 56,
-        right: 22,
-        zIndex: 30,
+        // Position is now controlled by the parent HudWidget wrapper —
+        // SystemStatus is a regular block element. (Used to be
+        // ``position: fixed`` pinned to the top-right corner; that
+        // prevented it from being moved in customize mode.)
         padding: "10px 14px 12px",
         minWidth: 180,
         background:
@@ -49,7 +49,6 @@ export function SystemStatus({ title = "SYSTEM STATUS", indicators }: Props) {
         border: "1px solid var(--border)",
         backdropFilter: "blur(14px)",
         WebkitBackdropFilter: "blur(14px)",
-        pointerEvents: "none",
       }}
     >
       <p

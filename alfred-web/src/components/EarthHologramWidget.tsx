@@ -12,7 +12,8 @@
  * lazy-loaded so users who never open the HUD pay nothing for them.
  */
 
-import { Suspense, lazy, useState } from "react";
+import { Suspense, lazy, useEffect, useState } from "react";
+import { createPortal } from "react-dom";
 
 const HolographicEarth = lazy(() =>
   import("./HolographicEarth").then((m) => ({ default: m.HolographicEarth })),
@@ -26,6 +27,17 @@ export function EarthHologramWidget() {
     null,
   );
   const [mapOpen, setMapOpen] = useState(false);
+  // Portal target — has to be the document body so the modal
+  // escapes the HudWidget canvas's CSS ``transform`` (which would
+  // otherwise create a new stacking context that traps even
+  // ``position: fixed`` elements). Resolved on mount so SSR
+  // doesn't choke on ``document``.
+  const [portalTarget, setPortalTarget] = useState<HTMLElement | null>(null);
+  useEffect(() => {
+    if (typeof document !== "undefined") {
+      setPortalTarget(document.body);
+    }
+  }, []);
 
   function openMapAt(coords: { lat: number; lon: number }) {
     setPicked(coords);
@@ -112,14 +124,17 @@ export function EarthHologramWidget() {
         <HolographicEarth onPick={openMapAt} height={360} />
       </Suspense>
 
-      {mapOpen ? (
-        <Suspense fallback={null}>
-          <HoloMapView
-            center={picked}
-            onClose={() => setMapOpen(false)}
-          />
-        </Suspense>
-      ) : null}
+      {mapOpen && portalTarget
+        ? createPortal(
+            <Suspense fallback={null}>
+              <HoloMapView
+                center={picked}
+                onClose={() => setMapOpen(false)}
+              />
+            </Suspense>,
+            portalTarget,
+          )
+        : null}
     </div>
   );
 }

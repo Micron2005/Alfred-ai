@@ -110,17 +110,31 @@ export function HudWidget({
     );
   }
 
-  // Non-custom mode — pure pass-through. Children render in their
-  // original flow position. This is the default for users who never
-  // toggle customize mode.
-  if (!customEnabled) {
-    return <div data-hud-widget={id}>{children}</div>;
-  }
-
   const widthVal: string | number =
     layout.w === "auto" ? "auto" : `${layout.w}px`;
   const heightVal: string | number =
     layout.h === "auto" ? "auto" : `${layout.h}px`;
+
+  // Read-only mode (customize off) — render at the saved position
+  // but without drag/resize/hide handles. Positions persist between
+  // customize on/off so widgets stay where the user put them.
+  if (!customEnabled) {
+    return (
+      <div
+        data-hud-widget={id}
+        style={{
+          position: "absolute",
+          left: layout.x,
+          top: layout.y,
+          width: widthVal,
+          height: heightVal,
+          boxSizing: "border-box",
+        }}
+      >
+        {children}
+      </div>
+    );
+  }
 
   function commitDrag() {
     const s = dragRef.current;
