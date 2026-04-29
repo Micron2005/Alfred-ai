@@ -40,7 +40,20 @@ interface Props {
 
 /** ms between automatic identify polls — slow enough to not spam
  *  the backend, fast enough that "I just walked in" feels live. */
-const IDENTIFY_INTERVAL_MS = 2500;
+const IDENTIFY_INTERVAL_MS = 1500;
+
+/** Number of consecutive identify polls that must agree before we
+ *  visually switch identity. With a 1.5s poll cadence, 2 = 3s of
+ *  consistent disagreement before the badge changes. Eliminates
+ *  the single-frame "Mukarram → Unknown → Mukarram" flicker the
+ *  user complained about without making the panel feel laggy. */
+const STICKY_VOTE_THRESHOLD = 2;
+
+function matchKey(res: FaceIdentifyResponse | null): string {
+  if (!res) return "__none__";
+  if (!res.match) return "__unknown__";
+  return res.match.enrollment.id;
+}
 
 export function FaceRecognitionWidget({ face, faceStatus }: Props) {
   const [name, setName] = useState("");
@@ -49,6 +62,13 @@ export function FaceRecognitionWidget({ face, faceStatus }: Props) {
   const [identity, setIdentity] = useState<FaceIdentifyResponse | null>(null);
   const [enrollments, setEnrollments] = useState<FaceEnrollment[]>([]);
   const lastIdentifyAt = useRef(0);
+  // Sticky-match bookkeeping: count consecutive polls that
+  // disagree with the current ``identity`` before we replace it.
+  const pendingMatchRef = useRef<{
+    key: string;
+    candidate: FaceIdentifyResponse | null;
+    count: number;
+  } | null>(null);
 
   // Refresh the enrollment list once on mount.
   useEffect(() => {
@@ -70,12 +90,39 @@ export function FaceRecognitionWidget({ face, faceStatus }: Props) {
     void (async () => {
       try {
         const res = await identifyFace(face.identityVector);
-        setIdentity(res);
+        // Sticky matching — only commit a switch when the new
+        // result agrees with the previous poll. Single-poll
+        // outliers (one bad frame slipping through despite the
+        // EMA smoothing) get dropped on the floor.
+        const currentKey = matchKey(identity);
+        const incomingKey = matchKey(res);
+        if (incomingKey === currentKey) {
+          // Same identity — refresh in place so the similarity
+          // score stays current.
+          setIdentity(res);
+          pendingMatchRef.current = null;
+          return;
+        }
+        const pending = pendingMatchRef.current;
+        if (pending && pending.key === incomingKey) {
+          pending.count += 1;
+          pending.candidate = res;
+          if (pending.count >= STICKY_VOTE_THRESHOLD) {
+            setIdentity(res);
+            pendingMatchRef.current = null;
+          }
+        } else {
+          pendingMatchRef.current = {
+            key: incomingKey,
+            candidate: res,
+            count: 1,
+          };
+        }
       } catch {
         /* don't surface — likely backend offline */
       }
     })();
-  }, [face, faceStatus]);
+  }, [face, faceStatus, identity]);
 
   const handleEnroll = useCallback(async () => {
     if (!face || !name.trim() || busy) return;

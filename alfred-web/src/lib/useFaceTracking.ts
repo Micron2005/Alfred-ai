@@ -92,25 +92,66 @@ interface RawLm {
 }
 
 // Small subset of MediaPipe face mesh indices used to compute the
-// 96-D identity signature. Picked to span eyes, nose, mouth, brow,
-// and chin so the resulting pairwise-distance vector captures the
-// rough geometry of the face. Indices are from the Face Mesh
-// canonical model.
+// 96-D identity signature. Picked to span eyes, nose, brow, and
+// jaw — deliberately *avoiding* the mouth corners (which move a
+// lot when the user smiles or talks) and the cheek soft-tissue
+// (which changes with expression). Stable bony / cartilage
+// landmarks only, so the resulting distance vector is dominated
+// by skull geometry rather than facial mood.
 const KEYPOINTS = [
-  // Eyes
-  33, 133, 159, 145, 153, 154, // right eye
-  362, 263, 386, 374, 380, 381, // left eye
-  // Eyebrows
+  // Eyes — lid corners + inner/outer corners + iris-adjacent points.
+  // These shift with blinks but the lid corners are anchored to the
+  // skull and stay stable.
+  33, 133, 159, 145, // right eye corners + lid centers
+  362, 263, 386, 374, // left eye corners + lid centers
+  // Eyebrows (peaks + inner corners) — relatively stable across
+  // expressions; only "brow raise" moves them noticeably.
   70, 105, 107, 296, 334, 336,
-  // Nose
+  // Nose — bridge + tip + sides. Bony, very stable.
   1, 4, 6, 168, 197, 195, 5, 217, 437,
-  // Mouth
-  61, 291, 13, 14, 78, 308, 17, 152,
-  // Cheeks / jaw
-  234, 454, 132, 361, 172, 397,
+  // Jaw / chin / temples — bony skull geometry. Anchors the
+  // overall face shape against expression noise.
+  152, // chin
+  234, 454, // temples (left/right)
+  132, 361, // ears (lobes)
+  172, 397, // jawline mid
+  127, 356, // jaw outer
+  10, // forehead center
+  148, 377, // chin sides
 ];
 
-function buildIdentityVector(lm: RawLm[]): number[] {
+/** Project the eye-line to horizontal so the resulting distance
+ *  vector is invariant to head roll. Returns landmarks rotated
+ *  about the midpoint of the two eye outer corners. */
+function poseNormalize(lm: RawLm[]): RawLm[] {
+  const right = lm[33];
+  const left = lm[263];
+  if (!right || !left) return lm;
+  const dx = left.x - right.x;
+  const dy = left.y - right.y;
+  const angle = Math.atan2(dy, dx);
+  // No appreciable roll? Skip the rotation cost.
+  if (Math.abs(angle) < 0.02) return lm;
+  const cx = (right.x + left.x) / 2;
+  const cy = (right.y + left.y) / 2;
+  const cos = Math.cos(-angle);
+  const sin = Math.sin(-angle);
+  return lm.map((p) => {
+    const x = p.x - cx;
+    const y = p.y - cy;
+    return {
+      x: x * cos - y * sin + cx,
+      y: x * sin + y * cos + cy,
+      z: p.z,
+    };
+  });
+}
+
+function buildIdentityVector(rawLm: RawLm[]): number[] {
+  // Step 1 — rotate to canonical orientation so a tilted head
+  // produces the same vector as an upright one. Removes the
+  // single biggest source of false negatives.
+  const lm = poseNormalize(rawLm);
   // Normalize against inter-eye distance so the signature is
   // scale-invariant (face closer / farther from camera doesn't
   // shift the vector).
@@ -133,6 +174,22 @@ function buildIdentityVector(lm: RawLm[]): number[] {
   return out.slice(0, 96);
 }
 
+/** Exponential-moving-average smoothing for the 96-D identity
+ *  vector. Reduces frame-to-frame jitter dramatically — without
+ *  this the cosine similarity to an enrollment can wiggle
+ *  ±0.03 per frame which causes the "glitchy / flickering match"
+ *  the user reported. ``alpha`` of 0.7 keeps 70% of the previous
+ *  smoothed value, blending in 30% of the fresh sample. */
+const IDENTITY_EMA_ALPHA = 0.7;
+function smoothIdentity(prev: number[] | null, fresh: number[]): number[] {
+  if (!prev || prev.length !== fresh.length) return fresh;
+  const out = new Array<number>(fresh.length);
+  for (let i = 0; i < fresh.length; i++) {
+    out[i] = prev[i] * IDENTITY_EMA_ALPHA + fresh[i] * (1 - IDENTITY_EMA_ALPHA);
+  }
+  return out;
+}
+
 export function useFaceTracking(
   opts: UseFaceTrackingOptions,
 ): UseFaceTrackingReturn {
@@ -146,6 +203,12 @@ export function useFaceTracking(
   const ownStreamRef = useRef<MediaStream | null>(null);
   const rafRef = useRef<number | null>(null);
   const lastInferAt = useRef(0);
+  // Persists the smoothed identity vector across frames so the
+  // EMA can blend the fresh sample with the running average.
+  // Reset to ``null`` every time we lose the face (so a new
+  // person walking in starts from a clean slate, not a smear of
+  // the previous person's geometry).
+  const smoothedIdentityRef = useRef<number[] | null>(null);
 
   const teardown = useCallback(() => {
     if (rafRef.current !== null) {
@@ -278,6 +341,7 @@ export function useFaceTracking(
     }) {
       const lms = res.faceLandmarks?.[0];
       if (!lms || lms.length < 200) {
+        smoothedIdentityRef.current = null;
         setFace(null);
         return;
       }
@@ -325,7 +389,12 @@ export function useFaceTracking(
         }
       }
 
-      const identityVector = buildIdentityVector(lms);
+      const freshIdentity = buildIdentityVector(lms);
+      const identityVector = smoothIdentity(
+        smoothedIdentityRef.current,
+        freshIdentity,
+      );
+      smoothedIdentityRef.current = identityVector;
 
       setFace({
         landmarks: projected,

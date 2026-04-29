@@ -114,6 +114,29 @@ function Toolbar() {
     URL.revokeObjectURL(url);
   }
 
+  function handleClear() {
+    // Stop trusting window.confirm — some browsers / iframe setups
+    // silently suppress it (notably when the page is fullscreened
+    // or running inside the Emergent preview frame), which made the
+    // Clear button look completely dead. We fall through to the
+    // unconfirmed clear if the dialog isn't supported.
+    let proceed = true;
+    try {
+      proceed = window.confirm("Clear the entire scene?");
+    } catch {
+      proceed = true;
+    }
+    if (!proceed) return;
+    clear();
+    // Belt-and-braces: explicitly evict the persisted scene from
+    // localStorage so a hard refresh doesn't restore the old state.
+    try {
+      window.localStorage.removeItem("alfred.cad.scene.v1");
+    } catch {
+      /* localStorage disabled / private mode — fine */
+    }
+  }
+
   return (
     <div
       data-testid="cad-toolbar"

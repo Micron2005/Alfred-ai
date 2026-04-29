@@ -4,7 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { ModeIndicator } from "@/components/ModeIndicator";
 import { Message } from "@/components/Message";
 import { Composer, type ComposerHandle } from "@/components/Composer";
-import { ConversationSidebar } from "@/components/ConversationSidebar";
+import { ChatTabView } from "@/components/ChatTabView";
 import { Clock } from "@/components/Clock";
 import { WeatherWidget } from "@/components/WeatherWidget";
 import {
@@ -33,6 +33,11 @@ import { ExpressionReadout } from "@/components/ExpressionReadout";
 import { PoseSkeleton } from "@/components/PoseSkeleton";
 import { QuickToolsMenu } from "@/components/QuickToolsMenu";
 import { Orb3D } from "@/components/Orb3D";
+import { TitleBlock } from "@/components/TitleBlock";
+import { GreetingCard } from "@/components/GreetingCard";
+import { SystemStatus, type Indicator } from "@/components/SystemStatus";
+import { OperationsLog, useOperationsLog } from "@/components/OperationsLog";
+import { EarthHologramWidget } from "@/components/EarthHologramWidget";
 import { SpotifyPlayer } from "@/components/SpotifyPlayer";
 import { CameraPreview } from "@/components/CameraPreview";
 import { HudWidget } from "@/components/HudWidget";
@@ -474,6 +479,33 @@ export function ChatWindow() {
     return () => orbStore.setHold("thinking", false);
   }, [busy]);
 
+  // Operations log feed for the JARVIS HUD bottom-left panel.
+  // We push events whenever a meaningful state transition happens —
+  // the hook itself de-dupes consecutive identical tags so rapid
+  // toggles don't flood the feed.
+  const opsLog = useOperationsLog();
+  const { log: pushOp } = opsLog;
+  useEffect(() => {
+    if (busy) pushOp("PROCESSING", "composing reply", "live");
+    else if (speaking) pushOp("TRANSMITTING", "speaking", "live");
+    else if (recording) pushOp("LISTENING", "mic open", "live");
+    else if (handsFree && wake.status === "listening")
+      pushOp("STANDBY", `wake: ${WAKE_LABEL}`);
+    else pushOp("STANDBY");
+  }, [busy, speaking, recording, handsFree, wake.status, pushOp]);
+
+  useEffect(() => {
+    if (camera.status === "error" && cameraOn) {
+      pushOp("CAMERA ERR", camera.error ?? undefined, "warn");
+    } else if (camera.status === "ready" && cameraOn) {
+      pushOp("CAMERA ONLINE", `${camera.faceCount} face(s)`, "info");
+    }
+  }, [camera.status, camera.faceCount, camera.error, cameraOn, pushOp]);
+
+  useEffect(() => {
+    if (hand.status === "ready") pushOp("HANDS LOCKED", "tracking", "info");
+  }, [hand.status, pushOp]);
+
   async function speak(text: string) {
     // Set ``speaking`` synchronously, BEFORE the synthesizeSpeech await,
     // so React batches it with the setBusy(false) that handleSend's
@@ -718,6 +750,66 @@ export function ChatWindow() {
           ? `Standing by · ${WAKE_LABEL}`
           : "Standing by";
 
+  // Build the JARVIS top-right system-status pill. Each indicator is
+  // derived from existing component state so this is just a view
+  // projection — no additional plumbing needed.
+  const systemIndicators: Indicator[] = [
+    {
+      id: "system",
+      label: "System",
+      state: error ? "err" : "ok",
+      hint: error ?? "Alfred is online",
+    },
+    {
+      id: "wake",
+      label: "Wake",
+      state: !handsFree
+        ? "off"
+        : wake.status === "listening"
+          ? "ok"
+          : wake.status === "paused" || wake.status === "starting"
+            ? "warn"
+            : wake.status === "error"
+              ? "err"
+              : "off",
+      hint: handsFree
+        ? `Wake word: ${WAKE_LABEL} · ${wake.status}`
+        : "Hands-free is off",
+    },
+    {
+      id: "voice",
+      label: "Voice",
+      state: voiceOut ? (speaking ? "ok" : "warn") : "off",
+      hint: voiceOut ? "Alfred can speak replies" : "TTS is muted",
+    },
+    {
+      id: "camera",
+      label: "Camera",
+      state: !cameraOn
+        ? "off"
+        : camera.status === "ready"
+          ? "ok"
+          : camera.status === "starting"
+            ? "warn"
+            : "err",
+      hint: cameraOn ? `Camera ${camera.status}` : "Camera is off",
+    },
+    {
+      id: "hands",
+      label: "Hands",
+      state: hand.status === "ready" ? "ok" : "off",
+      hint: `Hand tracking: ${hand.status}`,
+    },
+    {
+      id: "memory",
+      label: "Memory",
+      state: convoId ? "ok" : "warn",
+      hint: convoId
+        ? "Conversation thread active"
+        : "No active conversation thread",
+    },
+  ];
+
   // The active conversation lives in the sidebar's CONVERSATION tab
   // — extract it as a JSX block so we can pass it to the sidebar
   // without ChatWindow's render becoming unreadable. This used to
@@ -845,6 +937,12 @@ export function ChatWindow() {
     >
       <TabBar active={activeTab} onChange={setActiveTabPersisted} />
       <HudFrame enabled={activeTab === "hud"} />
+      {activeTab === "hud" ? (
+        <>
+          <SystemStatus indicators={systemIndicators} />
+          <OperationsLog entries={opsLog.entries} />
+        </>
+      ) : null}
       {activeTab === "design" ? (
         <DesignView
           conversationId={designConversationId}
@@ -859,10 +957,12 @@ export function ChatWindow() {
           }}
           data-active-tab={activeTab}
         >
-          {/* Sidebar — only visible in the CHAT tab. The HUD tab is
-              the JARVIS view; conversation list would crowd it. */}
+          {/* Chat tab gets its own dedicated full-screen layout
+              (narrow conversation list rail + flex:1 chat pane).
+              The legacy ConversationSidebar's collapse/HUD-overlap
+              behaviour was confusing — replaced by ChatTabView. */}
           {activeTab === "chat" ? (
-            <ConversationSidebar
+            <ChatTabView
               conversations={conversations}
               activeId={convoId}
               onSelect={(id) => {
@@ -871,8 +971,6 @@ export function ChatWindow() {
               onNewChat={handleNewChat}
               onDelete={(id) => void handleDelete(id)}
               busy={busy || loadingConvo}
-              collapsed={sidebarCollapsed}
-              onToggleCollapsed={toggleSidebar}
               chatPane={chatPane}
             />
           ) : null}
@@ -880,7 +978,12 @@ export function ChatWindow() {
       <div
         style={{
           flex: 1,
-          display: "flex",
+          // Hide the HUD main pane visually when the chat tab is
+          // active so the sidebar+chat take the whole window — but
+          // keep the pane mounted (display:none, not removed) so the
+          // hidden <video> elements + tracking refs survive tab
+          // switches without re-permission-prompting the camera.
+          display: activeTab === "chat" ? "none" : "flex",
           flexDirection: "column",
           // Main pane is now pure HUD (no chat) — let it use the
           // available width up to a generous ceiling so the JARVIS
@@ -903,29 +1006,38 @@ export function ChatWindow() {
           }}
         >
           <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
-            <h1
-              className="mono"
-              style={{
-                margin: 0,
-                fontSize: 22,
-                letterSpacing: 6,
-                color: "var(--hud)",
-                textShadow: "0 0 12px var(--orb-glow)",
-                fontWeight: 500,
-              }}
-            >
-              ALFRED
-            </h1>
-            <p
-              style={{
-                margin: 0,
-                color: "var(--muted)",
-                fontSize: 13,
-                fontStyle: "italic",
-              }}
-            >
-              {greeting}
-            </p>
+            {activeTab === "hud" ? (
+              // On the HUD tab, the JARVIS TitleBlock above the orb
+              // is the canonical wordmark — hide the flat header h1
+              // so we don't render ALFRED twice.
+              <span aria-hidden style={{ display: "none" }} />
+            ) : (
+              <>
+                <h1
+                  className="mono"
+                  style={{
+                    margin: 0,
+                    fontSize: 22,
+                    letterSpacing: 6,
+                    color: "var(--hud)",
+                    textShadow: "0 0 12px var(--orb-glow)",
+                    fontWeight: 500,
+                  }}
+                >
+                  ALFRED
+                </h1>
+                <p
+                  style={{
+                    margin: 0,
+                    color: "var(--muted)",
+                    fontSize: 13,
+                    fontStyle: "italic",
+                  }}
+                >
+                  {greeting}
+                </p>
+              </>
+            )}
           </div>
           <div
             style={{
@@ -1211,6 +1323,21 @@ export function ChatWindow() {
               </div>
             ) : null}
 
+            {/* JARVIS title-block frame around the wordmark — sits
+                above the orb on the HUD tab so the page reads like
+                an instrument panel rather than a flat dashboard. */}
+            {activeTab === "hud" ? (
+              <div
+                style={{
+                  display: "flex",
+                  justifyContent: "center",
+                  padding: "4px 0 0",
+                }}
+              >
+                <TitleBlock text="ALFRED" subtitle="resident butler · v1" />
+              </div>
+            ) : null}
+
             <div
               style={{
                 display: "flex",
@@ -1221,7 +1348,38 @@ export function ChatWindow() {
               <Orb3D size={200} caption={orbCaption} />
             </div>
 
+            {/* Greeting card — a framed "At your service, sir." just
+                under the orb. Only on the HUD tab; the chat tab has
+                its own intro. */}
+            {activeTab === "hud" ? (
+              <div
+                style={{
+                  display: "flex",
+                  justifyContent: "center",
+                  padding: "0 0 12px",
+                }}
+              >
+                <GreetingCard greeting={greeting} />
+              </div>
+            ) : null}
+
             {fullHud ? <WeatherWidget variant="strip" /> : null}
+
+            {/* Holographic Earth — JARVIS-style 3D globe.
+                Click a point or press EXPAND to open a detailed
+                Leaflet map (full-screen, with pan/pinch zoom and
+                place-name search). Only visible on the HUD tab. */}
+            {activeTab === "hud" ? (
+              <div
+                style={{
+                  display: "flex",
+                  justifyContent: "center",
+                  padding: "0 12px 14px",
+                }}
+              >
+                <EarthHologramWidget />
+              </div>
+            ) : null}
 
             {cameraOn ? (
               <div
