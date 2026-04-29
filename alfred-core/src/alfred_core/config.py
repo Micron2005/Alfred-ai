@@ -30,7 +30,17 @@ class Settings(BaseSettings):
 
     # ─── Local LLM (Ollama) ─────────────────────────────────────────────
     ollama_host: str = Field(default="http://host.docker.internal:11434")
-    local_model_chat: str = Field(default="llama3.1:8b-instruct-q4_K_M")
+    # Default chat model — Dolphin-flavoured Llama 3.1 8B. The Dolphin
+    # fine-tune is uncensored, which matches the user's stated
+    # preference: "no filter on what he can say or help with". The
+    # base Meta Llama 3.1 instruct refuses casual profanity, jokes
+    # with friends, and a long list of legal-but-edgy requests; the
+    # Dolphin tune does not. ~4.7 GB on disk; same hardware needs
+    # as the previous default. Pull once with:
+    #   ollama pull dolphin-llama3:8b-v2.9-q4_K_M
+    # Set this to ``""`` to disable local chat entirely (every text
+    # turn then routes to cloud Anthropic — useful on RAM-poor hosts).
+    local_model_chat: str = Field(default="dolphin-llama3:8b-v2.9-q4_K_M")
     local_model_fast: str = Field(default="phi3.5:3.8b-mini-instruct-q4_K_M")
     # Vision-capable Ollama model. Used when the user attaches an image
     # to a turn. Default is Meta's Llama 3.2-Vision 11B (~6.5 GB on

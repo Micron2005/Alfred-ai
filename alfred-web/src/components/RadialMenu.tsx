@@ -20,7 +20,7 @@
 
 import { useEffect, useRef } from "react";
 
-export type RadialMenuItem = "spotify" | "chat" | "workout";
+export type RadialMenuItem = "spotify" | "chat" | "workout" | "workshop";
 
 interface RadialMenuProps {
   open: boolean;
@@ -53,6 +53,12 @@ const ENTRIES: ReadonlyArray<MenuEntry> = [
     label: "WORKOUT",
     caption: "Form Coach",
     testId: "radial-menu-workout",
+  },
+  {
+    id: "workshop",
+    label: "WORKSHOP",
+    caption: "Self-Coding",
+    testId: "radial-menu-workshop",
   },
 ];
 
@@ -151,14 +157,16 @@ export function RadialMenu({ open, onSelect, onClose }: RadialMenuProps) {
         }}
       >
         {ENTRIES.map((entry, i) => {
-          // Three positions: -1 (left), 0 (center), 1 (right).
-          // The arc is a shallow upward curve — center sits a bit
-          // lower than the wings, which sit slightly behind in z.
-          const offset = i - 1;
-          const xPercent = 50 + offset * 30;
-          const yPercent = 50 + Math.abs(offset) * 6;
-          const rotY = -offset * 22;
-          const scale = 1 - Math.abs(offset) * 0.08;
+          // Center the carousel: positions are evenly spaced around 0.
+          // For 3 entries that's [-1, 0, 1]; for 4 entries [-1.5,
+          // -0.5, 0.5, 1.5]. Spacing tightens with item count so 4
+          // orbs don't run off the side of the carousel.
+          const offset = i - (ENTRIES.length - 1) / 2;
+          const spread = ENTRIES.length <= 3 ? 30 : 22;
+          const xPercent = 50 + offset * spread;
+          const yPercent = 50 + Math.abs(offset) * 5;
+          const rotY = -offset * 18;
+          const scale = 1 - Math.abs(offset) * 0.07;
           return (
             <RadialItem
               key={entry.id}
@@ -333,6 +341,8 @@ function RadialItem({
           <SpotifyGlyph />
         ) : entry.id === "chat" ? (
           <ChatGlyph />
+        ) : entry.id === "workshop" ? (
+          <WorkshopGlyph />
         ) : (
           <WorkoutGlyph />
         )}
@@ -473,6 +483,59 @@ function WorkoutGlyph() {
         <line x1={50} y1={70} x2={68} y2={108} stroke="var(--orb)" strokeWidth={2} />
         <circle cx={32} cy={108} r={3} fill="var(--orb)" />
         <circle cx={68} cy={108} r={3} fill="var(--orb)" />
+      </svg>
+    </div>
+  );
+}
+
+/** Workshop glyph — gear / cog turning slowly. */
+function WorkshopGlyph() {
+  return (
+    <div
+      style={{
+        position: "absolute",
+        inset: 0,
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        animation: "radial-orbit 9000ms linear infinite",
+      }}
+    >
+      <svg
+        viewBox="0 0 100 100"
+        width={100}
+        height={100}
+        style={{ filter: "drop-shadow(0 0 8px var(--orb-glow))" }}
+        aria-hidden
+      >
+        {/* Cog teeth — 8 evenly spaced rectangles */}
+        {[0, 45, 90, 135, 180, 225, 270, 315].map((deg) => (
+          <rect
+            key={deg}
+            x={47}
+            y={8}
+            width={6}
+            height={14}
+            fill="var(--orb)"
+            transform={`rotate(${deg} 50 50)`}
+          />
+        ))}
+        <circle
+          cx={50}
+          cy={50}
+          r={26}
+          fill="none"
+          stroke="var(--orb)"
+          strokeWidth={3}
+        />
+        <circle
+          cx={50}
+          cy={50}
+          r={9}
+          fill="none"
+          stroke="var(--orb)"
+          strokeWidth={2.5}
+        />
       </svg>
     </div>
   );

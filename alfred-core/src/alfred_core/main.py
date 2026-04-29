@@ -19,8 +19,10 @@ from alfred_core.api import (
     printer,
     spotify,
     vision,
+    vitals,
     voice,
     weather,
+    workshop,
 )
 from alfred_core.db.session import init_db
 
@@ -57,6 +59,8 @@ app.include_router(weather.router)
 app.include_router(memory.router)
 app.include_router(vision.router)
 app.include_router(printer.router)
+app.include_router(vitals.router)
+app.include_router(workshop.router)
 
 
 @app.get("/")

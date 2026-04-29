@@ -75,6 +75,35 @@ Single user — Mukarram Mohammad Alam. Alfred is a dry, witty British butler.
 
 ## Backlog (P0 / P1 / P2)
 
+### Feb 2026 — Self-care suite (NEW)
+
+**Nightfall persistence fix**
+- ✅ `PATCH /api/conversations/{id}/mode` endpoint persists mode flips done from the frontend's voice intent (canned ack path bypassed the chat handler before, so the next ordinary message would read the OLD persisted mode and silently flip the persona back — that's why every message in Nightfall mode was flipping it off).
+- ✅ Brand-new conversations (no `convoId` yet) skip the canned ack and fall through to the chat handler, whose wake analyzer activates Nightfall and persists it as part of normal flow.
+- ✅ `setConversationMode(id, mode)` client added to `lib/api.ts`.
+
+**Uncensored local LLM swap**
+- ✅ `config.py` default `local_model_chat` is now `dolphin-llama3:8b-v2.9-q4_K_M` (uncensored Llama derivative). User pulls with `ollama pull dolphin-llama3:8b-v2.9-q4_K_M` on the host. Same RAM footprint as the previous default.
+- ✅ Persona prompt (both Standard and Nightfall) now contains an explicit **NO FILTER, NO NANNY** block: profanity, dark humour, edgy emails, disreputable-but-legal searches all permitted; only declines on real harm to real people.
+
+**Vitals self-diagnostics**
+- ✅ `GET /api/vitals` aggregates checks for: Local LLM (Ollama reachable + model pulled), Cloud LLM, Database, Web search (Tavily), Email (Gmail), Spotify, 3D printer.
+- ✅ Each vital returns `{id, label, status (ok/warn/err/off), detail, fix}` so the UI can show the user a one-line repair instruction.
+- ✅ `VitalsPanel.tsx` widget pinned top-right of HUD, polls every 30 s, click-to-expand for fix details.
+
+**Workshop self-coding console**
+- ✅ `GET /api/workshop/files` lists all source files in the allowlist (`alfred-core/src`, `alfred-core/tests`, `alfred-web/src`, `docs`, `scripts`).
+- ✅ `GET /api/workshop/file?path=...` reads a single file (200 KB cap, UTF-8 only, path-traversal refused, allowlist enforced).
+- ✅ `POST /api/workshop/diagnose` sends user problem + chosen file contents to the LLM (Claude when configured for code, else local fallback) → returns explanation + unified diff.
+- ✅ `POST /api/workshop/apply` runs `git apply --check` then `git apply` on the diff, restricted to allowlisted paths and refusing to write `.env` / `.env.local`.
+- ✅ 4th radial-menu orb **WORKSHOP** (cog glyph, animated) lands in the curved carousel.
+- ✅ `WorkshopView.tsx` full-screen sub-view: file picker (left rail) + problem textarea + DIAGNOSE / APPLY PATCH buttons + scrollable diagnosis panel.
+
+**Update script**
+- ✅ `scripts/alfred-update.sh` — git pull → docker compose up -d --build → wait for backend → run vitals. One-liner for the user every time he wants to grab the latest fixes.
+
+### Existing backlog (unchanged)
+
 ### P0 — for next session
 - ⏳ User pulls Feb 2026 changes locally (`git pull && docker compose up --build`) and validates HUD layout persistence + Earth dragging + voice tab switching + Earth → 3D map flow on real hardware
 - ⏳ Tune the form-coach heuristics with real footage

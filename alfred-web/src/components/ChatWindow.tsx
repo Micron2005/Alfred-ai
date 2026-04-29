@@ -54,6 +54,8 @@ import {
 import { orbStore } from "@/lib/orbState";
 import { RadialMenu, type RadialMenuItem } from "@/components/RadialMenu";
 import { Spotify3DView } from "@/components/Spotify3DView";
+import { WorkshopView } from "@/components/WorkshopView";
+import { VitalsPanel } from "@/components/VitalsPanel";
 
 const ACTIVE_CONVO_KEY = "alfred.activeConversationId";
 const VOICE_OUT_KEY = "alfred.voiceOutEnabled";
@@ -221,7 +223,7 @@ export function ChatWindow() {
   // viewport and dismiss back to the HUD via their own back
   // button.
   const [radialOpen, setRadialOpen] = useState(false);
-  const [subView, setSubView] = useState<"spotify" | null>(null);
+  const [subView, setSubView] = useState<"spotify" | "workshop" | null>(null);
   // Separate conversation thread for the design-tab chat overlay,
   // so design back-and-forth doesn't pollute general chat.
   const [designConversationId, setDesignConversationId] = useState<
@@ -534,6 +536,8 @@ export function ChatWindow() {
     setRadialOpen(false);
     if (item === "spotify") {
       setSubView("spotify");
+    } else if (item === "workshop") {
+      setSubView("workshop");
     } else if (item === "chat") {
       setActiveTabPersisted("chat");
     } else if (item === "workout") {
@@ -1287,6 +1291,9 @@ export function ChatWindow() {
       {subView === "spotify" ? (
         <Spotify3DView onBack={() => setSubView(null)} />
       ) : null}
+      {subView === "workshop" ? (
+        <WorkshopView onBack={() => setSubView(null)} />
+      ) : null}
       <TabBar active={activeTab} onChange={setActiveTabPersisted} />
       <HudFrame enabled={activeTab === "hud"} />
       {activeTab === "hud" ? (
@@ -1306,6 +1313,20 @@ export function ChatWindow() {
               <SystemStatus indicators={systemIndicators} />
             </HudWidget>
           ) : null}
+          {/* Vitals panel — Alfred's self-diagnostics. Pinned in the
+              top-right corner so it's always glanceable. Not yet
+              integrated into the layout-store / drag-drop system —
+              keeping it simple while the workshop UX settles. */}
+          <div
+            style={{
+              position: "absolute",
+              top: 18,
+              right: 18,
+              zIndex: 5,
+            }}
+          >
+            <VitalsPanel />
+          </div>
           <OperationsLog entries={opsLog.entries} />
         </>
       ) : null}
