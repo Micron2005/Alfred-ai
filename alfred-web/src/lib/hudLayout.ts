@@ -37,7 +37,9 @@ export type HudWidgetId =
   | "weather-strip"
   | "orb"
   | "spotify"
-  | "camera";
+  | "camera"
+  | "workout-coach"
+  | "face-recognition";
 
 export interface WidgetLayout {
   /** Top-left X position (px) inside the main pane. */
@@ -67,6 +69,8 @@ export const DEFAULT_LAYOUT: HudLayoutState = {
   orb: { x: 220, y: 60, w: 360, h: 200, visible: true },
   spotify: { x: 24, y: 320, w: 480, h: "auto", visible: true },
   camera: { x: 660, y: 16, w: 240, h: 180, visible: true },
+  "workout-coach": { x: 660, y: 220, w: 320, h: 360, visible: false },
+  "face-recognition": { x: 660, y: 600, w: 280, h: "auto", visible: false },
 };
 
 const ALL_IDS: HudWidgetId[] = [
@@ -76,6 +80,8 @@ const ALL_IDS: HudWidgetId[] = [
   "orb",
   "spotify",
   "camera",
+  "workout-coach",
+  "face-recognition",
 ];
 
 export const WIDGET_LABELS: Record<HudWidgetId, string> = {
@@ -85,6 +91,8 @@ export const WIDGET_LABELS: Record<HudWidgetId, string> = {
   orb: "Orb",
   spotify: "Spotify",
   camera: "Camera",
+  "workout-coach": "Form Coach",
+  "face-recognition": "Recognition",
 };
 
 function cloneDefault(): HudLayoutState {

@@ -194,3 +194,33 @@ class MemoryNote(Base):
     )
     created_at: Mapped[datetime] = mapped_column(default=_utcnow)
     updated_at: Mapped[datetime] = mapped_column(default=_utcnow, onupdate=_utcnow)
+
+
+# Identity vector dimensionality for face enrollments. Matches the
+# 96-D normalized pairwise-distance signature emitted by
+# ``alfred-web/src/lib/useFaceTracking.ts``. If you swap that
+# pipeline for a learned embedding (FaceNet 128-D, ArcFace 512-D),
+# update both this constant and the schema migration.
+FACE_IDENTITY_DIM = 96
+
+
+class FaceEnrollment(Base):
+    """A known face — name + identity vector — for the recognition
+    panel.
+
+    The identity vector comes from MediaPipe FaceLandmarker landmark
+    geometry on the client (cheap, no extra deps). For production
+    accuracy, swap the client-side vector for a learned face
+    embedding (see ``alfred_core.vision.face_recognition``).
+    """
+
+    __tablename__ = "face_enrollments"
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    name: Mapped[str] = mapped_column(String(120), index=True)
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    identity_vector: Mapped[list[float]] = mapped_column(
+        Vector(FACE_IDENTITY_DIM)
+    )
+    created_at: Mapped[datetime] = mapped_column(default=_utcnow)
+    updated_at: Mapped[datetime] = mapped_column(default=_utcnow, onupdate=_utcnow)

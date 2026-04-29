@@ -21,12 +21,19 @@ import {
 import { useWakeWord } from "@/lib/useWakeWord";
 import { useCamera } from "@/lib/useCamera";
 import { useHandTracking } from "@/lib/useHandTracking";
+import { useFaceTracking } from "@/lib/useFaceTracking";
+import { usePoseTracking } from "@/lib/usePoseTracking";
 import { HandCursor } from "@/components/HandCursor";
+import { FaceMesh } from "@/components/FaceMesh";
+import { PoseSkeleton } from "@/components/PoseSkeleton";
 import { QuickToolsMenu } from "@/components/QuickToolsMenu";
 import { Orb } from "@/components/Orb";
+import { Orb3D } from "@/components/Orb3D";
 import { SpotifyPlayer } from "@/components/SpotifyPlayer";
 import { CameraPreview } from "@/components/CameraPreview";
 import { HudWidget } from "@/components/HudWidget";
+import { WorkoutCoachWidget } from "@/components/WorkoutCoachWidget";
+import { FaceRecognitionWidget } from "@/components/FaceRecognitionWidget";
 import { InstallPwaButton } from "@/components/InstallPwaButton";
 import {
   useHudLayout,
@@ -40,6 +47,9 @@ const VOICE_OUT_KEY = "alfred.voiceOutEnabled";
 const HANDS_FREE_KEY = "alfred.handsFreeEnabled";
 const CAMERA_KEY = "alfred.cameraEnabled";
 const FULL_HUD_KEY = "alfred.fullHudEnabled";
+const FACE_TRACKING_KEY = "alfred.faceTrackingEnabled";
+const POSE_TRACKING_KEY = "alfred.poseTrackingEnabled";
+const ORB_3D_KEY = "alfred.orb3dEnabled";
 // v2: the sidebar's role changed (it now hosts the active chat, not
 // just the archive list). Old "collapsed=1" values from v1 would
 // hide the conversation from existing users post-upgrade, so we use
@@ -70,6 +80,9 @@ export function ChatWindow() {
   const [handsFree, setHandsFree] = useState(false);
   const [cameraOn, setCameraOn] = useState(false);
   const [fullHud, setFullHud] = useState(false);
+  const [faceTrackingOn, setFaceTrackingOn] = useState(false);
+  const [poseTrackingOn, setPoseTrackingOn] = useState(false);
+  const [orb3dOn, setOrb3dOn] = useState(true);
   // Default ``false`` (expanded) — the sidebar now hosts the active
   // conversation (CONVERSATION tab) so collapsing it by default
   // would hide the chat entirely. Users can collapse it manually
@@ -95,6 +108,12 @@ export function ChatWindow() {
     setVoiceOut(localStorage.getItem(VOICE_OUT_KEY) === "1");
     setHandsFree(localStorage.getItem(HANDS_FREE_KEY) === "1");
     setCameraOn(localStorage.getItem(CAMERA_KEY) === "1");
+    setFaceTrackingOn(localStorage.getItem(FACE_TRACKING_KEY) === "1");
+    setPoseTrackingOn(localStorage.getItem(POSE_TRACKING_KEY) === "1");
+    // 3D orb defaults ON (the upgraded look is the new normal); flip
+    // to "0" in localStorage to fall back to the legacy 2D orb.
+    const orb3dStored = localStorage.getItem(ORB_3D_KEY);
+    setOrb3dOn(orb3dStored === null ? true : orb3dStored === "1");
     // Now that the chat lives in the sidebar, the main pane would
     // be nearly empty without the HUD widgets — default the full HUD
     // *on* for users who haven't explicitly turned it off. Existing
@@ -119,6 +138,19 @@ export function ChatWindow() {
   // the camera permission, ``hand.status`` lands at ``"error"``
   // and ``HandCursor`` simply renders nothing. No noisy UI.
   const hand = useHandTracking({ enabled: true });
+  // Face / pose tracking are user-opt-in (each spins up its own
+  // stream + landmark model, so we don't want them running by
+  // default and chewing battery on a phone). When the camera is
+  // already on we share its stream so the user isn't prompted
+  // for camera access twice.
+  const face = useFaceTracking({
+    enabled: faceTrackingOn,
+    sharedStream: camera.streamRef.current ?? null,
+  });
+  const pose = usePoseTracking({
+    enabled: poseTrackingOn,
+    sharedStream: camera.streamRef.current ?? null,
+  });
 
   // Customizable-HUD state. ``customEnabled`` is the user-facing
   // "is the HUD freely arrangeable?" switch (off by default — most
@@ -304,6 +336,27 @@ export function ChatWindow() {
     setFullHud(enabled);
     if (typeof window !== "undefined") {
       localStorage.setItem(FULL_HUD_KEY, enabled ? "1" : "0");
+    }
+  }
+
+  function setFaceTrackingPersisted(enabled: boolean) {
+    setFaceTrackingOn(enabled);
+    if (typeof window !== "undefined") {
+      localStorage.setItem(FACE_TRACKING_KEY, enabled ? "1" : "0");
+    }
+  }
+
+  function setPoseTrackingPersisted(enabled: boolean) {
+    setPoseTrackingOn(enabled);
+    if (typeof window !== "undefined") {
+      localStorage.setItem(POSE_TRACKING_KEY, enabled ? "1" : "0");
+    }
+  }
+
+  function setOrb3dPersisted(enabled: boolean) {
+    setOrb3dOn(enabled);
+    if (typeof window !== "undefined") {
+      localStorage.setItem(ORB_3D_KEY, enabled ? "1" : "0");
     }
   }
 
@@ -925,6 +978,64 @@ export function ChatWindow() {
             <button
               type="button"
               className="hud-button"
+              data-testid="face-tracking-toggle"
+              onClick={() => setFaceTrackingPersisted(!faceTrackingOn)}
+              aria-pressed={faceTrackingOn}
+              title={
+                faceTrackingOn
+                  ? "Disable facial expression tracking"
+                  : "Track 478 facial landmarks + 52 expression coefficients"
+              }
+            >
+              {faceTrackingOn
+                ? face.status === "ready"
+                  ? "🙂 FACE · LIVE"
+                  : face.status === "starting"
+                    ? "🙂 FACE · STARTING"
+                    : face.status === "error"
+                      ? "🙂 FACE · ERR"
+                      : "🙂 FACE"
+                : "🙂 FACE"}
+            </button>
+            <button
+              type="button"
+              className="hud-button"
+              data-testid="pose-tracking-toggle"
+              onClick={() => setPoseTrackingPersisted(!poseTrackingOn)}
+              aria-pressed={poseTrackingOn}
+              title={
+                poseTrackingOn
+                  ? "Disable body pose tracking"
+                  : "Track 33-point body skeleton for workouts & form"
+              }
+            >
+              {poseTrackingOn
+                ? pose.status === "ready"
+                  ? "🦴 POSE · LIVE"
+                  : pose.status === "starting"
+                    ? "🦴 POSE · STARTING"
+                    : pose.status === "error"
+                      ? "🦴 POSE · ERR"
+                      : "🦴 POSE"
+                : "🦴 POSE"}
+            </button>
+            <button
+              type="button"
+              className="hud-button"
+              data-testid="orb-3d-toggle"
+              onClick={() => setOrb3dPersisted(!orb3dOn)}
+              aria-pressed={orb3dOn}
+              title={
+                orb3dOn
+                  ? "Use the legacy 2D orb"
+                  : "Use the new 3D orb"
+              }
+            >
+              {orb3dOn ? "🌐 ORB · 3D" : "🌐 ORB · 2D"}
+            </button>
+            <button
+              type="button"
+              className="hud-button"
               onClick={() => hud.setCustomEnabled(!hud.customEnabled)}
               aria-pressed={hud.customEnabled}
               title={
@@ -1027,20 +1138,37 @@ export function ChatWindow() {
                       justifyContent: "center",
                     }}
                   >
-                    <Orb
-                      size={Math.max(
-                        80,
-                        Math.min(
-                          typeof hud.layout.orb.w === "number"
-                            ? hud.layout.orb.w
-                            : 360,
-                          typeof hud.layout.orb.h === "number"
-                            ? hud.layout.orb.h
-                            : 200,
-                        ) - 20,
-                      )}
-                      caption={orbCaption}
-                    />
+                    {orb3dOn ? (
+                      <Orb3D
+                        size={Math.max(
+                          80,
+                          Math.min(
+                            typeof hud.layout.orb.w === "number"
+                              ? hud.layout.orb.w
+                              : 360,
+                            typeof hud.layout.orb.h === "number"
+                              ? hud.layout.orb.h
+                              : 200,
+                          ) - 20,
+                        )}
+                        caption={orbCaption}
+                      />
+                    ) : (
+                      <Orb
+                        size={Math.max(
+                          80,
+                          Math.min(
+                            typeof hud.layout.orb.w === "number"
+                              ? hud.layout.orb.w
+                              : 360,
+                            typeof hud.layout.orb.h === "number"
+                              ? hud.layout.orb.h
+                              : 200,
+                          ) - 20,
+                        )}
+                        caption={orbCaption}
+                      />
+                    )}
                   </div>
                 </HudWidget>
                 <HudWidget
@@ -1071,6 +1199,36 @@ export function ChatWindow() {
                     streamRef={camera.streamRef}
                   />
                 </HudWidget>
+                <HudWidget
+                  id="workout-coach"
+                  label={WIDGET_LABELS["workout-coach"]}
+                  layout={hud.layout["workout-coach"]}
+                  customEnabled
+                  scale={scale}
+                  onMove={(p) => hud.updateWidget("workout-coach", p)}
+                  onHide={() => hud.hideWidget("workout-coach")}
+                  hidden={!hud.layout["workout-coach"].visible}
+                >
+                  <WorkoutCoachWidget
+                    pose={pose.pose}
+                    poseStatus={pose.status}
+                  />
+                </HudWidget>
+                <HudWidget
+                  id="face-recognition"
+                  label={WIDGET_LABELS["face-recognition"]}
+                  layout={hud.layout["face-recognition"]}
+                  customEnabled
+                  scale={scale}
+                  onMove={(p) => hud.updateWidget("face-recognition", p)}
+                  onHide={() => hud.hideWidget("face-recognition")}
+                  hidden={!hud.layout["face-recognition"].visible}
+                >
+                  <FaceRecognitionWidget
+                    face={face.face}
+                    faceStatus={face.status}
+                  />
+                </HudWidget>
               </>
             )}
           </ResponsiveHudCanvas>
@@ -1093,10 +1251,39 @@ export function ChatWindow() {
                 padding: "18px 0 8px",
               }}
             >
-              <Orb size={180} caption={orbCaption} />
+              {orb3dOn ? (
+                <Orb3D size={200} caption={orbCaption} />
+              ) : (
+                <Orb size={180} caption={orbCaption} />
+              )}
             </div>
 
             {fullHud ? <WeatherWidget variant="strip" /> : null}
+
+            {poseTrackingOn || faceTrackingOn ? (
+              <div
+                style={{
+                  display: "flex",
+                  justifyContent: "center",
+                  gap: 12,
+                  padding: "0 12px 12px",
+                  flexWrap: "wrap",
+                }}
+              >
+                {poseTrackingOn ? (
+                  <WorkoutCoachWidget
+                    pose={pose.pose}
+                    poseStatus={pose.status}
+                  />
+                ) : null}
+                {faceTrackingOn ? (
+                  <FaceRecognitionWidget
+                    face={face.face}
+                    faceStatus={face.status}
+                  />
+                ) : null}
+              </div>
+            ) : null}
 
             {/*
               Live camera preview — visible whenever the camera is on,
@@ -1175,10 +1362,34 @@ export function ChatWindow() {
           aria-hidden
           style={{ display: "none" }}
         />
+        {/* Hidden videos for face + pose tracking — same lifecycle
+            as the camera + hand videos above. */}
+        <video
+          ref={face.videoRef as React.RefObject<HTMLVideoElement>}
+          playsInline
+          muted
+          aria-hidden
+          style={{ display: "none" }}
+        />
+        <video
+          ref={pose.videoRef as React.RefObject<HTMLVideoElement>}
+          playsInline
+          muted
+          aria-hidden
+          style={{ display: "none" }}
+        />
         <HandCursor
           enabled={hand.status === "ready"}
           rightHand={hand.right}
           leftHand={hand.left}
+        />
+        <FaceMesh
+          enabled={faceTrackingOn && face.status === "ready"}
+          face={face.face}
+        />
+        <PoseSkeleton
+          enabled={poseTrackingOn && pose.status === "ready"}
+          pose={pose.pose}
         />
         <QuickToolsMenu
           visible={quickTools.visible}
