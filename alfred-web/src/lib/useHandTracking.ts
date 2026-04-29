@@ -548,7 +548,16 @@ export function useHandTracking(
       // (after the user-perspective swap). We need both pieces
       // of info to reliably split hands when MediaPipe collides
       // their labels (see below).
-      type Detected = { lm: RawLandmark[]; isUserRight: boolean; wristX: number };
+      type Detected = {
+        lm: RawLandmark[];
+        isUserRight: boolean;
+        wristX: number;
+        // Original index into allHands / allLabels so debug
+        // logging (which iterates `detected`) can recover the
+        // matching raw label even when some hands were filtered
+        // out for malformed landmarks.
+        origIdx: number;
+      };
       const detected: Detected[] = [];
       for (let i = 0; i < allHands.length; i++) {
         const lm = allHands[i];
@@ -563,7 +572,7 @@ export function useHandTracking(
           ? label === "Right"
           : label === "Left";
         const wristX = lm[WRIST]?.x ?? 0.5;
-        detected.push({ lm, isUserRight, wristX });
+        detected.push({ lm, isUserRight, wristX, origIdx: i });
       }
 
       // Route detections to right/left slots. MediaPipe's
@@ -618,9 +627,9 @@ export function useHandTracking(
           const now = performance.now();
           if (now - lastDebugLogAtRef.current > 1000) {
             lastDebugLogAtRef.current = now;
-            for (let i = 0; i < detected.length; i++) {
-              const d = detected[i];
-              const rawLabel = allLabels[i]?.[0]?.categoryName ?? "?";
+            for (const d of detected) {
+              const rawLabel =
+                allLabels[d.origIdx]?.[0]?.categoryName ?? "?";
               // eslint-disable-next-line no-console
               console.log(
                 `[hand-debug] mediapipe=${rawLabel} userSide=${d.isUserRight ? "right" : "left"} wristX=${d.wristX.toFixed(3)} mirrored=${cameraIsMirrored}`,
@@ -633,10 +642,10 @@ export function useHandTracking(
       }
 
       const nextRight = rawRight
-        ? computeHandState(rawRight, rightRefs.current, vw, vh, true)
+        ? computeHandState(rawRight, rightRefs.current, vw, vh, true, cameraIsMirrored)
         : null;
       const nextLeft = rawLeft
-        ? computeHandState(rawLeft, leftRefs.current, vw, vh, false)
+        ? computeHandState(rawLeft, leftRefs.current, vw, vh, false, cameraIsMirrored)
         : null;
 
       // Reset per-hand refs when a hand leaves the frame so
@@ -721,6 +730,7 @@ export function useHandTracking(
       vw: number,
       vh: number,
       isRight: boolean,
+      mirrored: boolean,
     ): HandState {
       const thumb = lm[THUMB_TIP];
       const index = lm[INDEX_TIP];
@@ -744,9 +754,17 @@ export function useHandTracking(
         : curled >= FIST_FINGERS_FOR_FIST;     // enter fist at 4/4 curled
       refs.fistLatched = nowFist;
 
-      // Project all landmarks into viewport pixels (X mirrored).
+      // Project all landmarks into viewport pixels. The X-axis
+      // direction depends on the camera mirror state: with a
+      // mirrored selfie stream the user's right hand is already at
+      // larger normalized x, so we map it directly to viewport-x.
+      // With a raw non-mirrored stream the user's right hand is
+      // at smaller x, and we flip via (1 - p.x) so that the
+      // cursor still tracks the user's hand correctly. Y is
+      // never flipped — both modes have y=0 at the top of the
+      // image and the user expects the same on screen.
       const projected: CursorPoint[] = lm.map((p) => ({
-        x: (1 - p.x) * vw,
+        x: (mirrored ? p.x : 1 - p.x) * vw,
         y: p.y * vh,
       }));
 
