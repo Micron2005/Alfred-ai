@@ -63,19 +63,27 @@ const PINCH_DOWN = 0.05;
 // pinch-off when fingers hover right at the threshold.
 const PINCH_UP = 0.07;
 
-// Fist detection. A finger is "extended" if its fingertip is
-// significantly farther from the wrist than its MCP knuckle is —
-// straightforward and orientation-independent (works whether the
-// hand is upright, sideways, or upside-down). The thumb is
-// excluded: thumbs sit alongside the palm even in a relaxed open
-// hand, making them noisy as fist signal.
+// Fist detection. A finger is "curled" only if its fingertip has
+// folded back to be at or BEHIND the MCP knuckle, measured by
+// distance to the wrist. When you make an actual fist, your
+// fingertips come back toward your palm — the tip distance to
+// wrist drops below the MCP distance to wrist. When fingers are
+// merely bent (e.g. resting hand pose, half-curled), the
+// fingertip is still farther from the wrist than the MCP, so
+// this test correctly says "not curled". Compared to the previous
+// "extended if tip > 1.6× MCP" heuristic, this is much stricter:
+// slightly-bent fingers no longer count as curled, so the fist
+// gesture only fires when you've actually closed your hand.
 //
-// The ratio thresholds use hysteresis like pinch: enter a fist
-// when zero non-thumb fingers are extended, leave it once 2+ are
-// extended again. Stops the menu flickering open/closed when the
-// user's hand transitions through a half-curled pose.
-const FIST_RATIO_EXTENDED = 1.6;
-const FIST_FINGERS_FOR_OPEN = 2; // ≥ this count of extended fingers => not a fist
+// The threshold uses a small slack (1.05×) so a perfectly straight
+// finger doesn't waver around 1.0×.
+const FIST_CURL_RATIO = 1.05;
+// Hysteresis: enter a fist only when ALL FOUR non-thumb fingers
+// are curled. Exit once 2+ uncurl. Stops the menu flickering
+// open/closed when the user's hand transitions through a
+// half-curled pose.
+const FIST_FINGERS_FOR_FIST = 4;     // need this many curled to enter fist
+const FIST_FINGERS_FOR_OPEN = 2;     // need this many uncurled to leave fist
 // Default state when the hand isn't visible at all should still be
 // "no fist" so the menu doesn't spuriously appear.
 
@@ -228,12 +236,16 @@ function dist2d(a: RawLandmark, b: RawLandmark): number {
 
 /**
  * Count how many of the four non-thumb fingers are currently
- * extended, using fingertip-to-wrist vs MCP-to-wrist distance ratios.
+ * curled (folded toward the palm). A finger is curled when its
+ * fingertip is at or BEHIND its MCP knuckle measured by distance
+ * to the wrist — i.e., the tip has folded back. A merely-bent
+ * finger still has tip farther from wrist than MCP, so it
+ * correctly does not count as curled.
  */
-function countExtendedFingers(lm: RawLandmark[]): number {
+function countCurledFingers(lm: RawLandmark[]): number {
   if (!lm[WRIST]) return 0;
   const wrist = lm[WRIST];
-  let extended = 0;
+  let curled = 0;
   const pairs: Array<readonly [number, number]> = [
     [INDEX_TIP, INDEX_MCP],
     [MIDDLE_TIP, MIDDLE_MCP],
@@ -246,11 +258,11 @@ function countExtendedFingers(lm: RawLandmark[]): number {
     if (!tip || !mcp) continue;
     const tipDist = dist2d(tip, wrist);
     const mcpDist = dist2d(mcp, wrist);
-    if (mcpDist > 0 && tipDist / mcpDist >= FIST_RATIO_EXTENDED) {
-      extended++;
+    if (mcpDist > 0 && tipDist <= mcpDist * FIST_CURL_RATIO) {
+      curled++;
     }
   }
-  return extended;
+  return curled;
 }
 
 function landmarksDiffer(
@@ -292,6 +304,10 @@ export function useHandTracking(
   const detectorRef = useRef<HandLandmarker | null>(null);
   const rafRef = useRef<number | null>(null);
   const lastInferAtRef = useRef(0);
+  // Throttle for the optional handedness-debug log
+  // (localStorage.alfred_hand_debug='1'). One line per second per
+  // detected hand max; spammy console kills perf.
+  const lastDebugLogAtRef = useRef(0);
 
   // Per-hand stateful refs so the RAF loop can update without
   // forcing a re-render every frame. We commit to React state
@@ -502,6 +518,31 @@ export function useHandTracking(
 
       let rawRight: RawLandmark[] | null = null;
       let rawLeft: RawLandmark[] | null = null;
+      // Resolve the mirror state once per frame. Webcam stacks
+      // vary: some hardware/driver/OS combos deliver an already-
+      // mirrored selfie stream to the browser, others deliver
+      // raw sensor frames. MediaPipe's handedness classifier is
+      // trained on selfie-mirrored images and labels accordingly,
+      // which means with raw non-mirrored input the labels are
+      // inverted from the user's perspective. We can't reliably
+      // sniff the camera state from JS, so we expose a manual
+      // override: localStorage["alfred_hand_mirror"] === "0"
+      // forces the legacy "raw camera" interpretation,
+      // === "1" forces the mirrored interpretation, anything
+      // else (default) uses the modern default which assumes
+      // the camera stream IS effectively mirrored from the
+      // user's perspective (matches the majority of consumer
+      // webcams + browsers and matches Mukarram's hardware).
+      const mirrorOverride = (() => {
+        try {
+          return window.localStorage.getItem("alfred_hand_mirror");
+        } catch {
+          return null;
+        }
+      })();
+      // Default true (mirrored) unless explicitly disabled.
+      const cameraIsMirrored = mirrorOverride !== "0";
+
       // First pass: collect every valid hand with its
       // wrist-x position and MediaPipe-reported handedness
       // (after the user-perspective swap). We need both pieces
@@ -513,12 +554,14 @@ export function useHandTracking(
         const lm = allHands[i];
         if (!lm || lm.length < 21) continue;
         const label = allLabels[i]?.[0]?.categoryName ?? "Right";
-        // MediaPipe's handedness is from the camera's POV. Our
-        // user-facing camera shows a non-mirrored image, so the
-        // user's right hand appears on the LEFT side of the frame
-        // and gets labelled "Left". Swap so consumers see the
-        // hand from the user's perspective.
-        const isUserRight = label === "Left";
+        // Compute "is this the user's right hand?" from the
+        // MediaPipe label and the resolved mirror state. When
+        // the camera IS effectively mirrored, MediaPipe's
+        // "Right" already means the user's right hand. When
+        // it's NOT mirrored, swap.
+        const isUserRight = cameraIsMirrored
+          ? label === "Right"
+          : label === "Left";
         const wristX = lm[WRIST]?.x ?? 0.5;
         detected.push({ lm, isUserRight, wristX });
       }
@@ -530,9 +573,9 @@ export function useHandTracking(
       // other or one is held palm-out vs. palm-in. Naive
       // first-match-per-side routing would drop the second
       // hand entirely. Disambiguate via spatial position when
-      // labels collide: in our non-mirrored camera frame, the
-      // user's right hand sits at SMALLER x (left side of
-      // image), the user's left hand at LARGER x.
+      // labels collide: in a mirrored frame the user's right
+      // hand sits at LARGER x (right side of image); in raw
+      // non-mirrored the user's right is at SMALLER x.
       if (detected.length === 1) {
         const d = detected[0];
         if (d.isUserRight) rawRight = d.lm;
@@ -549,9 +592,12 @@ export function useHandTracking(
             rawLeft = a.lm;
           }
         } else {
-          // Collision — split by wrist x. Smaller x = user's
-          // right hand (left side of camera frame).
-          if (a.wristX < b.wristX) {
+          // Collision — split by wrist x. Direction depends on
+          // mirror state.
+          const aIsRightSide = cameraIsMirrored
+            ? a.wristX > b.wristX  // mirrored: bigger x = user-right
+            : a.wristX < b.wristX; // raw: smaller x = user-right
+          if (aIsRightSide) {
             rawRight = a.lm;
             rawLeft = b.lm;
           } else {
@@ -559,6 +605,31 @@ export function useHandTracking(
             rawLeft = a.lm;
           }
         }
+      }
+
+      // Optional verbose debug for diagnosing handedness in
+      // the wild. Enable from the browser console with:
+      //   localStorage.alfred_hand_debug = '1'
+      // Logs the raw MediaPipe label, the resolved user-side,
+      // and the wrist x for every detected hand, throttled to
+      // ~1 line per second per hand to avoid spamming.
+      try {
+        if (window.localStorage.getItem("alfred_hand_debug") === "1") {
+          const now = performance.now();
+          if (now - lastDebugLogAtRef.current > 1000) {
+            lastDebugLogAtRef.current = now;
+            for (let i = 0; i < detected.length; i++) {
+              const d = detected[i];
+              const rawLabel = allLabels[i]?.[0]?.categoryName ?? "?";
+              // eslint-disable-next-line no-console
+              console.log(
+                `[hand-debug] mediapipe=${rawLabel} userSide=${d.isUserRight ? "right" : "left"} wristX=${d.wristX.toFixed(3)} mirrored=${cameraIsMirrored}`,
+              );
+            }
+          }
+        }
+      } catch {
+        // ignore; localStorage may be unavailable
       }
 
       const nextRight = rawRight
@@ -662,11 +733,15 @@ export function useHandTracking(
         : pinchDist < PINCH_DOWN;
       refs.pinchLatched = nowPinching;
 
-      const extended = countExtendedFingers(lm);
+      // Hysteresis on the strict curl count. Enter a fist when
+      // ALL FOUR non-thumb fingers are curled (tips folded back
+      // behind their MCPs). Exit once 2+ fingers uncurl, i.e.
+      // curled count drops to 2 or fewer.
+      const curled = countCurledFingers(lm);
       const wasFist = refs.fistLatched;
       const nowFist = wasFist
-        ? extended < FIST_FINGERS_FOR_OPEN
-        : extended === 0;
+        ? curled > 4 - FIST_FINGERS_FOR_OPEN  // stay fist while >2 curled
+        : curled >= FIST_FINGERS_FOR_FIST;     // enter fist at 4/4 curled
       refs.fistLatched = nowFist;
 
       // Project all landmarks into viewport pixels (X mirrored).
