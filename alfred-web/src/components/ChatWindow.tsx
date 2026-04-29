@@ -224,6 +224,14 @@ export function ChatWindow() {
   // button.
   const [radialOpen, setRadialOpen] = useState(false);
   const [subView, setSubView] = useState<"spotify" | "workshop" | null>(null);
+  // Pre-populated state forwarded into the Workshop sub-view when the
+  // user clicks "ASK ALFRED TO FIX" on a red vital. Cleared when the
+  // sub-view unmounts so a normal radial-menu open of Workshop
+  // doesn't re-load yesterday's problem.
+  const [workshopSeed, setWorkshopSeed] = useState<{
+    problem: string;
+    paths: string[];
+  } | null>(null);
   // Separate conversation thread for the design-tab chat overlay,
   // so design back-and-forth doesn't pollute general chat.
   const [designConversationId, setDesignConversationId] = useState<
@@ -1292,7 +1300,14 @@ export function ChatWindow() {
         <Spotify3DView onBack={() => setSubView(null)} />
       ) : null}
       {subView === "workshop" ? (
-        <WorkshopView onBack={() => setSubView(null)} />
+        <WorkshopView
+          onBack={() => {
+            setSubView(null);
+            setWorkshopSeed(null);
+          }}
+          initialProblem={workshopSeed?.problem ?? ""}
+          initialPaths={workshopSeed?.paths ?? []}
+        />
       ) : null}
       <TabBar active={activeTab} onChange={setActiveTabPersisted} />
       <HudFrame enabled={activeTab === "hud"} />
@@ -1325,7 +1340,12 @@ export function ChatWindow() {
               zIndex: 5,
             }}
           >
-            <VitalsPanel />
+            <VitalsPanel
+              onSelfHeal={(problem, paths) => {
+                setWorkshopSeed({ problem, paths });
+                setSubView("workshop");
+              }}
+            />
           </div>
           <OperationsLog entries={opsLog.entries} />
         </>

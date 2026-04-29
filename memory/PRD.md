@@ -102,6 +102,29 @@ Single user — Mukarram Mohammad Alam. Alfred is a dry, witty British butler.
 **Update script**
 - ✅ `scripts/alfred-update.sh` — git pull → docker compose up -d --build → wait for backend → run vitals. One-liner for the user every time he wants to grab the latest fixes.
 
+### Feb 2026 — Auth + Smarter search + Self-healing (NEW)
+
+**Single-user password gate** (P1 done)
+- ✅ `POST /api/auth/login`, `GET /api/auth/me`, `POST /api/auth/logout`, `POST /api/auth/refresh`, `POST /api/auth/change`
+- ✅ httpOnly cookies (`alfred_access` 60 min + `alfred_refresh` 30 days), HS256 JWT, brute-force lockout (5 fails → 15 min from same IP)
+- ✅ Opt-in via `ALFRED_PASSWORD_HASH` in .env — when unset, gate is OFF and existing deployments keep working unchanged
+- ✅ `Settings.has_auth` raises if hash is set but JWT secret is still the placeholder (footgun guard)
+- ✅ All `/api/*` routers gated except `/api/health` and `/api/auth/*`
+- ✅ CORS hardened — `ALFRED_FRONTEND_ORIGIN` env replaces the wildcard so credentialled cookies actually flow
+- ✅ Frontend: `AuthProvider` + `LoginGate` JARVIS-styled login screen (auto-skipped when backend reports `auth_enabled: false`)
+- ✅ `bcrypt` + `pyjwt` added to pyproject.toml dependencies
+- ✅ 10 new auth tests (`tests/test_auth.py`) — 66 backend tests pass total
+
+**Smarter web-search persona** (P1 done)
+- ✅ Added "FIND ME X" block to `SEARCH_TOOL_PROMPT` — "find me X" / "look up X" / "any good X on Amazon" / "best YouTube tutorial for X" → ALWAYS emit a `[SEARCH:]` marker
+- ✅ Reply must include actual links (YouTube `youtube.com/watch?v=` or `youtu.be/`, Amazon `amazon.com/dp/`) bulleted with one-line descriptions
+- ✅ Top-3 ranking + offer to narrow further, no lectures about whether the user "really needs" it
+
+**Self-healing Vitals → Workshop handoff** (P2 done)
+- ✅ When a vital is `err` or `warn`, an "🔧 ASK ALFRED TO FIX" button appears in its expanded detail panel
+- ✅ Clicking it routes to the Workshop sub-view with the problem statement + 2-3 candidate files (per-subsystem allowlist) pre-populated, ready to DIAGNOSE
+- ✅ One-click handoff: red light → diagnose → patch → apply
+
 ### Existing backlog (unchanged)
 
 ### P0 — for next session

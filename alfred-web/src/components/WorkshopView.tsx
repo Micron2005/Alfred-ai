@@ -30,13 +30,24 @@ import {
 
 interface WorkshopViewProps {
   onBack: () => void;
+  /** Pre-populate the Workshop with a problem statement and a list of
+   *  files to focus on. Used by the Vitals self-heal handoff so the
+   *  user can go from "Ollama is err" → DIAGNOSE in one click. */
+  initialProblem?: string;
+  initialPaths?: string[];
 }
 
-export function WorkshopView({ onBack }: WorkshopViewProps) {
+export function WorkshopView({
+  onBack,
+  initialProblem = "",
+  initialPaths = [],
+}: WorkshopViewProps) {
   const [files, setFiles] = useState<WorkshopFile[]>([]);
   const [filter, setFilter] = useState("");
-  const [picked, setPicked] = useState<Set<string>>(new Set());
-  const [problem, setProblem] = useState("");
+  const [picked, setPicked] = useState<Set<string>>(
+    () => new Set(initialPaths),
+  );
+  const [problem, setProblem] = useState(initialProblem);
   const [busy, setBusy] = useState(false);
   const [diagnosis, setDiagnosis] = useState<string | null>(null);
   const [diff, setDiff] = useState<string | null>(null);

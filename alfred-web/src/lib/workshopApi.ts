@@ -6,7 +6,7 @@
  * patches when something needs fixing.
  */
 
-import { API_BASE } from "@/lib/api";
+import { API_BASE, FETCH_DEFAULTS } from "@/lib/api";
 
 export type VitalStatus = "ok" | "warn" | "err" | "off";
 
@@ -23,7 +23,7 @@ export interface VitalsReport {
 }
 
 export async function fetchVitals(): Promise<VitalsReport> {
-  const resp = await fetch(`${API_BASE}/vitals`);
+  const resp = await fetch(`${API_BASE}/vitals`, FETCH_DEFAULTS);
   if (!resp.ok) throw new Error(`Vitals failed: ${resp.status}`);
   return resp.json() as Promise<VitalsReport>;
 }
@@ -40,7 +40,7 @@ export interface WorkshopFileList {
 }
 
 export async function listWorkshopFiles(): Promise<WorkshopFileList> {
-  const resp = await fetch(`${API_BASE}/workshop/files`);
+  const resp = await fetch(`${API_BASE}/workshop/files`, FETCH_DEFAULTS);
   if (!resp.ok) throw new Error(`Could not list workshop files: ${resp.status}`);
   return resp.json() as Promise<WorkshopFileList>;
 }
@@ -54,7 +54,7 @@ export interface WorkshopFileContent {
 export async function readWorkshopFile(path: string): Promise<WorkshopFileContent> {
   const url = new URL(`${API_BASE}/workshop/file`);
   url.searchParams.set("path", path);
-  const resp = await fetch(url.toString());
+  const resp = await fetch(url.toString(), FETCH_DEFAULTS);
   if (!resp.ok) {
     const detail = await resp.text();
     throw new Error(`Could not read ${path}: ${resp.status} ${detail}`);
@@ -77,6 +77,7 @@ export async function diagnoseProblem(
   req: DiagnoseRequest,
 ): Promise<DiagnoseReply> {
   const resp = await fetch(`${API_BASE}/workshop/diagnose`, {
+    ...FETCH_DEFAULTS,
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(req),
@@ -96,6 +97,7 @@ export interface ApplyReply {
 
 export async function applyWorkshopPatch(diff: string): Promise<ApplyReply> {
   const resp = await fetch(`${API_BASE}/workshop/apply`, {
+    ...FETCH_DEFAULTS,
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ diff }),

@@ -70,6 +70,35 @@ class Settings(BaseSettings):
         default="postgresql+psycopg://alfred:wayne-manor@localhost:5432/alfred"
     )
 
+    # ─── Auth (single-user password gate) ───────────────────────────────
+    # bcrypt hash of the master password. When unset, Alfred runs with
+    # no auth (legacy behaviour, fine for a Tailscale-only deployment).
+    # When set, every /api/* endpoint except /api/health and /api/auth/*
+    # requires a valid JWT cookie. Generate the hash once on the host:
+    #     python -c "import bcrypt; print(bcrypt.hashpw(b'YOUR_PASSWORD',
+    #                bcrypt.gensalt()).decode())"
+    # then drop the result in .env as ALFRED_PASSWORD_HASH=$2b$...
+    alfred_password_hash: str = Field(default="")
+    # 64+ chars of random hex used to sign JWTs. Generate with:
+    #   python -c "import secrets; print(secrets.token_hex(32))"
+    # Default is a placeholder; you MUST change it before exposing
+    # Alfred outside localhost. The auth module refuses to start with
+    # the placeholder if alfred_password_hash is also set.
+    alfred_jwt_secret: str = Field(default="CHANGE-ME-INSECURE-PLACEHOLDER")
+    # Access token life. 60 min is comfortable for a single-user app
+    # where you don't want to keep re-logging in; bump down if you're
+    # paranoid.
+    alfred_jwt_access_ttl_minutes: int = Field(default=60)
+    # Refresh-token life — the cookie that quietly mints new access
+    # tokens without you re-entering a password. 30 days = "log in
+    # once a month".
+    alfred_jwt_refresh_ttl_days: int = Field(default=30)
+    # Brute-force lockout. After this many consecutive failed
+    # attempts from one client IP the login endpoint stops responding
+    # for ``alfred_login_lockout_minutes`` minutes.
+    alfred_login_max_failures: int = Field(default=5)
+    alfred_login_lockout_minutes: int = Field(default=15)
+
     # ─── Gmail (SMTP, app-password auth) ────────────────────────────────
     alfred_gmail_address: str = Field(default="")
     alfred_gmail_app_password: str = Field(default="")
@@ -162,6 +191,27 @@ class Settings(BaseSettings):
     def has_cloud(self) -> bool:
         """Whether a real Anthropic key has been configured."""
         return bool(self.anthropic_api_key and self.anthropic_api_key.strip())
+
+    @property
+    def has_auth(self) -> bool:
+        """Whether the password gate is enabled.
+
+        Auth is opt-in by ``ALFRED_PASSWORD_HASH`` being set. Backwards-
+        compatible with existing deployments that just relied on the
+        Tailscale-only network gate. We refuse to enable auth without
+        also rotating the JWT secret away from the placeholder — that
+        would be a footgun on the first deploy.
+        """
+        if not self.alfred_password_hash.strip():
+            return False
+        if self.alfred_jwt_secret == "CHANGE-ME-INSECURE-PLACEHOLDER":
+            raise RuntimeError(
+                "ALFRED_PASSWORD_HASH is set but ALFRED_JWT_SECRET is still "
+                "the placeholder. Generate a real secret with "
+                "`python -c 'import secrets; print(secrets.token_hex(32))'` "
+                "and set it in .env before starting Alfred."
+            )
+        return True
 
     @property
     def has_local_chat(self) -> bool:

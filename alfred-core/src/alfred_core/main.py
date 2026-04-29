@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
+import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from alfred_core import __version__
 from alfred_core.api import (
+    auth,
     chat,
     conversations,
     email,
@@ -24,6 +26,7 @@ from alfred_core.api import (
     weather,
     workshop,
 )
+from alfred_core.api.auth import require_auth
 from alfred_core.db.session import init_db
 
 
@@ -40,27 +43,48 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# CORS origins. Behind Tailscale a wildcard would be fine, but as soon
+# as the auth gate is on we MUST send a real origin (browsers refuse
+# to send cookies to ``Access-Control-Allow-Origin: *`` with
+# ``allow_credentials=True``). The user sets ALFRED_FRONTEND_ORIGIN in
+# .env to their HUD URL, e.g. ``http://alfred.local:3000``.
+_frontend_origin = os.environ.get("ALFRED_FRONTEND_ORIGIN", "").strip()
+_cors_origins = (
+    [_frontend_origin]
+    if _frontend_origin
+    else [
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "http://alfred.local:3000",
+    ]
+)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # behind Tailscale; tighten later if exposed publicly
+    allow_origins=_cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
+# Public routers — never gated.
 app.include_router(health.router)
-app.include_router(chat.router)
-app.include_router(facts.router)
-app.include_router(conversations.router)
-app.include_router(voice.router)
-app.include_router(email.router)
-app.include_router(spotify.router)
-app.include_router(weather.router)
-app.include_router(memory.router)
-app.include_router(vision.router)
-app.include_router(printer.router)
-app.include_router(vitals.router)
-app.include_router(workshop.router)
+app.include_router(auth.router)
+
+# Gated routers. ``require_auth`` is a no-op when ALFRED_PASSWORD_HASH
+# is unset, so existing deployments keep working unchanged.
+_protected = [Depends(require_auth)]
+app.include_router(chat.router, dependencies=_protected)
+app.include_router(facts.router, dependencies=_protected)
+app.include_router(conversations.router, dependencies=_protected)
+app.include_router(voice.router, dependencies=_protected)
+app.include_router(email.router, dependencies=_protected)
+app.include_router(spotify.router, dependencies=_protected)
+app.include_router(weather.router, dependencies=_protected)
+app.include_router(memory.router, dependencies=_protected)
+app.include_router(vision.router, dependencies=_protected)
+app.include_router(printer.router, dependencies=_protected)
+app.include_router(vitals.router, dependencies=_protected)
+app.include_router(workshop.router, dependencies=_protected)
 
 
 @app.get("/")
