@@ -198,7 +198,7 @@ export function DesignView({ conversationId, onConversationCreated }: Props) {
                 <div style={{ opacity: 0.6, fontStyle: "italic" }}>
                   Describe what you want to build, sir. I can help with
                   proportions, sketch-out, or finding existing designs to
-                  remix. Show me a photo via the camera if it's easier.
+                  remix. Show me a photo via the camera if it&rsquo;s easier.
                 </div>
               ) : (
                 messages.map((m, i) => (
