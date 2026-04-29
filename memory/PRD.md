@@ -1,69 +1,65 @@
 # Alfred AI — PRD
 
 ## Original problem statement
-> Alfred AI: local-first JARVIS-style personal assistant. User wants improved hand/face/body tracking for martial arts coaching, facial recognition, a more 3D HUD, runs locally in Docker (eventually on Pi 5).
-> Repo: https://github.com/Micron2005/Alfred-ai
+Local-first JARVIS-style personal assistant. User wants improved hand/face/body tracking, facial recognition, a 3D HUD, runs locally in Docker (eventually on Pi 5).
+Repo: https://github.com/Micron2005/Alfred-ai
 
 ## Architecture
-- **alfred-core** (FastAPI + SQLAlchemy + pgvector + Postgres)
+- **alfred-core** (FastAPI + Postgres + pgvector)
 - **alfred-web** (Next.js 15 + React 19) — JARVIS HUD with hand/face/pose tracking, 3D orb, holographic Earth, CAD studio
-- **External**: Ollama, Anthropic, MediaPipe, **MapLibre GL + OpenFreeMap** (3D vector tiles)
+- **External**: Ollama, Anthropic, MediaPipe, MapLibre GL + OpenFreeMap (3D vector tiles)
 - Docker Compose, deployable behind Tailscale
 
 ## Persona
 Single user — Mukarram Mohammad Alam. Alfred is a dry, witty British butler.
 
-## What's been implemented (Feb 2026 fork — all sessions)
+## What's been implemented (Feb 2026 fork — all sessions, current state)
 
-### JARVIS HUD polish
-- ✅ TitleBlock, GreetingCard, OperationsLog, HudFrame corner brackets
+### HUD layout
+- ✅ 4 tabs (HUD / CHAT / WORKOUT / DESIGN)
+- ✅ **No ALFRED title block / "At your service" card** — minimal HUD per user request
+- ✅ JARVIS HudFrame corner brackets, Operations Log (bottom-left), System Status pill (top-right, now a moveable HudWidget)
+- ✅ HUD canvas always mounted; `customEnabled` only toggles drag/resize/hide handles → customizations persist when CUSTOMIZE is off
+- ✅ Canvas `overflow: visible` + baseline height 880 → camera widget reachable (was getting clipped before)
+- ✅ Default widget positions tightened so they don't overlap on first paint
 
-### 4-tab layout
-- ✅ HUD / CHAT / WORKOUT / DESIGN with two-hand swipe
-- ✅ Full-screen Chat tab (no HUD bleed)
-- ✅ Dedicated Workout tab (camera + form coach)
-- ✅ Workout/face widgets only render when camera is on AND data is live
+### Holographic Earth — standalone (NOT a HudWidget)
+- ✅ **`FloatingEarth.tsx`** — own free-floating component with a "⠿ EARTH · HOLOGRAM" drag handle at top, **always draggable** regardless of customize mode
+- ✅ Position persisted to its own `localStorage` key (`alfred.floatingEarth.v2`)
+- ✅ Inside the box: globe is fully interactive at all times (rotate, zoom, click-to-pick) — drag handle is the only move surface so the globe's gesture doesn't fight the move gesture
+- ✅ Globe = NASA Blue Marble + custom GLSL hologram shader (cyan luminance ramp, fresnel, scanlines), no starfield
+- ✅ EXPAND opens MapLibre 3D fly-over (rendered via `createPortal` to escape canvas transform stacking context — fixes black-screen bug)
+- ✅ MapLibre `dark` style + OSM `fill-extrusion` 3D buildings + cyan CSS hologram filter; loading overlay; place search via Nominatim
 
-### Holographic Earth
-- ✅ NASA Blue Marble texture + custom GLSL hologram shader (cyan luminance ramp + fresnel + scanlines)
-- ✅ No starfield (clean floating globe)
-- ✅ Frame-less, registered as a moveable HudWidget
-- ✅ MapLibre GL detail view with OpenFreeMap dark vector tiles + 3D building extrusions; camera tilted 60°; place search via Nominatim; **rendered via React portal so the modal escapes the canvas's transform stacking context** (fixes "click into Earth shows black screen behind HUD overlays")
-- ✅ Loading overlay ("INITIALISING 3D MAP …") + error banner
+### Voice — tab switching + speech UX
+- ✅ **Voice tab switching** — say "Alfred, go to the workout tab" / "switch to chat" / "open design" / "back to the HUD" and Alfred navigates immediately, bypassing the LLM
+- ✅ Lenient natural-language matcher: navigation verb (`go / take me / switch / open / show / navigate / head / jump / move / bring / pull up`) + tab noun (`hud / home / chat / workout / form coach / design / cad / etc.`)
+- ✅ Echoed in chat history + spoken acknowledgement ("Switching to the Workout tab, sir.") when voice-out is on
+- ✅ Whisper hallucination filter; friendly verbal apology ("Apologies, sir — I didn't quite catch that.") on STT failure with 4 s dedupe
 
-### HUD customization (Feb 2026 — late session)
-- ✅ **Customizations now persist** when toggling CUSTOMIZE off — the canvas is always mounted; `customEnabled` only toggles drag/resize/hide handles
-- ✅ **SystemStatus pill is now a moveable HudWidget** (`system-status` in `hudLayout`)
-- ✅ Default layout positions tightened so widgets don't overlap on first paint
-- ✅ All widgets (clock, weather, orb, spotify, camera, workout, face-recognition, earth, system-status) registered + persisted to localStorage
-
-### Voice & speech
-- ✅ Hallucination filter in Composer (regex match against Whisper stock phrases)
-- ✅ Friendly apology — Alfred speaks "Apologies, sir — I didn't quite catch that. Could you say it again?" via TTS instead of raw error banners
-- ✅ Dedupe: 4-second cooldown on apologies
+### Tab-swipe gesture — deferred per user
+- 🟡 Increased cooldown 900 → 1600 ms + post-swipe band-exit latch wired in, but user requested we move on; voice command is the new primary tab-switch mechanic.
 
 ### Face recognition
 - ✅ Pose normalisation + EMA smoothing + sticky matching
 - ✅ Only renders when camera is on AND face is live
 
-### Tab swipe
-- ✅ Cooldown bumped 900ms → 1600ms
-- ✅ Post-swipe "exit band required" latch — both hands must leave the central detection band before a new swipe arms (prevents the return-swing from triggering a counter-swipe)
+### Workout
+- ✅ Dedicated WORKOUT tab with camera preview + form coach (so the HUD stays clean)
 
 ## Backlog (P0 / P1 / P2)
 
 ### P0 — for next session
-- ⏳ User pulls Feb 2026 changes locally and tests on real hardware
-- ⏳ Confirm HUD layout persistence + tab swipe + Earth → 3D map flow on user's local Docker build
+- ⏳ User pulls Feb 2026 changes locally (`git pull && docker compose up --build`) and validates HUD layout persistence + Earth dragging + voice tab switching + Earth → 3D map flow on real hardware
 - ⏳ Tune the form-coach heuristics with real footage
 
-### P1 — feature follow-ups (user-requested, partially deferred)
-- ⏳ **Hand-gesture control for the Earth** — one-hand pinch+drag to rotate, two-hand pinch to zoom (existing MediaPipe hand state needs a global bridge to reach the lazy R3F component); Tony-Stark gesture vibe
-- ⏳ **Voice command "Alfred, activate customization"** — wire a wake-phrase intent to `hud.setCustomEnabled(true)` so the user can enter customize mode hands-free
-- ⏳ **Both-hand drag/resize gestures** on widgets in customize mode (currently mouse/touch only; needs hand-cursor → pointer-event bridge)
-- ⏳ **Nightfall protocol auth** — admin-face enrollment that gates Nightfall mode: only the registered admin face can flip the protocol; "Alfred, remember my face as admin for nightfall protocol" command
-- ⏳ **Photorealistic Google-Earth tiles** in the detail view — Cesium ion (free token) or Google Maps Platform Photorealistic 3D Tiles (API key) — `HoloMapView.tsx` is set up so we can swap the tile provider in one place
-- ⏳ **3D fly-down on click** — animate the R3F camera into the city view on the same canvas instead of opening a separate modal
+### P1 — feature follow-ups (carried over)
+- ⏳ **Hand-gesture control for the Earth** — one-hand pinch+drag to rotate, two-hand pinch to zoom (existing MediaPipe state needs a global bridge to reach the lazy R3F component); Tony-Stark gesture vibe
+- ⏳ **Voice command "Alfred, activate customization"** — wire wake-phrase intent to `hud.setCustomEnabled(true)`
+- ⏳ **Both-hand drag/resize gestures** in customize mode (currently mouse/touch only; needs hand-cursor → pointer-event bridge)
+- ⏳ **Nightfall protocol auth via face** — admin-face enrollment that gates Nightfall mode; "Alfred, remember my face as admin for nightfall protocol"
+- ⏳ **Photorealistic Google-Earth tiles** in `HoloMapView` — Cesium ion (free token) or Google Maps Photorealistic 3D Tiles (API key); plug into the existing tile-source point in `HoloMapView.tsx`
+- ⏳ **3D fly-down on click** — animate the R3F camera down toward picked lat/lon on the same canvas instead of opening a separate modal
 - ⏳ Replace 96-D geometric face vector with face-api.js 128-D
 - ⏳ CAD Studio Phase A (deferred per user)
 - ⏳ Direct .gcode upload to Creality K1 Max
@@ -77,20 +73,19 @@ Single user — Mukarram Mohammad Alam. Alfred is a dry, witty British butler.
 - ⏳ Chat-driven CAD
 - ⏳ PWA install
 - ⏳ Pi 5 deployment guide
-- ⏳ Native mobile app
-- ⏳ Workout history & progress tracking
+- ⏳ Native mobile app (Capacitor)
+- ⏳ Workout history
 
-## Key files (Feb 2026 additions / changes)
-- `/app/alfred-web/src/components/TitleBlock.tsx` · `GreetingCard.tsx` · `SystemStatus.tsx` (now widget) · `OperationsLog.tsx`
-- `/app/alfred-web/src/components/ChatTabView.tsx` · `WorkoutTabView.tsx`
-- `/app/alfred-web/src/components/HolographicEarth.tsx` (textured + shader, no stars)
-- `/app/alfred-web/src/components/HoloMapView.tsx` (MapLibre 3D + loading overlay + portal-rendered)
-- `/app/alfred-web/src/components/EarthHologramWidget.tsx` (uses `createPortal` so the modal escapes canvas transforms)
-- `/app/alfred-web/src/components/HudWidget.tsx` (always renders absolute; customEnabled now only toggles handles)
+## Key files (Feb 2026 — current state)
+- `/app/alfred-web/src/components/FloatingEarth.tsx` (NEW — standalone draggable Earth)
+- `/app/alfred-web/src/components/HolographicEarth.tsx` · `HoloMapView.tsx` · `EarthHologramWidget.tsx`
+- `/app/alfred-web/src/components/HudWidget.tsx` (always renders absolute; customEnabled toggles handles only)
+- `/app/alfred-web/src/components/SystemStatus.tsx` (now a widget; no fixed position)
 - `/app/alfred-web/src/components/Composer.tsx` (hallucination filter, onUnclear)
-- `/app/alfred-web/src/components/ChatWindow.tsx` (always-on canvas, voice apology, conditional widget visibility)
+- `/app/alfred-web/src/components/ChatWindow.tsx` (always-on canvas, voice tab-switch intent matcher in `detectTabIntent`, voice apology, conditional widget visibility, no TitleBlock/GreetingCard)
+- `/app/alfred-web/src/components/ChatTabView.tsx` · `WorkoutTabView.tsx`
 - `/app/alfred-web/src/lib/tabs.ts` (4-tab union)
-- `/app/alfred-web/src/lib/hudLayout.ts` (`earth-hologram`, `system-status`, tightened defaults)
-- `/app/alfred-web/src/lib/useTwoHandSwipe.ts` (longer cooldown, post-swipe band-exit latch)
+- `/app/alfred-web/src/lib/hudLayout.ts` (camera + workout-coach + face-recognition repositioned to top-right; system-status widget; earth-hologram still registered for legacy support but unused)
+- `/app/alfred-web/src/lib/useTwoHandSwipe.ts` (cooldown + band-exit latch; deferred per user)
 - `/app/alfred-web/src/lib/useFaceTracking.ts` (pose normalise + EMA)
 - `/app/alfred-web/package.json` (added `maplibre-gl`)

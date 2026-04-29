@@ -33,11 +33,9 @@ import { ExpressionReadout } from "@/components/ExpressionReadout";
 import { PoseSkeleton } from "@/components/PoseSkeleton";
 import { QuickToolsMenu } from "@/components/QuickToolsMenu";
 import { Orb3D } from "@/components/Orb3D";
-import { TitleBlock } from "@/components/TitleBlock";
-import { GreetingCard } from "@/components/GreetingCard";
 import { SystemStatus, type Indicator } from "@/components/SystemStatus";
 import { OperationsLog, useOperationsLog } from "@/components/OperationsLog";
-import { EarthHologramWidget } from "@/components/EarthHologramWidget";
+import { FloatingEarth } from "@/components/FloatingEarth";
 import { SpotifyPlayer } from "@/components/SpotifyPlayer";
 import { CameraPreview } from "@/components/CameraPreview";
 import { HudWidget } from "@/components/HudWidget";
@@ -74,6 +72,38 @@ const WAKE_LABEL = WAKE_KEYWORD.replace(/_/g, " ").replace(
   /\b\w/g,
   (c) => c.toUpperCase(),
 );
+
+/**
+ * Voice / text intent — "Alfred, take me to the workout tab".
+ *
+ * The matcher is intentionally lenient: it accepts a leading
+ * "alfred,?" + a natural-language "go to / switch to / open /
+ * show me / take me to / navigate to" phrase + any of the four
+ * tab nouns. Both cases like "open the chat tab" and bare "chat"
+ * (after "alfred,") are accepted so users don't have to memorise
+ * a specific incantation.
+ */
+type TabIntent = { tab: TabId; label: string };
+const TAB_INTENT_PATTERNS: ReadonlyArray<{ re: RegExp; tab: TabId; label: string }> = [
+  // Order matters — more specific terms (workout / form coach / etc.) first.
+  { re: /\b(?:workout|form\s*coach|exercise|coach|fitness|gym)\b/i, tab: "workout", label: "the Workout tab" },
+  { re: /\b(?:design|cad|cad\s*studio|3d\s*print(?:er|ing)?|model(?:l?ing|ler)?)\b/i, tab: "design", label: "the Design tab" },
+  { re: /\b(?:chat|messages?|conversation|talk|inbox)\b/i, tab: "chat", label: "the Chat tab" },
+  { re: /\b(?:hud|home|standby|main|dashboard|overview)\b/i, tab: "hud", label: "the HUD" },
+];
+function detectTabIntent(raw: string): TabIntent | null {
+  const text = raw.trim().toLowerCase();
+  if (!text) return null;
+  // Require a navigation verb so casual mentions ("I'm working out")
+  // don't accidentally hijack the user's chat. Verb list is broad.
+  const VERB =
+    /\b(?:go(?:\s+back)?|take\s+me|switch|open|show|navigate|head|jump|move|bring(?:\s+me)?|pull\s+up)\b/;
+  if (!VERB.test(text)) return null;
+  for (const p of TAB_INTENT_PATTERNS) {
+    if (p.re.test(text)) return { tab: p.tab, label: p.label };
+  }
+  return null;
+}
 
 export function ChatWindow() {
   const [messages, setMessages] = useState<ChatMessageOut[]>([]);
@@ -707,6 +737,35 @@ export function ChatWindow() {
 
   async function handleSend(text: string, images: ChatImage[] = []) {
     setError(null);
+
+    // Intercept tab-switch voice/text intents BEFORE sending to the
+    // LLM. Lets the user say "Alfred, go to the workout tab" / "open
+    // chat" / "switch to design" and Alfred actually navigates
+    // instead of responding with chat. Bypasses LLM round-trip
+    // entirely so it feels instant.
+    if (images.length === 0) {
+      const intent = detectTabIntent(text);
+      if (intent) {
+        setActiveTabPersisted(intent.tab);
+        // Echo the action into the chat history so the user sees
+        // what Alfred did (and so it shows up in Operations Log).
+        const ack = `Switching to ${intent.label}, sir.`;
+        setMessages((prev) => [
+          ...prev,
+          { id: crypto.randomUUID(), role: "user", content: text },
+          {
+            id: crypto.randomUUID(),
+            role: "assistant",
+            content: ack,
+          },
+        ]);
+        if (voiceOut) {
+          void speak(ack);
+        }
+        return;
+      }
+    }
+
     const userMsg: ChatMessageOut = {
       id: crypto.randomUUID(),
       role: "user",
@@ -1375,46 +1434,18 @@ export function ChatWindow() {
                     faceStatus={face.status}
                   />
                 </HudWidget>
-                <HudWidget
-                  id="earth-hologram"
-                  label={WIDGET_LABELS["earth-hologram"]}
-                  layout={hud.layout["earth-hologram"]}
-                  customEnabled={hud.customEnabled}
-                  scale={scale}
-                  onMove={(p) => hud.updateWidget("earth-hologram", p)}
-                  onHide={() => hud.hideWidget("earth-hologram")}
-                  hidden={!hud.layout["earth-hologram"].visible}
-                >
-                  <EarthHologramWidget />
-                </HudWidget>
+                {/* The holographic Earth is its own free-floating
+                    element (always-draggable from its handle bar,
+                    independent of customize mode) — see
+                    ``FloatingEarth.tsx``. Not wrapped in HudWidget. */}
+                <FloatingEarth scale={scale} />
               </>
             )}
           </ResponsiveHudCanvas>
 
-        {/* TitleBlock + GreetingCard render as static (non-widget)
-            HUD chrome on top of the canvas, since they're the
-            visual "header" and shouldn't move. The canvas widgets
-            below them are positioned absolutely from the canvas
-            origin so they don't interfere. */}
-        {activeTab === "hud" ? (
-          <div
-            style={{
-              position: "absolute",
-              top: 50,
-              left: "50%",
-              transform: "translateX(-50%)",
-              display: "flex",
-              flexDirection: "column",
-              alignItems: "center",
-              gap: 8,
-              pointerEvents: "none",
-              zIndex: 5,
-            }}
-          >
-            <TitleBlock text="ALFRED" subtitle="resident butler · v1" />
-            <GreetingCard greeting={greeting} />
-          </div>
-        ) : null}
+        {/* TitleBlock + GreetingCard removed per user preference —
+            the JARVIS HUD now reads as the orb + widgets without a
+            wordmark / greeting banner. */}
 
         {/*
           Hidden <video> for the camera feed. Kept in the main pane
@@ -1630,7 +1661,10 @@ function HudCustomizeToolbar({
  * a giant unscaled void below the canvas.
  */
 const HUD_CANVAS_BASELINE_WIDTH = 1100;
-const HUD_CANVAS_BASELINE_HEIGHT = 720;
+// Bumped from 720 → 880 so widgets placed in the bottom third
+// (camera, face-recognition, weather-strip) stay fully on-screen
+// instead of getting clipped under the canvas's overflow boundary.
+const HUD_CANVAS_BASELINE_HEIGHT = 880;
 
 function ResponsiveHudCanvas({
   children,
@@ -1665,10 +1699,11 @@ function ResponsiveHudCanvas({
         // The outer box reserves the *scaled* height so layout below
         // (anything after the HUD canvas) sits at the right Y.
         height: HUD_CANVAS_BASELINE_HEIGHT * scale,
-        // A scaled child can over-paint its parent on the right
-        // edge; ``overflow: hidden`` keeps the hud-canvas sub-pixel
-        // precise within the visible pane.
-        overflow: "hidden",
+        // ``overflow: visible`` so the camera + face-recognition
+        // widgets (which sit in the bottom third of the canvas)
+        // don't get clipped on shorter viewports — the user
+        // reported camera was "unreachable" with overflow hidden.
+        overflow: "visible",
       }}
     >
       <div

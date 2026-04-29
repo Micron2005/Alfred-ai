@@ -71,9 +71,12 @@ export const DEFAULT_LAYOUT: HudLayoutState = {
   // Orb sits centred — title block & greeting overlay sit above it.
   orb: { x: 480, y: 240, w: 320, h: 200, visible: true },
   spotify: { x: 24, y: 540, w: 460, h: "auto", visible: true },
-  camera: { x: 880, y: 480, w: 260, h: 180, visible: true },
-  "workout-coach": { x: 880, y: 240, w: 260, h: 220, visible: true },
-  "face-recognition": { x: 880, y: 700, w: 260, h: "auto", visible: true },
+  // Camera in the top-right corner so it's always visible without
+  // scrolling — was previously stranded near the bottom of the canvas
+  // where the user couldn't reach it.
+  camera: { x: 820, y: 240, w: 260, h: 180, visible: true },
+  "workout-coach": { x: 820, y: 460, w: 260, h: 220, visible: true },
+  "face-recognition": { x: 820, y: 700, w: 260, h: "auto", visible: true },
   "earth-hologram": { x: 320, y: 460, w: 480, h: 320, visible: true },
   "system-status": { x: 1160, y: 80, w: 200, h: "auto", visible: true },
 };
