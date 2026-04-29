@@ -41,7 +41,8 @@ export type HudWidgetId =
   | "workout-coach"
   | "face-recognition"
   | "earth-hologram"
-  | "system-status";
+  | "system-status"
+  | "vitals";
 
 export interface WidgetLayout {
   /** Top-left X position (px) inside the main pane. */
@@ -79,6 +80,12 @@ export const DEFAULT_LAYOUT: HudLayoutState = {
   "face-recognition": { x: 820, y: 700, w: 260, h: "auto", visible: true },
   "earth-hologram": { x: 320, y: 460, w: 480, h: 320, visible: true },
   "system-status": { x: 1160, y: 80, w: 200, h: "auto", visible: true },
+  // Vitals lands top-right by default, just under SystemStatus, so the
+  // user can see at a glance whether Alfred's own integrations are
+  // alive. Width=240 fits the longest "Local LLM" row + status pill
+  // without truncating; height stays auto so the panel grows /
+  // shrinks with the row count.
+  vitals: { x: 1160, y: 280, w: 240, h: "auto", visible: true },
 };
 
 const ALL_IDS: HudWidgetId[] = [
@@ -92,6 +99,7 @@ const ALL_IDS: HudWidgetId[] = [
   "face-recognition",
   "earth-hologram",
   "system-status",
+  "vitals",
 ];
 
 export const WIDGET_LABELS: Record<HudWidgetId, string> = {
@@ -105,6 +113,7 @@ export const WIDGET_LABELS: Record<HudWidgetId, string> = {
   "face-recognition": "Recognition",
   "earth-hologram": "Earth",
   "system-status": "System Status",
+  vitals: "Vitals",
 };
 
 function cloneDefault(): HudLayoutState {

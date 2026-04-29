@@ -113,8 +113,16 @@ export function VitalsPanel({ onSelfHeal }: VitalsPanelProps = {}) {
         VITALS
       </div>
       {error ? (
-        <div style={{ color: "var(--danger)", fontSize: 10 }}>
-          {error}
+        <div
+          data-testid="vitals-offline"
+          style={{
+            color: "var(--muted)",
+            fontSize: 10,
+            opacity: 0.65,
+            fontStyle: "italic",
+          }}
+        >
+          backend offline · retrying every 30 s
         </div>
       ) : vitals === null ? (
         <div style={{ color: "var(--muted)", fontSize: 10 }}>

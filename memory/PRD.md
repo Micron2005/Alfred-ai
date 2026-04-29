@@ -125,6 +125,15 @@ Single user — Mukarram Mohammad Alam. Alfred is a dry, witty British butler.
 - ✅ Clicking it routes to the Workshop sub-view with the problem statement + 2-3 candidate files (per-subsystem allowlist) pre-populated, ready to DIAGNOSE
 - ✅ One-click handoff: red light → diagnose → patch → apply
 
+**Vitals UX polish (Feb 2026)**
+- ✅ Vitals is now a real `HudWidget` — registered in `hudLayout.ts` as `vitals` with default position `(1160, 280)` (under SystemStatus, top-right). User can drag/resize/hide it like any other widget via 🎛 CUSTOMIZE.
+- ✅ When the backend is unreachable (preview, container down, network issue), the panel shows soft italic "backend offline · retrying every 30 s" instead of a harsh red 404 banner. Easier on the eyes when the backend is intentionally not running.
+
+**Workshop end-to-end test coverage** (Feb 2026)
+- ✅ `tests/test_workshop.py` (11 tests, all passing): list-files allowlist enforcement, file read with traversal/absolute/.env refusal, DIAGNOSE prompt construction with file contents + problem statement, full APPLY → file-on-disk-changed roundtrip, refusal of out-of-allowlist diffs, refusal of `.env` writes, partial-write prevention on bad diffs.
+- ✅ `tests/test_vitals.py` (5 tests, all passing): off-by-default state, ollama ok / missing-model warn / unreachable err, cloud-configured ok.
+- ✅ Total backend tests: **82 passing**. Including: auth (10), workshop (11), vitals (5), router (8), persona, ollama, wake, history-scrub, search markers, image markers, spotify markers, web search.
+
 ### Existing backlog (unchanged)
 
 ### P0 — for next session

@@ -1328,25 +1328,27 @@ export function ChatWindow() {
               <SystemStatus indicators={systemIndicators} />
             </HudWidget>
           ) : null}
-          {/* Vitals panel — Alfred's self-diagnostics. Pinned in the
-              top-right corner so it's always glanceable. Not yet
-              integrated into the layout-store / drag-drop system —
-              keeping it simple while the workshop UX settles. */}
-          <div
-            style={{
-              position: "absolute",
-              top: 18,
-              right: 18,
-              zIndex: 5,
-            }}
-          >
-            <VitalsPanel
-              onSelfHeal={(problem, paths) => {
-                setWorkshopSeed({ problem, paths });
-                setSubView("workshop");
-              }}
-            />
-          </div>
+          {/* Vitals widget — Alfred's self-diagnostics. Now a real
+              HudWidget so the user can drag/resize/hide it like any
+              other panel. Default position is just below
+              SystemStatus on the right edge. */}
+          {hud.layout.vitals.visible ? (
+            <HudWidget
+              id="vitals"
+              label={WIDGET_LABELS.vitals}
+              layout={hud.layout.vitals}
+              customEnabled={hud.customEnabled}
+              onMove={(p) => hud.updateWidget("vitals", p)}
+              onHide={() => hud.hideWidget("vitals")}
+            >
+              <VitalsPanel
+                onSelfHeal={(problem, paths) => {
+                  setWorkshopSeed({ problem, paths });
+                  setSubView("workshop");
+                }}
+              />
+            </HudWidget>
+          ) : null}
           <OperationsLog entries={opsLog.entries} />
         </>
       ) : null}
