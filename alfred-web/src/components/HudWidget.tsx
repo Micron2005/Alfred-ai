@@ -135,6 +135,11 @@ export function HudWidget({
           width: widthVal,
           height: heightVal,
           boxSizing: "border-box",
+          // Apply ``zIndex`` even in read-only mode so orb (z=12)
+          // sits above floating-Earth (z=8) and stays clickable.
+          // Without this, the prop only affected custom-edit mode
+          // and the orb-vs-Earth click interception persisted.
+          zIndex: zIndex,
         }}
       >
         {children}
