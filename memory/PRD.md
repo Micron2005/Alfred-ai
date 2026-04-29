@@ -47,13 +47,14 @@ Single user — Mukarram Mohammad Alam. Alfred is a dry, witty British butler.
 ### Workout
 - ✅ Dedicated WORKOUT tab with camera preview + form coach (so the HUD stays clean)
 
-### 3D Radial Menu (Feb 2026 — NEW)
+### 3D Radial Menu (Feb 2026 — NEW, verified iteration_3 ~92%)
 - ✅ **Click central JARVIS orb** → curved horizontal carousel overlay appears (Iron Man HUD aesthetic, full-screen)
 - ✅ Three carousel orbs: SPOTIFY (audio console), CHAT (conversation), WORKOUT (form coach) — each with bespoke 3D-styled glyph (pulsing equaliser bars / speech bubble / rotating wireframe figure)
 - ✅ ESC key + ✕ CLOSE button + backdrop-click all dismiss
 - ✅ Voice intent: "Alfred, open the menu" / "show modules" pops the same overlay
 - ✅ Selecting CHAT/WORKOUT routes to existing tabs; SPOTIFY opens dedicated 3D sub-view
 - ✅ Sub-view takes full HUD space (z-index 8500, opaque radial-gradient backdrop) with its own ← BACK button
+- ✅ **HudWidget.tsx fix**: zIndex prop is now applied in BOTH custom-edit and read-only render paths, so orb (z=12) sits above FloatingEarth (z=8) and is real-mouse-clickable (was the iteration_2 critical regression)
 
 ### Spotify 3D Audio Console (Feb 2026 — NEW)
 - ✅ **`Spotify3DView.tsx`** — full-screen 3D-styled console with pulsing orb visualiser + 32-bar spectrum ring
