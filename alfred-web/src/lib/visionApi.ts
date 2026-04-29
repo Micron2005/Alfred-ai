@@ -17,6 +17,9 @@ export interface FaceEnrollment {
   enrolled_at: string;
   /** Optional metadata. */
   notes?: string | null;
+  /** Marks this enrollment as a privileged "admin" face. Only
+   *  admins can flip Alfred into Nightfall protocol via voice. */
+  is_admin?: boolean;
 }
 
 export interface FaceMatch {
@@ -36,6 +39,7 @@ export async function enrollFace(
   name: string,
   identityVector: number[],
   notes?: string,
+  isAdmin: boolean = false,
 ): Promise<FaceEnrollment> {
   const resp = await fetch(`${API_BASE}/vision/face/enroll`, {
     method: "POST",
@@ -44,6 +48,7 @@ export async function enrollFace(
       name,
       identity_vector: identityVector,
       notes: notes ?? null,
+      is_admin: isAdmin,
     }),
   });
   if (!resp.ok) throw new Error(`Enroll failed: ${resp.status}`);

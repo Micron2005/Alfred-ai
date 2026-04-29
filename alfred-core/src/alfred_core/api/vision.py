@@ -33,6 +33,7 @@ class EnrollRequest(BaseModel):
     name: str = Field(..., min_length=1, max_length=120)
     identity_vector: list[float]
     notes: str | None = None
+    is_admin: bool = False
 
 
 class IdentifyRequest(BaseModel):
@@ -55,6 +56,7 @@ async def face_enroll(
             name=req.name,
             identity_vector=req.identity_vector,
             notes=req.notes,
+            is_admin=req.is_admin,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

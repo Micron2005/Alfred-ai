@@ -40,6 +40,7 @@ class EnrollmentOut(BaseModel):
     name: str
     enrolled_at: str
     notes: str | None = None
+    is_admin: bool = False
 
 
 class MatchOut(BaseModel):
@@ -66,6 +67,7 @@ def _to_out(row: FaceEnrollment) -> EnrollmentOut:
         name=row.name,
         enrolled_at=row.created_at.isoformat(),
         notes=row.notes,
+        is_admin=bool(row.is_admin),
     )
 
 
@@ -75,12 +77,14 @@ async def enroll(
     name: str,
     identity_vector: list[float],
     notes: str | None = None,
+    is_admin: bool = False,
 ) -> EnrollmentOut:
     vec = _validate_vector(identity_vector)
     row = FaceEnrollment(
         name=name.strip() or "Unknown",
         identity_vector=vec,
         notes=notes,
+        is_admin=is_admin,
     )
     session.add(row)
     await session.flush()

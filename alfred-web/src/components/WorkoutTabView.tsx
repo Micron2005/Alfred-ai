@@ -29,6 +29,10 @@ interface Props {
   poseStatus: "off" | "starting" | "ready" | "error";
   face: FaceState | null;
   faceStatus: "off" | "starting" | "ready" | "error";
+  /** Recognised name overlay info (derived in ChatWindow from
+   *  ``useFaceIdentity``). */
+  recognizedName?: string | null;
+  isAdmin?: boolean;
   /** Toggle camera on/off — the workout flow is useless without it. */
   onToggleCamera: () => void;
 }
@@ -42,6 +46,8 @@ export function WorkoutTabView({
   poseStatus,
   face,
   faceStatus,
+  recognizedName,
+  isAdmin,
   onToggleCamera,
 }: Props) {
   return (
@@ -138,6 +144,9 @@ export function WorkoutTabView({
               status={cameraStatus}
               faceCount={faceCount}
               streamRef={cameraStreamRef}
+              recognizedName={recognizedName}
+              faceBbox={face?.bbox ?? null}
+              isAdmin={isAdmin}
             />
           </div>
         ) : (

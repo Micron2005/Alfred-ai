@@ -22,6 +22,8 @@ import { useWakeWord } from "@/lib/useWakeWord";
 import { useCamera } from "@/lib/useCamera";
 import { useHandTracking } from "@/lib/useHandTracking";
 import { useFaceTracking } from "@/lib/useFaceTracking";
+import { useFaceIdentity } from "@/lib/useFaceIdentity";
+import { enrollFace } from "@/lib/visionApi";
 import { usePoseTracking } from "@/lib/usePoseTracking";
 import { useTwoHandSwipe } from "@/lib/useTwoHandSwipe";
 import { loadTab, neighbourTab, persistTab, type TabId } from "@/lib/tabs";
@@ -97,8 +99,7 @@ const TAB_NOUNS: ReadonlyArray<{ noun: RegExp; tab: TabId; label: string }> = [
 ];
 const NAV_VERB =
   /^(?:go(?:\s+back)?|take\s+me|switch|open|show\s+me|navigate|jump|bring\s+me|pull\s+up|head\s+(?:to|over)|move\s+to)/;
-function detectTabIntent(raw: string): TabIntent | null {
-  const trimmed = raw.trim().toLowerCase().replace(/[.?!]+$/, "");
+function detectTabIntent(raw: string): TabIntent | null {  const trimmed = raw.trim().toLowerCase().replace(/[.?!]+$/, "");
   if (!trimmed) return null;
   // Strip an optional leading "alfred," / "alfred " — wake-word
   // style lead-ins are common when the user is dictating.
@@ -119,6 +120,55 @@ function detectTabIntent(raw: string): TabIntent | null {
     if (full.test(stripped)) return { tab, label };
   }
   return null;
+}
+
+/**
+ * "Alfred, remember my face as admin for nightfall protocol" — or
+ * any reasonable variation. Returns the display-name to enroll
+ * under (defaults to "Admin" when the user didn't say one).
+ */
+function detectEnrollAdminIntent(raw: string): { name: string } | null {
+  const text = raw.trim().toLowerCase().replace(/[.?!]+$/, "");
+  if (!text) return null;
+  const stripped = text.replace(/^(?:hey\s+|ok\s+)?alfred[,\s]+/, "").trim();
+  if (stripped.split(/\s+/).length > 16) return null;
+  const re =
+    /^(?:please\s+)?(?:remember|save|register|enrol+|add|store|record)\s+(?:my\s+face|me)\s+(?:as\s+(?:the\s+)?(?:admin|administrator)|(?:for|to|as)\s+(?:the\s+)?(?:nightfall|admin|administrator).*)/i;
+  if (!re.test(stripped)) return null;
+  // Parse an optional "my name is X" — else default to "Admin".
+  const nameMatch = stripped.match(/(?:my\s+name\s+is|i(?:'|\s+a)m)\s+([a-z][a-z\s\-']{1,40})/i);
+  const name = nameMatch?.[1]?.trim().replace(/\s+/g, " ") ?? "Admin";
+  return { name: titleCase(name) };
+}
+
+/**
+ * "Activate nightfall protocol" / "enter nightfall mode" /
+ * "standard protocol" / "exit nightfall". Returns whether the
+ * intent is to enable (``true``) or disable (``false``) Nightfall.
+ */
+function detectNightfallIntent(raw: string): { enable: boolean } | null {
+  const text = raw.trim().toLowerCase().replace(/[.?!]+$/, "");
+  if (!text) return null;
+  const stripped = text.replace(/^(?:hey\s+|ok\s+)?alfred[,\s]+/, "").trim();
+  if (stripped.split(/\s+/).length > 10) return null;
+  const enable =
+    /^(?:activate|engage|enter|turn\s+on|enable|start|initiate|begin|go\s+(?:into|to))\s+(?:the\s+)?nightfall(?:\s+protocol|\s+mode)?$/.test(
+      stripped,
+    );
+  const disable =
+    /^(?:deactivate|disengage|exit|leave|turn\s+off|disable|stop|end|cancel|stand\s+down|back\s+to\s+(?:standard|normal)|standard\s+(?:protocol|mode))(?:\s+(?:the\s+)?nightfall(?:\s+protocol|\s+mode)?)?$/.test(
+      stripped,
+    );
+  if (enable) return { enable: true };
+  if (disable) return { enable: false };
+  return null;
+}
+
+function titleCase(s: string): string {
+  return s
+    .split(/\s+/)
+    .map((w) => (w.length > 0 ? w[0].toUpperCase() + w.slice(1) : w))
+    .join(" ");
 }
 
 export function ChatWindow() {
@@ -208,6 +258,18 @@ export function ChatWindow() {
   const pose = usePoseTracking({
     enabled: true,
     sharedStream: camera.streamRef.current ?? null,
+  });
+
+  // Single source of truth for face identity — polls the backend
+  // ``/vision/face/identify`` whenever a face is in frame and
+  // commits sticky-vote updates so the displayed name doesn't
+  // flicker. Consumed by CameraPreview (overlay name label),
+  // FaceRecognitionWidget (panel readout), and the Nightfall
+  // protocol gate.
+  const faceIdentity = useFaceIdentity({
+    face: face.face,
+    faceStatus: face.status,
+    enabled: cameraOn,
   });
 
   // Two-hand "sliding-door" gesture switches between the HUD,
@@ -763,8 +825,6 @@ export function ChatWindow() {
       const intent = detectTabIntent(text);
       if (intent) {
         setActiveTabPersisted(intent.tab);
-        // Echo the action into the chat history so the user sees
-        // what Alfred did (and so it shows up in Operations Log).
         const ack = `Switching to ${intent.label}, sir.`;
         setMessages((prev) => [
           ...prev,
@@ -775,9 +835,87 @@ export function ChatWindow() {
             content: ack,
           },
         ]);
-        if (voiceOut) {
-          void speak(ack);
+        if (voiceOut) void speak(ack);
+        return;
+      }
+
+      // "Remember my face as admin for nightfall protocol" —
+      // enrolls the currently-visible face as an admin enrollment,
+      // using either the user's stored display name or a reasonable
+      // default. Requires the face-identity vector to be ready.
+      const enrollIntent = detectEnrollAdminIntent(text);
+      if (enrollIntent) {
+        const currentFace = face.face;
+        if (!cameraOn || !currentFace) {
+          const msg =
+            "I can't see your face at the moment, sir. Please enable the camera and step into view.";
+          setMessages((prev) => [
+            ...prev,
+            { id: crypto.randomUUID(), role: "user", content: text },
+            { id: crypto.randomUUID(), role: "assistant", content: msg },
+          ]);
+          if (voiceOut) void speak(msg);
+          return;
         }
+        try {
+          const enrolled = await enrollFace(
+            enrollIntent.name,
+            currentFace.identityVector,
+            "Registered via voice for Nightfall protocol",
+            true,
+          );
+          const ack = `Face registered as admin, ${enrolled.name}. Nightfall protocol is keyed to your face.`;
+          setMessages((prev) => [
+            ...prev,
+            { id: crypto.randomUUID(), role: "user", content: text },
+            { id: crypto.randomUUID(), role: "assistant", content: ack },
+          ]);
+          if (voiceOut) void speak(ack);
+        } catch (err) {
+          const msg = `I couldn't save the enrollment, sir. ${
+            err instanceof Error ? err.message : ""
+          }`.trim();
+          setMessages((prev) => [
+            ...prev,
+            { id: crypto.randomUUID(), role: "user", content: text },
+            { id: crypto.randomUUID(), role: "assistant", content: msg },
+          ]);
+          if (voiceOut) void speak(msg);
+        }
+        return;
+      }
+
+      // "Activate nightfall protocol" — flips into Nightfall mode,
+      // but ONLY if an admin face is currently in frame. Otherwise
+      // Alfred refuses politely (the whole point of the gate).
+      const nightfallIntent = detectNightfallIntent(text);
+      if (nightfallIntent) {
+        const willEnable = nightfallIntent.enable;
+        if (willEnable && !faceIdentity.isAdmin) {
+          const reason = !cameraOn
+            ? "the camera is off"
+            : !face.face
+              ? "I don't see you"
+              : "you're not registered as an admin";
+          const msg = `Nightfall protocol is keyed to an administrator's face, sir. Access denied — ${reason}.`;
+          setMessages((prev) => [
+            ...prev,
+            { id: crypto.randomUUID(), role: "user", content: text },
+            { id: crypto.randomUUID(), role: "assistant", content: msg },
+          ]);
+          if (voiceOut) void speak(msg);
+          return;
+        }
+        setMode(willEnable ? "nightfall" : "standard");
+        const ack = willEnable
+          ? "Nightfall protocol engaged. Welcome, Batman."
+          : "Returning to standard protocol, sir.";
+        setMessages((prev) => [
+          ...prev,
+          { id: crypto.randomUUID(), role: "user", content: text },
+          { id: crypto.randomUUID(), role: "assistant", content: ack },
+        ]);
+        if (voiceOut) void speak(ack);
         return;
       }
     }
@@ -1071,6 +1209,8 @@ export function ChatWindow() {
           poseStatus={pose.status}
           face={face.face}
           faceStatus={face.status}
+          recognizedName={faceIdentity.displayName}
+          isAdmin={faceIdentity.isAdmin}
           onToggleCamera={() => setCameraPersisted(!cameraOn)}
         />
       ) : (
@@ -1409,6 +1549,9 @@ export function ChatWindow() {
                     status={camera.status}
                     faceCount={camera.faceCount}
                     streamRef={camera.streamRef}
+                    recognizedName={faceIdentity.displayName}
+                    faceBbox={face.face?.bbox ?? null}
+                    isAdmin={faceIdentity.isAdmin}
                   />
                 </HudWidget>
                 <HudWidget

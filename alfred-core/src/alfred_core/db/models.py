@@ -11,7 +11,7 @@ from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
 from pgvector.sqlalchemy import Vector
-from sqlalchemy import ForeignKey, String, Text
+from sqlalchemy import Boolean, ForeignKey, String, Text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
@@ -219,6 +219,13 @@ class FaceEnrollment(Base):
     id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
     name: Mapped[str] = mapped_column(String(120), index=True)
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # ``is_admin`` enrollments unlock privileged voice commands —
+    # most importantly the Nightfall protocol, which only flips
+    # when an admin face is currently in frame. There can be
+    # multiple admins (e.g. you + a trusted family member); they
+    # all carry equal weight. Defaults to false so casual
+    # enrollments via the panel never accidentally grant access.
+    is_admin: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     identity_vector: Mapped[list[float]] = mapped_column(
         Vector(FACE_IDENTITY_DIM)
     )

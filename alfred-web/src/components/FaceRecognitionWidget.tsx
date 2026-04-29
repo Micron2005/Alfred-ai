@@ -57,6 +57,7 @@ function matchKey(res: FaceIdentifyResponse | null): string {
 
 export function FaceRecognitionWidget({ face, faceStatus }: Props) {
   const [name, setName] = useState("");
+  const [enrollAsAdmin, setEnrollAsAdmin] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [identity, setIdentity] = useState<FaceIdentifyResponse | null>(null);
@@ -129,15 +130,16 @@ export function FaceRecognitionWidget({ face, faceStatus }: Props) {
     setBusy(true);
     setError(null);
     try {
-      await enrollFace(name.trim(), face.identityVector);
+      await enrollFace(name.trim(), face.identityVector, undefined, enrollAsAdmin);
       setName("");
+      setEnrollAsAdmin(false);
       setEnrollments(await listFaceEnrollments());
     } catch (e) {
       setError(e instanceof Error ? e.message : "Enroll failed");
     } finally {
       setBusy(false);
     }
-  }, [face, name, busy]);
+  }, [face, name, busy, enrollAsAdmin]);
 
   const match = identity?.match;
   return (
@@ -241,9 +243,35 @@ export function FaceRecognitionWidget({ face, faceStatus }: Props) {
               disabled={busy || !name.trim()}
               style={{ padding: "3px 8px", fontSize: 10 }}
             >
-              {busy ? "…" : "ENROLL"}
+              {busy ? "…" : enrollAsAdmin ? "ENROLL ADMIN" : "ENROLL"}
             </button>
           </div>
+          {/* Admin checkbox — sits just under the name input. An
+              admin enrollment gates the Nightfall protocol voice
+              toggle, so saying "activate nightfall" will only
+              work when an admin face is currently in frame. */}
+          <label
+            data-testid="enroll-admin-toggle"
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 6,
+              marginTop: 4,
+              fontSize: 9,
+              letterSpacing: 1.1,
+              color: enrollAsAdmin ? "var(--accent)" : "var(--muted)",
+              cursor: "pointer",
+              userSelect: "none",
+            }}
+          >
+            <input
+              type="checkbox"
+              checked={enrollAsAdmin}
+              onChange={(e) => setEnrollAsAdmin(e.target.checked)}
+              style={{ accentColor: "var(--accent)" }}
+            />
+            REGISTER AS NIGHTFALL ADMIN
+          </label>
           {error ? (
             <div
               style={{
