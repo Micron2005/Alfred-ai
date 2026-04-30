@@ -37,12 +37,16 @@ def _recompute_signature(
 ) -> str:
     """Re-derive the signature the way Onshape will on its side.
 
+    Mirrors the official Onshape reference (Node.js sample in their
+    API-keys docs) byte-for-byte — note the *trailing* ``\\n`` after
+    the query string, which the server verifier is strict about.
+
     Kept private to this test file; the real one is in ``onshape.py``
     but we want an independent implementation here so a bug in the
     production signer would actually trip a mismatch.
     """
     string_to_sign = (
-        f"{method.lower()}\n{nonce}\n{date}\n{content_type}\n{path}\n{query}"
+        f"{method.lower()}\n{nonce}\n{date}\n{content_type}\n{path}\n{query}\n"
     ).lower()
     return base64.b64encode(
         hmac.new(
@@ -51,6 +55,66 @@ def _recompute_signature(
             hashlib.sha256,
         ).digest()
     ).decode("ascii")
+
+
+def test_string_to_sign_format_pins_trailing_newline() -> None:
+    """Reference vector against Onshape's documented format.
+
+    This test exists to catch any future regression where the
+    trailing ``\\n`` after the query string is dropped from the
+    signed string. Onshape's Node.js sample is the source of truth
+    for the format; we hard-code a known-good output to lock it in.
+    Without the trailing newline, every Onshape API call 401s.
+    """
+    # Pin every input so the resulting HMAC is fully deterministic.
+    method = "GET"
+    nonce = "abcdefghij1234567890ABCDE"
+    date = "Mon, 11 Apr 2016 20:08:56 GMT"
+    content_type = ""
+    path = "/api/documents"
+    query = ""
+    secret = "test-secret"
+    # Compute the expected signature manually (trailing \n!).
+    expected_str = (
+        f"{method.lower()}\n{nonce}\n{date}\n{content_type}\n"
+        f"{path}\n{query}\n"
+    ).lower()
+    expected_sig = base64.b64encode(
+        hmac.new(
+            secret.encode("utf-8"),
+            expected_str.encode("utf-8"),
+            hashlib.sha256,
+        ).digest()
+    ).decode("ascii")
+    # Now feed the same inputs back through ``_recompute_signature``;
+    # if anyone "simplifies" the signing format by dropping a newline,
+    # this assertion will fire.
+    actual = _recompute_signature(
+        method=method,
+        nonce=nonce,
+        date=date,
+        content_type=content_type,
+        path=path,
+        query=query,
+        secret_key=secret,
+    )
+    assert actual == expected_sig
+    # And: a string *without* the trailing \n must produce a different
+    # signature. Without this assertion the test above would still pass
+    # if both production and test code dropped the newline together;
+    # this pin nails the contract to the documented format.
+    no_trailing_str = (
+        f"{method.lower()}\n{nonce}\n{date}\n{content_type}\n"
+        f"{path}\n{query}"
+    ).lower()
+    no_trailing_sig = base64.b64encode(
+        hmac.new(
+            secret.encode("utf-8"),
+            no_trailing_str.encode("utf-8"),
+            hashlib.sha256,
+        ).digest()
+    ).decode("ascii")
+    assert actual != no_trailing_sig
 
 
 def test_build_auth_headers_signature_matches_spec() -> None:

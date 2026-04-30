@@ -105,9 +105,14 @@ def _build_auth_headers(
     date = format_datetime(datetime.now(UTC), usegmt=True)
 
     method_lower = method.lower()
+    # NB: trailing ``\n`` after the query string matters — Onshape's
+    # reference Node.js sample appends one ("...path + '\\n' + query +
+    # '\\n'..."), and the server-side verifier is byte-exact. Without
+    # it every signature is off by one character and every call comes
+    # back 401 with no useful diagnostic.
     string_to_sign = (
         f"{method_lower}\n{nonce}\n{date}\n{content_type}\n"
-        f"{_canonical_path(path)}\n{query}"
+        f"{_canonical_path(path)}\n{query}\n"
     ).lower()
     signature = base64.b64encode(
         hmac.new(
