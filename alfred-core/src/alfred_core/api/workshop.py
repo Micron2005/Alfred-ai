@@ -40,6 +40,7 @@ the same Tailscale-only deployment as the rest of Alfred.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import shutil
 import subprocess
@@ -315,7 +316,7 @@ def _git_run(
     """Wrapper around ``git`` that captures stdout/stderr as text and
     enforces a hard timeout. We use this everywhere instead of
     ad-hoc ``subprocess.run`` calls so failures surface consistently."""
-    return subprocess.run(  # noqa: S603 — we control all args
+    return subprocess.run(
         ["git", *args],
         cwd=cwd or _REPO_ROOT,
         input=input_text,
@@ -728,7 +729,7 @@ class DryRunResult(BaseModel):
     # One per ``test_commands`` entry, in order. Each is the truncated
     # combined stdout+stderr so the user (or the LLM, when this is
     # routed to a self-fix loop) can see exactly what failed.
-    command_results: list[dict]
+    command_results: list[dict[str, object]]
 
 
 @router.post("/dry-run", response_model=DryRunResult)
@@ -804,14 +805,14 @@ async def dry_run(req: DryRunRequest) -> DryRunResult:
         # failure to keep the response time low — if the unit tests
         # already failed, running the slower frontend lint is wasted
         # work. The user can re-trigger after fixing the unit tests.
-        results: list[dict] = []
+        results: list[dict[str, object]] = []
         all_ok = True
         per_cmd_timeout = max(15, req.timeout_seconds // max(len(req.test_commands), 1))
         for cmd in req.test_commands:
             if not cmd:
                 continue
             try:
-                proc = subprocess.run(  # noqa: S603 — caller-controlled
+                proc = subprocess.run(
                     cmd,
                     cwd=work_root,
                     capture_output=True,
@@ -856,10 +857,8 @@ async def dry_run(req: DryRunRequest) -> DryRunResult:
         # ``shutil.rmtree`` is the belt-and-braces for the rare case
         # where the worktree got into a weird state and ``remove``
         # refused. We never want a leaked worktree.
-        try:
+        with contextlib.suppress(Exception):
             _git_run("worktree", "remove", "--force", str(work_root))
-        except Exception:  # noqa: BLE001 — last-ditch cleanup
-            pass
         if work_root.exists():
             shutil.rmtree(work_root, ignore_errors=True)
 

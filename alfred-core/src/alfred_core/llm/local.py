@@ -63,7 +63,7 @@ class OllamaBackend(LLMBackend):
                 # Hard cap on generated tokens so a small local model
                 # cannot loop forever on a tricky prompt and exhaust
                 # the request timeout. 1024 is plenty for a butler's
-                # reply (a normal turn lands at 80–300 tokens). The
+                # reply (a normal turn lands at 80-300 tokens). The
                 # symptom this prevents is the 502 ReadTimeout the
                 # user hit on greetings ("hello") and Nightfall —
                 # both prompts triggered the 8B Llama into looping

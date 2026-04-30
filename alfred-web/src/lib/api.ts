@@ -33,6 +33,15 @@ export interface ChatSource {
   snippet: string;
 }
 
+export interface ChatModel {
+  /** Filename-safe label Alfred chose for this part. */
+  name: string;
+  /** Base-64 encoded binary STL bytes (no `data:` prefix). */
+  stl_data: string;
+  /** Base-64 encoded PNG preview render (no `data:` prefix). May be empty. */
+  preview_data: string;
+}
+
 export interface ChatMessageOut {
   id: string;
   role: "user" | "assistant";
@@ -42,6 +51,8 @@ export interface ChatMessageOut {
   images?: ChatImage[];
   /** Web pages Alfred consulted while answering this turn, if any. */
   sources?: ChatSource[];
+  /** Alfred-rendered 3D models (OpenSCAD). */
+  models?: ChatModel[];
   created_at?: string;
 }
 

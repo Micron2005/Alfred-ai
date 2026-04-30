@@ -62,6 +62,43 @@ def _extract_images(metadata: dict[str, object] | None) -> list[MessageImageOut]
     return out
 
 
+def _extract_models(metadata: dict[str, object] | None) -> list[MessageModelOut]:
+    """Pull rendered CAD models out of a Message's ``metadata_json`` blob.
+
+    Models live there as ``{"models": [{"name": "...", "stl_data": "...",
+    "preview_data": "..."}]}``. Same defensive pattern as
+    ``_extract_images``: skip malformed entries silently rather than
+    crashing the whole conversation load on a single bad row (this
+    matters during schema migrations where an older message might
+    have a partially-populated metadata blob).
+    """
+    if not metadata:
+        return []
+    raw = metadata.get("models")
+    if not isinstance(raw, list):
+        return []
+    out: list[MessageModelOut] = []
+    for entry in raw:
+        if not isinstance(entry, dict):
+            continue
+        name = entry.get("name")
+        stl_data = entry.get("stl_data")
+        preview_data = entry.get("preview_data", "")
+        if (
+            isinstance(name, str)
+            and isinstance(stl_data, str)
+            and isinstance(preview_data, str)
+        ):
+            out.append(
+                MessageModelOut(
+                    name=name,
+                    stl_data=stl_data,
+                    preview_data=preview_data,
+                )
+            )
+    return out
+
+
 def _extract_sources(metadata: dict[str, object] | None) -> list[MessageSourceOut]:
     """Pull web-search sources out of a Message's ``metadata_json`` blob.
 
@@ -115,6 +152,12 @@ class MessageSourceOut(BaseModel):
     snippet: str
 
 
+class MessageModelOut(BaseModel):
+    name: str
+    stl_data: str
+    preview_data: str
+
+
 class MessageOut(BaseModel):
     id: UUID
     role: str
@@ -123,6 +166,7 @@ class MessageOut(BaseModel):
     model: str | None = None
     images: list[MessageImageOut] = []
     sources: list[MessageSourceOut] = []
+    models: list[MessageModelOut] = []
     created_at: datetime
 
 
@@ -194,6 +238,7 @@ async def get_conversation(
                 model=m.model,
                 images=_extract_images(m.metadata_json),
                 sources=_extract_sources(m.metadata_json),
+                models=_extract_models(m.metadata_json),
                 created_at=_as_utc(m.created_at),
             )
             for m in msgs

@@ -41,6 +41,13 @@ from alfred_core.memory_archive import (
 )
 from alfred_core.persona import ContextBundle, Mode, build_persona
 from alfred_core.router import LLMUnavailableError, Router, VisionUnavailableError
+from alfred_core.tools.cad import CadError, CadResult, render_openscad
+from alfred_core.tools.cad_marker import (
+    extract_requests as extract_cad_requests,
+)
+from alfred_core.tools.cad_marker import (
+    replace_marker as replace_cad_marker,
+)
 from alfred_core.tools.email import EmailError, send_email
 from alfred_core.tools.email_marker import EmailDraft, extract_drafts, replace_marker
 from alfred_core.tools.history_scrub import scrub_assistant_content
@@ -146,6 +153,19 @@ class SourceOut(BaseModel):
     snippet: str
 
 
+class CadModelOut(BaseModel):
+    """A 3D model rendered by Alfred, returned to the client.
+
+    ``stl_data`` and ``preview_data`` are both base64-encoded — the
+    UI lifts them straight into ``data:`` URLs (preview as an image
+    src; STL as a download blob).
+    """
+
+    name: str
+    stl_data: str
+    preview_data: str
+
+
 class ChatMessageOut(BaseModel):
     id: UUID
     role: str
@@ -154,6 +174,7 @@ class ChatMessageOut(BaseModel):
     model: str | None = None
     images: list[ImageOut] = []
     sources: list[SourceOut] = []
+    models: list[CadModelOut] = []
 
 
 class ChatReply(BaseModel):
@@ -590,6 +611,70 @@ async def _process_image_requests(
     return reply, generated
 
 
+# Hard cap on how many ``[CAD]`` markers we'll honour per turn. Each
+# render is a 5-30 s OpenSCAD subprocess; one model per reply is
+# sufficient for any realistic conversational flow ("design X" → one
+# part → "now revise" → next turn). Two would already feel sluggish
+# and an unbounded loop could effectively DoS the chat endpoint.
+_MAX_CAD_PER_TURN = 1
+
+
+async def _process_cad_requests(
+    reply: str,
+) -> tuple[str, list[CadResult]]:
+    """Render each ``[CAD]`` marker, inline a confirmation, return models.
+
+    Successful renders are appended to the returned list — the chat
+    handler attaches them to the assistant message's ``metadata_json``
+    so they survive page reloads, and includes them in the
+    ``ChatReply`` so the UI can render the preview + download
+    button on the new turn without an extra fetch.
+
+    Any failure (binary missing, syntax error, timeout, manifold
+    warnings) is folded into the visible reply as a polite apology
+    rather than 500ing the whole turn.
+    """
+
+    requests = extract_cad_requests(reply)
+    if not requests:
+        return reply, []
+
+    rendered: list[CadResult] = []
+    honoured = 0
+    for req in requests:
+        if honoured >= _MAX_CAD_PER_TURN:
+            reply = replace_cad_marker(
+                reply,
+                req,
+                (
+                    "_(One model is plenty per turn, sir — let's review "
+                    "this one before drafting another.)_"
+                ),
+            )
+            continue
+        try:
+            result = await render_openscad(req.script, name=req.name)
+        except CadError as exc:
+            reply = replace_cad_marker(
+                reply,
+                req,
+                f"_(I couldn't render that — {exc})_",
+            )
+            continue
+        rendered.append(result)
+        # Visible confirmation; the preview PNG + download link render
+        # above the text bubble via the message-models pipeline. Keep
+        # this short — the model speaks for itself.
+        reply = replace_cad_marker(
+            reply,
+            req,
+            "_(Rendered. STL ready to download.)_",
+        )
+        honoured += 1
+
+    return reply, rendered
+
+
 @router.post("", response_model=ChatReply)
 async def chat(req: ChatRequest, session: AsyncSession = Depends(get_session)) -> ChatReply:
     settings = get_settings()
@@ -772,11 +857,14 @@ async def chat(req: ChatRequest, session: AsyncSession = Depends(get_session)) -
     visible_reply, generated_images = await _process_image_requests(
         visible_reply
     )
+    visible_reply, rendered_models = await _process_cad_requests(
+        visible_reply
+    )
 
-    # Persist sources + generated images in the assistant message
-    # metadata so they survive a page reload — the chat history
-    # endpoint lifts them back out via ``_extract_images`` /
-    # ``_extract_sources``.
+    # Persist sources, generated images, and rendered CAD models in
+    # the assistant message metadata so they survive a page reload
+    # — the chat history endpoint lifts them back out via
+    # ``_extract_images`` / ``_extract_sources`` / ``_extract_models``.
     assistant_metadata: dict[str, object] | None = None
     metadata_payload: dict[str, object] = {}
     if outcome.sources:
@@ -794,6 +882,21 @@ async def chat(req: ChatRequest, session: AsyncSession = Depends(get_session)) -
                 }
             )
         metadata_payload["images"] = encoded_images
+    encoded_models: list[dict[str, str]] = []
+    if rendered_models:
+        for mdl in rendered_models:
+            encoded_models.append(
+                {
+                    "name": mdl.name,
+                    "stl_data": base64.b64encode(mdl.stl_data).decode("ascii"),
+                    "preview_data": (
+                        base64.b64encode(mdl.preview_data).decode("ascii")
+                        if mdl.preview_data
+                        else ""
+                    ),
+                }
+            )
+        metadata_payload["models"] = encoded_models
     if metadata_payload:
         assistant_metadata = metadata_payload
 
@@ -828,6 +931,14 @@ async def chat(req: ChatRequest, session: AsyncSession = Depends(get_session)) -
             sources=[
                 SourceOut(title=r.title, url=r.url, snippet=r.snippet)
                 for r in outcome.sources
+            ],
+            models=[
+                CadModelOut(
+                    name=entry["name"],
+                    stl_data=entry["stl_data"],
+                    preview_data=entry["preview_data"],
+                )
+                for entry in encoded_models
             ],
         ),
     )

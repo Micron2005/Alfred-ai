@@ -356,6 +356,62 @@ and no image.
 """
 
 
+CAD_TOOL_PROMPT = """\
+
+3D MODELLING — YOU CAN GENERATE PRINTABLE PARTS
+You have an OpenSCAD-backed modelling tool. When he asks you to design \
+a part, bracket, jig, mount, or any small printable object — actually \
+do it via the tool, don't just describe what one would look like.
+
+To use the tool, include this block in your reply, on its own lines:
+
+    [CAD]
+    name: <short_filename_safe_label>
+    notes: <one-sentence summary of what this is>
+    script:
+    // OpenSCAD source
+    difference() {{
+        cube([30, 20, 4]);
+        translate([7, 10, -1]) cylinder(d=5, h=6, $fn=40);
+        translate([23, 10, -1]) cylinder(d=5, h=6, $fn=40);
+    }}
+    [/CAD]
+
+The system will render an STL plus a preview PNG and attach both to \
+your message. The marker is replaced with a short confirmation in his \
+view, the preview renders above your text, and a "Download STL" link \
+appears beneath. On failure the marker becomes a polite error and \
+you'll see the result on the next turn — apologise, surface the \
+reason, and offer to revise the script.
+
+Rules:
+- Emit at most ONE CAD marker per reply.
+- The script must be self-contained OpenSCAD: no ``import()`` of \
+external files, no ``include`` of system libraries the container \
+doesn't ship. Stick to the built-in primitives (``cube``, \
+``cylinder``, ``sphere``, ``polyhedron``) and the standard CSG \
+operators (``union``, ``difference``, ``intersection``, ``hull``, \
+``minkowski``).
+- Always use millimetres. The slicer expects mm; mixing units silently \
+ruins the print.
+- Use ``$fn`` (or ``$fa``/``$fs``) on round shapes — the default \
+faceting is far too coarse for printable parts. ``$fn=40`` on small \
+holes is a sensible baseline.
+- Keep parts manifold. ``difference()`` cuts must protrude through \
+the parent surface — translate the cutter ``-1`` past the face you're \
+cutting from, and extend its height by ``+2``, so the boolean is \
+clean.
+- Don't claim you generated something if you didn't emit the marker. \
+Specifically: never type "(Generated.)", "(STL attached.)", or any \
+similar status confirmation as prose. Those strings are produced by \
+the system AFTER your marker fires; if you write them yourself \
+without emitting the marker, the user sees a confidently-wrong reply \
+and no model.
+- A short polite line beside the marker is fine \
+("On it, {address}.") but don't pad.
+"""
+
+
 EMAIL_TOOL_PROMPT = """\
 
 EMAIL — YOU CAN SEND ON HIS BEHALF
@@ -493,6 +549,15 @@ def build_persona(
     prompt = prompt + IMAGE_GEN_TOOL_PROMPT.format(
         address=settings.alfred_user_address,
     )
+
+    # CAD modelling is only offered when OpenSCAD is actually installed
+    # in the runtime image. Bare-metal dev boxes that haven't ``apt
+    # install``'d it (and any minimal CI image) won't expose the
+    # capability — Alfred just won't claim it.
+    if settings.has_cad:
+        prompt = prompt + CAD_TOOL_PROMPT.format(
+            address=settings.alfred_user_address,
+        )
 
     # Spotify control is gated on both server-side configuration AND
     # the user having linked their account — without the OAuth grant

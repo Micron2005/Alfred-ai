@@ -12,9 +12,16 @@ ENV PYTHONUNBUFFERED=1 \
 WORKDIR /app
 
 # ffmpeg is needed by faster-whisper to decode arbitrary audio (webm/opus,
-# m4a, etc.) into PCM. Everything else is build hygiene.
+# m4a, etc.) into PCM. ``openscad-nogui`` is the headless build of
+# OpenSCAD used by the CAD-generation tool (Phase 18a) — it ships in
+# Debian Bookworm's repos for both amd64 and arm64. Even ``-nogui``
+# still needs an X display for the PNG-preview pass (the STL export
+# itself is purely geometric, but the preview render goes through
+# Qt/OpenGL). ``xvfb`` provides a headless framebuffer; ``cad.py``
+# wraps the preview call in ``xvfb-run`` so we don't need a real
+# display server. Everything else is build hygiene.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      build-essential ca-certificates curl ffmpeg \
+      build-essential ca-certificates curl ffmpeg openscad-nogui xvfb \
     && rm -rf /var/lib/apt/lists/*
 
 # ─── Piper TTS (smoother British male voice) ────────────────────────────────
