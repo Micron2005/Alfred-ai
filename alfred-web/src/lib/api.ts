@@ -40,6 +40,12 @@ export interface ChatModel {
   stl_data: string;
   /** Base-64 encoded PNG preview render (no `data:` prefix). May be empty. */
   preview_data: string;
+  /**
+   * URL of the Onshape document the STL was published to, when the
+   * request asked for `backend: onshape` and keys were configured.
+   * `null` for the OpenSCAD-only default path.
+   */
+  document_url?: string | null;
 }
 
 export interface ChatMessageOut {

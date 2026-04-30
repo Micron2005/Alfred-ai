@@ -155,6 +155,20 @@ class Settings(BaseSettings):
     # doesn't enforce one; leave empty there.
     alfred_printer_api_key: str = Field(default="")
 
+    # ─── Onshape (Phase 18b — cloud CAD, optional) ─────────────────────
+    # HMAC-signed API keys from https://dev-portal.onshape.com/keys.
+    # Leave both blank to disable the Onshape backend entirely — Alfred
+    # then only offers the local OpenSCAD path. Keys are a pair (access
+    # + secret); the secret is shown ONCE at creation time in Onshape's
+    # portal, so if you've misplaced it you need to rotate the pair.
+    alfred_onshape_access_key: str = Field(default="")
+    alfred_onshape_secret_key: str = Field(default="")
+    # Base URL of Onshape's REST API. There's only one public endpoint
+    # today, but enterprise customers sometimes sit behind a different
+    # host, so this is configurable. Trailing slash is stripped at read
+    # time in ``onshape.py``.
+    alfred_onshape_base_url: str = Field(default="https://cad.onshape.com")
+
     # ─── Long-term memory archive (Phase 12b) ───────────────────────────
     # Container-side directory where Alfred mirrors each memory note as
     # a Markdown file. Mounted from the host via docker-compose so the
@@ -291,6 +305,19 @@ class Settings(BaseSettings):
         from alfred_core.tools.cad import has_openscad
 
         return has_openscad()
+
+    @property
+    def has_onshape(self) -> bool:
+        """Whether Onshape API keys are configured.
+
+        Key pair has to be non-empty; we don't try to ping the Onshape
+        API at startup because that would slow every boot and fail on
+        offline dev machines. Auth errors surface on first real use.
+        """
+        return bool(
+            self.alfred_onshape_access_key.strip()
+            and self.alfred_onshape_secret_key.strip()
+        )
 
 
 @lru_cache(maxsize=1)

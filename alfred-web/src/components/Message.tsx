@@ -214,22 +214,43 @@ export function Message({ msg }: { msg: ChatMessageOut }) {
                       >
                         ⌬ {filename}
                       </span>
-                      <a
-                        href={stlHref}
-                        download={filename}
-                        className="mono"
-                        style={{
-                          fontSize: 11,
-                          color: "var(--accent)",
-                          textDecoration: "none",
-                          padding: "3px 10px",
-                          border: "1px solid var(--border-warm)",
-                          borderRadius: 2,
-                          letterSpacing: 1,
-                        }}
-                      >
-                        DOWNLOAD STL
-                      </a>
+                      <div style={{ display: "flex", gap: 6 }}>
+                        {mdl.document_url && (
+                          <a
+                            href={mdl.document_url}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="mono"
+                            style={{
+                              fontSize: 11,
+                              color: "var(--accent)",
+                              textDecoration: "none",
+                              padding: "3px 10px",
+                              border: "1px solid var(--border-warm)",
+                              borderRadius: 2,
+                              letterSpacing: 1,
+                            }}
+                          >
+                            OPEN IN ONSHAPE
+                          </a>
+                        )}
+                        <a
+                          href={stlHref}
+                          download={filename}
+                          className="mono"
+                          style={{
+                            fontSize: 11,
+                            color: "var(--accent)",
+                            textDecoration: "none",
+                            padding: "3px 10px",
+                            border: "1px solid var(--border-warm)",
+                            borderRadius: 2,
+                            letterSpacing: 1,
+                          }}
+                        >
+                          DOWNLOAD STL
+                        </a>
+                      </div>
                     </div>
                   </div>
                 );
