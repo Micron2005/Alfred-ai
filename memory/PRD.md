@@ -149,7 +149,25 @@ Single user — Mukarram Mohammad Alam. Alfred is a dry, witty British butler.
 - ✅ New `<HandsFreeOverlay>` component pinned bottom-left of the HUD: shows live recording state (LISTENING / SPEAKING / THINKING / STANDING BY / WAKE ERROR with colour-coded pulse dot), the user's last utterance, and Alfred's last reply. Auto-fades after 8 s of silence so the HUD stays clean.
 - ✅ Verified: wake-word fires from any tab → mic activates → STT lands → `handleSend` runs intent detection → "go to chat" / "go to workout" / "open the menu" route correctly.
 
-### Existing backlog (unchanged)
+### Feb 2026 — Self-fix loop complete (NEW)
+
+**Dry-run before APPLY** (the safety net)
+- ✅ `POST /api/workshop/dry-run` — applies the diff to a throwaway `git worktree` (clones HEAD's index, doesn't touch the real working tree), runs the configured test commands, returns pass/fail with truncated output. Default test command: `pytest alfred-core/tests`. The frontend's APPLY button glows GREEN when dry-run passed so the user has a visual cue that the fix is verified.
+- ✅ Worktree teardown is idempotent (`git worktree remove --force` + `shutil.rmtree` belt-and-braces) so leaked worktrees can't accumulate.
+- ✅ Same allowlist + .env block as APPLY — dry-run can't be tricked into running tests after touching `.env`.
+
+**Branch strategy on commit-push**
+- ✅ `branch_strategy: "alfred-pr"` (new default) creates a fresh `alfred/<8-char-id>` branch off HEAD before staging, so commits never land on `main` without review. Pushes the branch with `-u origin <branch>` so subsequent pushes need no flag.
+- ✅ Best-effort GitHub PR-compose URL emitted in the response (`https://github.com/<owner>/<repo>/pull/new/<branch>`). Non-GitHub remotes get an empty `pr_url` and the frontend hides the link.
+- ✅ `branch_strategy: "current"` retained for users who actually want to push to whatever branch they're on.
+- ✅ Frontend Workshop view: radio toggle "new alfred/<id> branch" (default) vs "current branch", auto-clickable PR link after a successful push.
+
+**Voice "Alfred, fix yourself"**
+- ✅ `POST /api/workshop/self-fix-hint` — keyword matcher mapping the user's problem statement to a short list of candidate files. 10 topic registries: radial-menu, spotify, workout, chat, voice, vitals, workshop, vision (camera/face), hud-layout, auth. Falls back to a generic wide-angle set when nothing matches.
+- ✅ Frontend `detectSelfFixIntent` regex catches "fix yourself", "fix the X", "the X is broken, fix it", "debug/repair/patch X". Plain greetings ("hello", "what's the weather") never false-match — verified.
+- ✅ When matched, ChatWindow pops the Workshop sub-view with the problem and pre-selected file paths from the hint. User clicks DIAGNOSE → reads the proposed diff → DRY RUN → APPLY → COMMIT+PUSH-to-alfred-branch → opens the PR link. **Full self-fix loop, voice-driven.**
+
+**11 new backend tests** covering: alfred-pr branch creation, GitHub URL emission for github.com remotes only, dry-run pass/fail, dry-run refuses .env, dry-run preserves real working tree, self-fix-hint keyword matching, self-fix-hint fallback, self-fix-hint empty-rejection. **Total backend tests: 101 passing.**
 
 ### P0 — for next session
 - ⏳ User pulls Feb 2026 changes locally (`git pull && docker compose up --build`) and validates HUD layout persistence + Earth dragging + voice tab switching + Earth → 3D map flow on real hardware

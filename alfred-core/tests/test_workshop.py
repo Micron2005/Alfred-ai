@@ -592,3 +592,284 @@ def test_commit_push_reports_push_failure_without_losing_commit(
         check=True,
     ).stdout.strip()
     assert head == "alfred: x"
+
+
+def test_commit_push_alfred_pr_creates_branch(
+    fake_repo_with_remote: tuple[Path, Path], settings: Settings
+) -> None:
+    """``branch_strategy="alfred-pr"`` puts the commit on a fresh
+    ``alfred/<id>`` branch instead of master, leaves master alone,
+    and returns the new branch name + (when remote is GitHub-shaped)
+    a PR-compose URL."""
+    work, remote = fake_repo_with_remote
+    (work / "alfred-core/src/alfred_core/api/chat.py").write_text(
+        "def handle_chat():\n    return 'pr'\n"
+    )
+    app = _make_app(settings)
+    with TestClient(app) as client:
+        r = client.post(
+            "/api/workshop/commit-push",
+            json={
+                "message": "alfred: pr",
+                "branch_strategy": "alfred-pr",
+            },
+        )
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["committed"] is True
+        assert body["pushed"] is True
+        assert body["branch"].startswith("alfred/")
+        # Local repo must now be on the new branch.
+    import subprocess
+
+    cur = subprocess.run(
+        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+        cwd=work, capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    assert cur.startswith("alfred/")
+    # The remote must have BOTH master (untouched) and the new branch.
+    branches = subprocess.run(
+        ["git", "--git-dir", str(remote), "branch", "--list"],
+        capture_output=True, text=True, check=True,
+    ).stdout
+    assert "master" in branches
+    assert "alfred/" in branches
+
+
+def test_commit_push_alfred_pr_with_local_remote_has_no_pr_url(
+    fake_repo_with_remote: tuple[Path, Path], settings: Settings
+) -> None:
+    """When the remote isn't GitHub (here it's a local bare repo on
+    disk), we don't fabricate a PR URL — the field stays empty and
+    the frontend hides the link."""
+    work, _ = fake_repo_with_remote
+    (work / "alfred-core/src/alfred_core/api/chat.py").write_text(
+        "def handle_chat():\n    return 'no-pr'\n"
+    )
+    app = _make_app(settings)
+    with TestClient(app) as client:
+        r = client.post(
+            "/api/workshop/commit-push",
+            json={"message": "x", "branch_strategy": "alfred-pr"},
+        )
+        body = r.json()
+        assert body["pushed"] is True
+        assert body["pr_url"] == ""
+
+
+def test_commit_push_alfred_pr_with_github_remote_has_pr_url(
+    fake_repo: Path, settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """If the origin URL is GitHub-shaped, the response carries a
+    ``pull/new/<branch>`` link the user can click."""
+    import subprocess
+
+    # Swap in a fake GitHub remote URL. We won't actually push to it
+    # (that would 403); we monkey-patch the push step to short-circuit.
+    subprocess.run(
+        ["git", "remote", "add", "origin", "git@github.com:wayne/alfred.git"],
+        cwd=fake_repo, check=True,
+    )
+    (fake_repo / "alfred-core/src/alfred_core/api/chat.py").write_text(
+        "def handle_chat():\n    return 'gh'\n"
+    )
+    # Stub the push call. _git_run is module-level — wrap it so any
+    # call with the first argv element "push" succeeds with a fake
+    # zero-exit result.
+    orig = workshop._git_run
+
+    def fake_run(*args: str, **kwargs):  # type: ignore[no-untyped-def]
+        if args and args[0] == "push":
+            class _R:
+                returncode = 0
+                stdout = ""
+                stderr = ""
+            return _R()
+        return orig(*args, **kwargs)
+
+    monkeypatch.setattr(workshop, "_git_run", fake_run)
+    app = _make_app(settings)
+    with TestClient(app) as client:
+        r = client.post(
+            "/api/workshop/commit-push",
+            json={"message": "fix it", "branch_strategy": "alfred-pr"},
+        )
+        body = r.json()
+        assert body["committed"] is True
+        assert body["pushed"] is True
+        assert body["pr_url"].startswith(
+            "https://github.com/wayne/alfred/pull/new/alfred/"
+        )
+
+
+# ─── Dry-run ─────────────────────────────────────────────────────────────
+
+
+def test_dry_run_passes_when_tests_pass(
+    fake_repo: Path, settings: Settings
+) -> None:
+    """The clean-path: a syntactically valid diff that lands cleanly
+    + a test command that exits 0 → ``all_passed: true``."""
+    diff = textwrap.dedent(
+        """\
+        --- a/alfred-core/src/alfred_core/api/chat.py
+        +++ b/alfred-core/src/alfred_core/api/chat.py
+        @@ -1,2 +1,2 @@
+         def handle_chat():
+        -    return 'hello'
+        +    return 'hi, sir'
+        """
+    )
+    app = _make_app(settings)
+    with TestClient(app) as client:
+        r = client.post(
+            "/api/workshop/dry-run",
+            json={
+                "diff": diff,
+                # Dummy command that exits 0 — proves the runner
+                # mechanics work without forcing the test to depend
+                # on pytest being available in this fake repo.
+                "test_commands": [["python", "-c", "print('ok')"]],
+                "timeout_seconds": 30,
+            },
+        )
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["applied"] is True
+        assert body["all_passed"] is True
+        assert body["command_results"][0]["passed"] is True
+    # Real working tree is untouched — the worktree was disposable.
+    real = (fake_repo / "alfred-core/src/alfred_core/api/chat.py").read_text()
+    assert "hi, sir" not in real
+    assert "return 'hello'" in real
+
+
+def test_dry_run_fails_when_tests_fail(
+    fake_repo: Path, settings: Settings
+) -> None:
+    """A non-zero exit from the test command surfaces as
+    ``all_passed: false`` with the failing command's output, even
+    though the patch itself applied cleanly."""
+    diff = textwrap.dedent(
+        """\
+        --- a/alfred-core/src/alfred_core/api/chat.py
+        +++ b/alfred-core/src/alfred_core/api/chat.py
+        @@ -1,2 +1,2 @@
+         def handle_chat():
+        -    return 'hello'
+        +    return 'broken'
+        """
+    )
+    app = _make_app(settings)
+    with TestClient(app) as client:
+        r = client.post(
+            "/api/workshop/dry-run",
+            json={
+                "diff": diff,
+                "test_commands": [
+                    ["python", "-c", "import sys; sys.exit(1)"]
+                ],
+                "timeout_seconds": 15,
+            },
+        )
+        body = r.json()
+        assert body["applied"] is True
+        assert body["all_passed"] is False
+        assert body["command_results"][0]["passed"] is False
+
+
+def test_dry_run_refuses_dotenv_diff(
+    fake_repo: Path, settings: Settings
+) -> None:
+    diff = textwrap.dedent(
+        """\
+        --- a/.env
+        +++ b/.env
+        @@ -1 +1 @@
+        -SECRET=do-not-touch
+        +SECRET=pwned
+        """
+    )
+    app = _make_app(settings)
+    with TestClient(app) as client:
+        r = client.post(
+            "/api/workshop/dry-run",
+            json={"diff": diff, "test_commands": [["echo", "x"]]},
+        )
+        assert r.status_code == 403
+
+
+def test_dry_run_with_bad_diff_reports_apply_failure(
+    fake_repo: Path, settings: Settings
+) -> None:
+    """Malformed diff → ``applied=false``, no commands run."""
+    diff = textwrap.dedent(
+        """\
+        --- a/alfred-core/src/alfred_core/api/chat.py
+        +++ b/alfred-core/src/alfred_core/api/chat.py
+        @@ -1,2 +1,2 @@
+         def nonexistent():
+        -    bogus context
+        +    new line
+        """
+    )
+    app = _make_app(settings)
+    with TestClient(app) as client:
+        r = client.post(
+            "/api/workshop/dry-run",
+            json={"diff": diff, "test_commands": [["echo", "x"]]},
+        )
+        body = r.json()
+        assert body["applied"] is False
+        assert body["all_passed"] is False
+        assert body["command_results"] == []
+
+
+# ─── Self-fix-hint (voice routing) ───────────────────────────────────────
+
+
+def test_self_fix_hint_matches_radial_menu_keywords(settings: Settings) -> None:
+    app = _make_app(settings)
+    with TestClient(app) as client:
+        r = client.post(
+            "/api/workshop/self-fix-hint",
+            json={
+                "problem": "the radial menu Spotify icon doesn't pulse on the beat"
+            },
+        )
+        body = r.json()
+        assert body["matched_topic"] == "radial-menu"
+        assert "alfred-web/src/components/RadialMenu.tsx" in body["paths"]
+
+
+def test_self_fix_hint_matches_voice_keywords(settings: Settings) -> None:
+    app = _make_app(settings)
+    with TestClient(app) as client:
+        r = client.post(
+            "/api/workshop/self-fix-hint",
+            json={"problem": "wake word and mic don't listen on hands-free"},
+        )
+        body = r.json()
+        assert body["matched_topic"] == "voice"
+        assert any("Composer" in p or "useWakeWord" in p for p in body["paths"])
+
+
+def test_self_fix_hint_falls_back_when_no_match(settings: Settings) -> None:
+    app = _make_app(settings)
+    with TestClient(app) as client:
+        r = client.post(
+            "/api/workshop/self-fix-hint",
+            json={"problem": "asdf qwerty unrelated nonsense"},
+        )
+        body = r.json()
+        assert body["matched_topic"] == "generic"
+        assert len(body["paths"]) >= 2
+
+
+def test_self_fix_hint_refuses_empty(settings: Settings) -> None:
+    app = _make_app(settings)
+    with TestClient(app) as client:
+        r = client.post(
+            "/api/workshop/self-fix-hint", json={"problem": "  "}
+        )
+        assert r.status_code == 400

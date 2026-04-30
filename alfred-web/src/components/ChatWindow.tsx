@@ -57,6 +57,7 @@ import { Spotify3DView } from "@/components/Spotify3DView";
 import { WorkshopView } from "@/components/WorkshopView";
 import { VitalsPanel } from "@/components/VitalsPanel";
 import { HandsFreeOverlay } from "@/components/HandsFreeOverlay";
+import { fetchSelfFixHint } from "@/lib/workshopApi";
 
 const ACTIVE_CONVO_KEY = "alfred.activeConversationId";
 const VOICE_OUT_KEY = "alfred.voiceOutEnabled";
@@ -149,6 +150,46 @@ function detectMenuIntent(raw: string): boolean {
   return /^(?:open|show|bring\s+up|pop)\s+(?:the\s+)?(?:menu|radial(?:\s+menu)?|modules?|app\s+menu|launcher)$/.test(
     stripped,
   );
+}
+
+/**
+ * Self-fix intent: "Alfred, fix yourself" / "Alfred, fix the X" /
+ * "Alfred, the X is broken, fix it". When matched, the frontend
+ * pops the Workshop view with the user's problem statement
+ * forwarded to the backend's ``/workshop/self-fix-hint`` endpoint
+ * for smart file selection. Returns ``null`` when the utterance
+ * isn't a self-fix request, or the trimmed problem statement when
+ * it is.
+ */
+function detectSelfFixIntent(raw: string): string | null {
+  const text = raw.trim();
+  if (!text) return null;
+  const lower = text.toLowerCase().replace(/[.?!]+$/, "");
+  const stripped = lower.replace(/^(?:hey\s+|ok\s+)?alfred[,\s]+/, "").trim();
+  if (!stripped) return null;
+  // Match common self-fix phrasings. The captured group (if any)
+  // becomes the problem statement; otherwise the full utterance is
+  // used. We deliberately keep this loose — the backend's
+  // self-fix-hint endpoint does keyword matching, so a sloppy
+  // utterance still routes to something useful.
+  const patterns: Array<{ rx: RegExp; takeFull: boolean }> = [
+    { rx: /^fix\s+yourself\b(.*)$/i, takeFull: false },
+    { rx: /^fix\s+(?:the\s+)?(.+)$/i, takeFull: false },
+    { rx: /^(?:can\s+you\s+)?(?:please\s+)?(?:debug|repair|patch)\s+(.+)$/i, takeFull: false },
+    { rx: /^(.+?)\s+(?:is\s+(?:broken|buggy)|doesn'?t\s+work|isn'?t\s+working)[,.\s]+fix\s+(?:it|that|yourself)\b.*$/i, takeFull: true },
+  ];
+  for (const { rx, takeFull } of patterns) {
+    const m = stripped.match(rx);
+    if (!m) continue;
+    if (takeFull) return text; // forward the whole sentence — context matters
+    const captured = m[1]?.trim();
+    if (captured) return captured;
+    // "fix yourself" with no subject — forward as-is so the LLM
+    // sees a self-maintenance request and the file picker falls
+    // back to the generic "wide-angle" set.
+    return text;
+  }
+  return null;
 }
 
 /**
@@ -915,6 +956,34 @@ export function ChatWindow() {
           { id: crypto.randomUUID(), role: "assistant", content: ack },
         ]);
         if (voiceOut) void speak(ack);
+        return;
+      }
+
+      // "Alfred, fix yourself" / "fix the radial menu" / etc.
+      // Routes the user into the Workshop with smart file selection
+      // — they don't have to know which files matter, the backend's
+      // self-fix-hint endpoint maps keywords to candidate files. The
+      // user still has to click DIAGNOSE to actually invoke the LLM,
+      // so this is a routing convenience, not an autonomous loop.
+      const selfFixProblem = detectSelfFixIntent(text);
+      if (selfFixProblem) {
+        const ack = "Pulling up the workshop now, sir.";
+        setMessages((prev) => [
+          ...prev,
+          { id: crypto.randomUUID(), role: "user", content: text },
+          { id: crypto.randomUUID(), role: "assistant", content: ack },
+        ]);
+        if (voiceOut) void speak(ack);
+        // Best-effort hint fetch. If the backend is down we just
+        // open the Workshop empty — the user can still diagnose
+        // manually without smart file selection.
+        try {
+          const hint = await fetchSelfFixHint(selfFixProblem);
+          setWorkshopSeed({ problem: hint.problem, paths: hint.paths });
+        } catch {
+          setWorkshopSeed({ problem: selfFixProblem, paths: [] });
+        }
+        setSubView("workshop");
         return;
       }
 

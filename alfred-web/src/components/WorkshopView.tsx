@@ -25,8 +25,10 @@ import {
   applyWorkshopPatch,
   commitAndPush,
   diagnoseProblem,
+  dryRunPatch,
   fetchGitStatus,
   listWorkshopFiles,
+  type DryRunResult,
   type GitStatus,
   type WorkshopFile,
 } from "@/lib/workshopApi";
@@ -63,6 +65,21 @@ export function WorkshopView({
   const [gitStatus, setGitStatus] = useState<GitStatus | null>(null);
   const [commitMessage, setCommitMessage] = useState("");
   const [commitResult, setCommitResult] = useState<string | null>(null);
+  // Dry-run state — when populated, the user has run a DRY RUN and
+  // can see whether tests pass before clicking APPLY.
+  const [dryRunResult, setDryRunResult] = useState<DryRunResult | null>(null);
+  // Branch strategy for COMMIT + PUSH. ``alfred-pr`` puts the commit
+  // on a fresh ``alfred/<id>`` branch the user can review on
+  // GitHub; ``current`` legacy-pushes to the current branch.
+  // Default to alfred-pr because that's the safer one for most
+  // users — keeps main clean.
+  const [branchStrategy, setBranchStrategy] = useState<
+    "current" | "alfred-pr"
+  >("alfred-pr");
+  const [pushResult, setPushResult] = useState<{
+    pr_url: string;
+    branch: string;
+  } | null>(null);
 
   // After APPLY succeeds, refresh git-status so the COMMIT panel
   // shows the dirty files. We deliberately don't poll on a timer —
@@ -154,13 +171,36 @@ export function WorkshopView({
     }
   }
 
+  /**
+   * DRY RUN — apply the diff to a throwaway worktree on the host,
+   * run the configured test suite, and report pass/fail without
+   * touching the real working tree. The point: the user can confirm
+   * the fix doesn't break the test suite BEFORE clicking APPLY.
+   */
+  async function runDryRun() {
+    if (!diff) return;
+    setBusy(true);
+    setDryRunResult(null);
+    setError(null);
+    try {
+      const r = await dryRunPatch(diff);
+      setDryRunResult(r);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Dry-run failed");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function runCommitPush(skipPush: boolean) {
     if (!commitMessage.trim()) return;
     if (
       !window.confirm(
         skipPush
           ? "Commit locally without pushing?"
-          : "Commit + push to origin? Make sure you're on the right branch.",
+          : branchStrategy === "alfred-pr"
+            ? "Commit + push to a new alfred/<id> branch (safe — won't touch main)?"
+            : "Commit + push to the CURRENT branch? Make sure that's right.",
       )
     )
       return;
@@ -171,14 +211,21 @@ export function WorkshopView({
       const r = await commitAndPush({
         message: commitMessage.trim(),
         skip_push: skipPush,
+        branch_strategy: branchStrategy,
       });
       setCommitResult(
         r.pushed
-          ? `✓ ${r.commit_sha.slice(0, 7)} pushed to origin (${r.files_committed.length} file(s))`
+          ? `✓ ${r.commit_sha.slice(0, 7)} pushed${r.branch ? ` to ${r.branch}` : ""}`
           : r.committed
             ? `⚠ Committed locally as ${r.commit_sha.slice(0, 7)}, but push failed:\n${r.detail}`
             : `✗ ${r.detail}`,
       );
+      if (r.pushed) {
+        setPushResult({
+          pr_url: r.pr_url ?? "",
+          branch: r.branch ?? "",
+        });
+      }
       if (r.committed) {
         await refreshGitStatus();
       }
@@ -351,7 +398,7 @@ export function WorkshopView({
               resize: "vertical",
             }}
           />
-          <div style={{ display: "flex", gap: 8 }}>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
             <button
               type="button"
               data-testid="workshop-diagnose"
@@ -362,17 +409,118 @@ export function WorkshopView({
               {busy ? "…" : "🔧 DIAGNOSE"}
             </button>
             {diff ? (
-              <button
-                type="button"
-                data-testid="workshop-apply"
-                className="hud-button"
-                onClick={runApply}
-                disabled={busy}
-              >
-                ✓ APPLY PATCH
-              </button>
+              <>
+                <button
+                  type="button"
+                  data-testid="workshop-dry-run"
+                  className="hud-button"
+                  onClick={runDryRun}
+                  disabled={busy}
+                  title="Apply the patch to a throwaway worktree, run the test suite, report pass/fail. Doesn't touch your real tree."
+                >
+                  {busy ? "…" : "🧪 DRY RUN"}
+                </button>
+                <button
+                  type="button"
+                  data-testid="workshop-apply"
+                  className="hud-button"
+                  onClick={runApply}
+                  disabled={busy}
+                  // Highlight green when dry-run passed — visual cue
+                  // that this fix is verified safe to apply.
+                  style={
+                    dryRunResult?.all_passed
+                      ? {
+                          borderColor: "rgb(110,230,160)",
+                          color: "rgb(110,230,160)",
+                          textShadow: "0 0 6px rgba(110,230,160,0.6)",
+                        }
+                      : undefined
+                  }
+                >
+                  ✓ APPLY PATCH
+                </button>
+              </>
             ) : null}
           </div>
+
+          {dryRunResult ? (
+            <div
+              data-testid="workshop-dry-run-result"
+              style={{
+                background: "rgba(0,0,0,0.45)",
+                border: `1px solid ${
+                  dryRunResult.all_passed
+                    ? "rgba(110,230,160,0.5)"
+                    : "rgba(255,110,110,0.5)"
+                }`,
+                borderRadius: 4,
+                padding: 12,
+                fontSize: 11,
+                color: "var(--muted)",
+                lineHeight: 1.5,
+                display: "flex",
+                flexDirection: "column",
+                gap: 6,
+              }}
+            >
+              <div
+                style={{
+                  letterSpacing: 2,
+                  color: dryRunResult.all_passed
+                    ? "rgb(110,230,160)"
+                    : "rgb(255,110,110)",
+                }}
+              >
+                DRY RUN ·{" "}
+                {dryRunResult.applied
+                  ? dryRunResult.all_passed
+                    ? "ALL TESTS PASSED"
+                    : "TESTS FAILED"
+                  : "PATCH DIDN'T APPLY"}
+              </div>
+              <div style={{ fontSize: 10, opacity: 0.75 }}>
+                {dryRunResult.apply_detail}
+              </div>
+              {dryRunResult.command_results.map((cr, i) => (
+                <details
+                  key={i}
+                  open={!cr.passed}
+                  style={{
+                    fontSize: 10,
+                    border: "1px solid var(--border)",
+                    borderRadius: 3,
+                    padding: 6,
+                  }}
+                >
+                  <summary
+                    style={{
+                      color: cr.passed
+                        ? "rgb(110,230,160)"
+                        : "rgb(255,110,110)",
+                      cursor: "pointer",
+                      letterSpacing: 1,
+                    }}
+                  >
+                    {cr.passed ? "✓" : "✗"} {cr.command.join(" ")}
+                  </summary>
+                  <pre
+                    style={{
+                      margin: "6px 0 0",
+                      whiteSpace: "pre-wrap",
+                      wordBreak: "break-word",
+                      maxHeight: 240,
+                      overflowY: "auto",
+                      fontSize: 10,
+                      color: "var(--muted)",
+                    }}
+                  >
+                    {cr.output}
+                  </pre>
+                </details>
+              ))}
+            </div>
+          ) : null}
 
           {error ? (
             <div
@@ -492,6 +640,64 @@ export function WorkshopView({
                   fontFamily: "inherit",
                 }}
               />
+              {/* Branch strategy toggle. Default ``alfred-pr`` is the
+                  safer one — the commit lands on a fresh branch the
+                  user can review on GitHub before merging. The
+                  ``current`` option is for users who want to push
+                  straight to whatever branch they're on (legacy). */}
+              <div
+                style={{
+                  display: "flex",
+                  gap: 14,
+                  fontSize: 10,
+                  color: "var(--muted)",
+                  alignItems: "center",
+                }}
+              >
+                <span style={{ letterSpacing: 1.5 }}>STRATEGY:</span>
+                <label
+                  style={{ display: "flex", gap: 4, cursor: "pointer" }}
+                  data-testid="workshop-branch-alfred-pr"
+                >
+                  <input
+                    type="radio"
+                    name="branch-strategy"
+                    checked={branchStrategy === "alfred-pr"}
+                    onChange={() => setBranchStrategy("alfred-pr")}
+                    style={{ accentColor: "rgb(108,214,255)" }}
+                  />
+                  <span
+                    style={
+                      branchStrategy === "alfred-pr"
+                        ? { color: "var(--orb)" }
+                        : undefined
+                    }
+                  >
+                    new alfred/&lt;id&gt; branch
+                  </span>
+                </label>
+                <label
+                  style={{ display: "flex", gap: 4, cursor: "pointer" }}
+                  data-testid="workshop-branch-current"
+                >
+                  <input
+                    type="radio"
+                    name="branch-strategy"
+                    checked={branchStrategy === "current"}
+                    onChange={() => setBranchStrategy("current")}
+                    style={{ accentColor: "rgb(108,214,255)" }}
+                  />
+                  <span
+                    style={
+                      branchStrategy === "current"
+                        ? { color: "var(--orb)" }
+                        : undefined
+                    }
+                  >
+                    current branch
+                  </span>
+                </label>
+              </div>
               <div style={{ display: "flex", gap: 8 }}>
                 <button
                   type="button"
@@ -534,6 +740,22 @@ export function WorkshopView({
                 >
                   {commitResult}
                 </div>
+              ) : null}
+              {pushResult?.pr_url ? (
+                <a
+                  data-testid="workshop-pr-url"
+                  href={pushResult.pr_url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  style={{
+                    fontSize: 11,
+                    color: "var(--orb)",
+                    textDecoration: "underline",
+                    letterSpacing: 1,
+                  }}
+                >
+                  → Open pull request for {pushResult.branch}
+                </a>
               ) : null}
             </div>
           ) : null}

@@ -17,8 +17,17 @@ Endpoints
 - ``POST /workshop/diagnose``       — ask the LLM to analyse a problem,
                                       get back an explanation + a
                                       proposed unified-diff patch
+- ``POST /workshop/dry-run``        — apply diff to a throwaway worktree,
+                                      run the project's test suite,
+                                      report pass/fail + output. Does
+                                      NOT touch the real tree.
 - ``POST /workshop/apply``          — apply a unified diff to the
                                       filesystem (after user approval)
+- ``GET  /workshop/git-status``     — branch, remote, dirty files
+- ``POST /workshop/commit-push``    — commit allowlisted dirty files,
+                                      optionally to a fresh
+                                      ``alfred/<id>`` branch instead
+                                      of the current branch, then push
 
 Safety
 ------
@@ -32,7 +41,10 @@ the same Tailscale-only deployment as the rest of Alfred.
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
+import tempfile
+import uuid
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -462,6 +474,12 @@ class CommitPushRequest(BaseModel):
     # airgapped setups or those who want to review ``git log`` before
     # shipping. When false (default) we commit AND push.
     skip_push: bool = False
+    # Branching strategy. ``current`` commits to the current branch
+    # (legacy behaviour). ``alfred-pr`` creates a fresh
+    # ``alfred/<short-id>`` branch off HEAD before committing, pushes
+    # that, and surfaces a hint URL the user can use to open a PR
+    # — so Alfred's self-fixes never land on main without review.
+    branch_strategy: str = "current"  # "current" | "alfred-pr"
     # Author info the commit will carry. Defaults keep a consistent
     # identity for Alfred's self-coding commits, distinct from the
     # user's personal commits.
@@ -475,6 +493,11 @@ class CommitPushReply(BaseModel):
     commit_sha: str
     files_committed: list[str]
     detail: str
+    # Populated when ``branch_strategy="alfred-pr"`` and the push went
+    # through — the branch the commit landed on, plus a best-effort
+    # GitHub compare URL the user can click to open a PR.
+    branch: str = ""
+    pr_url: str = ""
 
 
 @router.post("/commit-push", response_model=CommitPushReply)
@@ -484,6 +507,14 @@ async def commit_and_push(req: CommitPushRequest) -> CommitPushReply:
     inside the allowlist to commit."""
     if not req.message.strip():
         raise HTTPException(status_code=400, detail="Commit message is empty.")
+    if req.branch_strategy not in ("current", "alfred-pr"):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Unknown branch_strategy {req.branch_strategy!r}. "
+                "Expected 'current' or 'alfred-pr'."
+            ),
+        )
 
     status = _git_run("status", "--porcelain")
     if status.returncode != 0:
@@ -524,6 +555,25 @@ async def commit_and_push(req: CommitPushRequest) -> CommitPushReply:
             ),
         )
 
+    # Branch strategy = "alfred-pr": create a fresh ``alfred/<short-id>``
+    # branch BEFORE adding/committing, so the commit lands on a
+    # branch the user can review on GitHub instead of on main. We
+    # use ``checkout -b`` which moves working-tree changes onto the
+    # new branch atomically — no risk of staging changes on the wrong
+    # branch if the user fat-fingers the request.
+    branch_name = ""
+    if req.branch_strategy == "alfred-pr":
+        branch_name = f"alfred/{uuid.uuid4().hex[:8]}"
+        new_branch = _git_run("checkout", "-b", branch_name)
+        if new_branch.returncode != 0:
+            raise HTTPException(
+                status_code=500,
+                detail=(
+                    f"Failed to create branch {branch_name!r}:\n"
+                    f"{new_branch.stderr.strip()}"
+                ),
+            )
+
     add = _git_run("add", "--", *to_add)
     if add.returncode != 0:
         raise HTTPException(
@@ -544,10 +594,17 @@ async def commit_and_push(req: CommitPushRequest) -> CommitPushReply:
             commit_sha="",
             files_committed=[],
             detail=f"git commit failed:\n{commit.stderr.strip() or commit.stdout.strip()}",
+            branch=branch_name,
         )
 
     sha_res = _git_run("rev-parse", "HEAD")
     sha = sha_res.stdout.strip() if sha_res.returncode == 0 else ""
+
+    # Resolve the actual current branch — for ``current`` strategy this
+    # is whatever we were already on, for ``alfred-pr`` it's the
+    # freshly-created one.
+    cur_branch_res = _git_run("rev-parse", "--abbrev-ref", "HEAD")
+    cur_branch = cur_branch_res.stdout.strip() if cur_branch_res.returncode == 0 else ""
 
     if req.skip_push:
         return CommitPushReply(
@@ -556,14 +613,20 @@ async def commit_and_push(req: CommitPushRequest) -> CommitPushReply:
             commit_sha=sha,
             files_committed=to_add,
             detail=(
-                f"Committed {len(to_add)} file(s) as {sha[:7]} — push skipped "
-                "per request."
+                f"Committed {len(to_add)} file(s) as {sha[:7]} on "
+                f"{cur_branch} — push skipped per request."
             ),
+            branch=cur_branch if branch_name else "",
         )
 
-    # ``git push`` picks up whatever credentials the host has
-    # configured. We never see or handle them.
-    push = _git_run("push", "origin", "HEAD")
+    # For alfred-pr we set the upstream too so subsequent pushes from
+    # the same branch don't need ``-u``.
+    push_args = ["push"]
+    if req.branch_strategy == "alfred-pr":
+        push_args += ["-u", "origin", cur_branch]
+    else:
+        push_args += ["origin", "HEAD"]
+    push = _git_run(*push_args)
     if push.returncode != 0:
         return CommitPushReply(
             committed=True,
@@ -571,17 +634,382 @@ async def commit_and_push(req: CommitPushRequest) -> CommitPushReply:
             commit_sha=sha,
             files_committed=to_add,
             detail=(
-                f"Committed {sha[:7]} locally, but push failed:\n"
+                f"Committed {sha[:7]} locally on {cur_branch}, but push failed:\n"
                 f"{push.stderr.strip() or push.stdout.strip()}\n\n"
                 "Fix the git remote auth on the host (deploy key / PAT) "
                 "and re-run the push manually, or set up the remote "
                 "correctly and try again."
             ),
+            branch=cur_branch if branch_name else "",
         )
+
+    pr_url = ""
+    if req.branch_strategy == "alfred-pr":
+        # Best-effort GitHub PR-compose URL. Not every remote is
+        # GitHub-shaped — we only emit a URL when the remote looks
+        # like one. Anything else (Gitea, GitLab, raw SSH path) gets
+        # an empty string and the frontend just hides the link.
+        remote_res = _git_run("remote", "get-url", "origin")
+        if remote_res.returncode == 0:
+            origin = remote_res.stdout.strip()
+            owner_repo = _github_owner_repo(origin)
+            if owner_repo:
+                pr_url = (
+                    f"https://github.com/{owner_repo}/pull/new/{cur_branch}"
+                )
+
     return CommitPushReply(
         committed=True,
         pushed=True,
         commit_sha=sha,
         files_committed=to_add,
-        detail=f"Committed {sha[:7]} and pushed {len(to_add)} file(s) to origin.",
+        detail=(
+            f"Committed {sha[:7]} on {cur_branch} and pushed "
+            f"{len(to_add)} file(s) to origin."
+            + (f"\nReview at {pr_url}" if pr_url else "")
+        ),
+        branch=cur_branch if branch_name else "",
+        pr_url=pr_url,
+    )
+
+
+def _github_owner_repo(remote_url: str) -> str:
+    """Extract ``<owner>/<repo>`` from any of the three URL shapes
+    GitHub supports: ``git@github.com:foo/bar.git``,
+    ``https://github.com/foo/bar.git``, ``ssh://git@github.com/foo/bar``.
+    Returns empty string if the remote isn't a GitHub URL — used to
+    decide whether to surface a ``pull/new/...`` link."""
+    if "github.com" not in remote_url:
+        return ""
+    raw = remote_url
+    if raw.startswith("git@github.com:"):
+        raw = raw[len("git@github.com:"):]
+    elif raw.startswith("https://github.com/"):
+        raw = raw[len("https://github.com/"):]
+    elif raw.startswith("ssh://git@github.com/"):
+        raw = raw[len("ssh://git@github.com/"):]
+    else:
+        return ""
+    if raw.endswith(".git"):
+        raw = raw[: -len(".git")]
+    return raw.strip("/")
+
+
+# ─── Dry-run: apply patch + run tests in a throwaway worktree ─────────────
+
+
+class DryRunRequest(BaseModel):
+    """Diff to test, plus the list of test commands to run.
+
+    We keep the test commands on the request rather than baking them
+    into the server so different parts of the codebase can run
+    different test suites (Python pytest, frontend tsc, eslint, etc.)
+    without us hard-coding policy. The frontend defaults to a
+    sensible set; advanced users can override per-request.
+    """
+
+    diff: str
+    # Each entry is a shell-style argv list. We deliberately reject
+    # raw shell strings — running ``shell=True`` invites injection
+    # bugs even with our trust model. Default = the project's pytest
+    # backend tests, which is what almost every patch needs to pass.
+    test_commands: list[list[str]] = [
+        ["python", "-m", "pytest", "alfred-core/tests", "-q", "--tb=short"],
+    ]
+    # Hard cap on how long all tests are allowed to take, in seconds.
+    # Prevents a runaway test from holding the worktree forever.
+    timeout_seconds: int = 180
+
+
+class DryRunResult(BaseModel):
+    applied: bool
+    all_passed: bool
+    apply_detail: str
+    # One per ``test_commands`` entry, in order. Each is the truncated
+    # combined stdout+stderr so the user (or the LLM, when this is
+    # routed to a self-fix loop) can see exactly what failed.
+    command_results: list[dict]
+
+
+@router.post("/dry-run", response_model=DryRunResult)
+async def dry_run(req: DryRunRequest) -> DryRunResult:
+    """Apply ``diff`` to a temporary git worktree, run each command
+    in ``test_commands``, and report the outcome. The real working
+    tree is NEVER touched — worktrees share the repo's git database
+    but have an isolated checkout, so this is fast (no full clone)
+    and safe (the worktree is removed in a finally).
+
+    The dry-run is the safety net the user asked for: "show me the
+    fix passes tests before I click APPLY". When ``all_passed`` is
+    true, the frontend can highlight APPLY in green; when it's false,
+    the frontend shows the failing test output so the user (or
+    Alfred himself, in a future self-fix loop) can iterate."""
+    if not req.diff.strip():
+        raise HTTPException(status_code=400, detail="Diff is empty.")
+
+    # Same allowlist guard as ``/apply`` — refuse a diff that targets
+    # paths we wouldn't let through anyway. Catching it here gives a
+    # cleaner error than waiting for ``git apply --check`` inside the
+    # worktree to fail.
+    for line in req.diff.splitlines():
+        if line.startswith("+++ b/"):
+            rel = line[len("+++ b/"):].strip()
+            if rel == "/dev/null":
+                continue
+            if Path(rel).name in _READ_ONLY_NAMES:
+                raise HTTPException(
+                    status_code=403,
+                    detail=f"Refusing to dry-run on {rel!r} — read-only.",
+                )
+            _safe_path(rel)
+
+    work_root = Path(tempfile.mkdtemp(prefix="alfred-workshop-dryrun-"))
+    branch_name = f"alfred-dryrun/{uuid.uuid4().hex[:8]}"
+    try:
+        # Create a worktree pinned to current HEAD on a fresh branch.
+        wt = _git_run("worktree", "add", "--detach", str(work_root), "HEAD")
+        if wt.returncode != 0:
+            raise HTTPException(
+                status_code=500,
+                detail=(
+                    "Could not create worktree for dry-run:\n"
+                    f"{wt.stderr.strip() or wt.stdout.strip()}"
+                ),
+            )
+        _git_run("checkout", "-b", branch_name, cwd=work_root)
+
+        # Apply the diff inside the worktree. ``--check`` first so we
+        # report a malformed diff cleanly without partial application.
+        check = _git_run("apply", "--check", "-", cwd=work_root, input_text=req.diff)
+        if check.returncode != 0:
+            return DryRunResult(
+                applied=False,
+                all_passed=False,
+                apply_detail=(
+                    "git apply --check failed in worktree:\n"
+                    f"{check.stderr.strip()}"
+                ),
+                command_results=[],
+            )
+        real = _git_run("apply", "-", cwd=work_root, input_text=req.diff)
+        if real.returncode != 0:
+            return DryRunResult(
+                applied=False,
+                all_passed=False,
+                apply_detail=f"git apply failed:\n{real.stderr.strip()}",
+                command_results=[],
+            )
+
+        # Run each test command sequentially. We bail on the first
+        # failure to keep the response time low — if the unit tests
+        # already failed, running the slower frontend lint is wasted
+        # work. The user can re-trigger after fixing the unit tests.
+        results: list[dict] = []
+        all_ok = True
+        per_cmd_timeout = max(15, req.timeout_seconds // max(len(req.test_commands), 1))
+        for cmd in req.test_commands:
+            if not cmd:
+                continue
+            try:
+                proc = subprocess.run(  # noqa: S603 — caller-controlled
+                    cmd,
+                    cwd=work_root,
+                    capture_output=True,
+                    text=True,
+                    timeout=per_cmd_timeout,
+                )
+                # Truncate huge outputs to keep payloads sane.
+                tail = (proc.stdout + proc.stderr)[-8000:]
+                results.append(
+                    {
+                        "command": cmd,
+                        "returncode": proc.returncode,
+                        "output": tail,
+                        "passed": proc.returncode == 0,
+                    }
+                )
+                if proc.returncode != 0:
+                    all_ok = False
+                    break
+            except subprocess.TimeoutExpired:
+                results.append(
+                    {
+                        "command": cmd,
+                        "returncode": -1,
+                        "output": (
+                            f"timeout after {per_cmd_timeout}s — abort"
+                        ),
+                        "passed": False,
+                    }
+                )
+                all_ok = False
+                break
+
+        return DryRunResult(
+            applied=True,
+            all_passed=all_ok,
+            apply_detail="patch applied to dry-run worktree",
+            command_results=results,
+        )
+    finally:
+        # Worktree cleanup. ``git worktree remove`` is idempotent.
+        # ``shutil.rmtree`` is the belt-and-braces for the rare case
+        # where the worktree got into a weird state and ``remove``
+        # refused. We never want a leaked worktree.
+        try:
+            _git_run("worktree", "remove", "--force", str(work_root))
+        except Exception:  # noqa: BLE001 — last-ditch cleanup
+            pass
+        if work_root.exists():
+            shutil.rmtree(work_root, ignore_errors=True)
+
+
+# ─── Voice-driven self-fix routing helper ─────────────────────────────────
+
+
+class SelfFixHintRequest(BaseModel):
+    """Free-text problem description from the user (typically spoken).
+    The handler returns the same problem statement plus a list of
+    candidate files Alfred should read — chosen by keyword match
+    against an internal registry. The frontend uses this to
+    pre-populate the Workshop view when the user says "Alfred, fix
+    the X" without having to know which files matter.
+    """
+
+    problem: str
+
+
+class SelfFixHintReply(BaseModel):
+    problem: str
+    paths: list[str]
+    matched_topic: str
+
+
+# Topic → candidate-files map. Each entry is "say X to make Alfred
+# look at these files". Add to this list as new subsystems get added.
+_SELF_FIX_TOPICS: tuple[tuple[tuple[str, ...], str, list[str]], ...] = (
+    (
+        ("radial", "menu", "orb"),
+        "radial-menu",
+        [
+            "alfred-web/src/components/RadialMenu.tsx",
+            "alfred-web/src/components/Orb3D.tsx",
+            "alfred-web/src/components/ChatWindow.tsx",
+        ],
+    ),
+    (
+        ("spotify", "music", "audio", "eq"),
+        "spotify",
+        [
+            "alfred-web/src/components/Spotify3DView.tsx",
+            "alfred-core/src/alfred_core/api/spotify.py",
+        ],
+    ),
+    (
+        ("workout", "form", "coach", "pose"),
+        "workout",
+        [
+            "alfred-web/src/components/WorkoutTabView.tsx",
+            "alfred-core/src/alfred_core/vision/workout_coach.py",
+        ],
+    ),
+    (
+        ("chat", "conversation", "message", "reply"),
+        "chat",
+        [
+            "alfred-web/src/components/ChatWindow.tsx",
+            "alfred-core/src/alfred_core/api/chat.py",
+            "alfred-core/src/alfred_core/router.py",
+        ],
+    ),
+    (
+        ("voice", "wake", "hands", "listen", "mic", "speech"),
+        "voice",
+        [
+            "alfred-web/src/components/Composer.tsx",
+            "alfred-web/src/components/HandsFreeOverlay.tsx",
+            "alfred-web/src/lib/useWakeWord.ts",
+            "alfred-core/src/alfred_core/api/voice.py",
+        ],
+    ),
+    (
+        ("vitals", "diagnostic", "health"),
+        "vitals",
+        [
+            "alfred-web/src/components/VitalsPanel.tsx",
+            "alfred-core/src/alfred_core/api/vitals.py",
+        ],
+    ),
+    (
+        ("workshop", "self", "patch", "diff", "code"),
+        "workshop",
+        [
+            "alfred-web/src/components/WorkshopView.tsx",
+            "alfred-core/src/alfred_core/api/workshop.py",
+        ],
+    ),
+    (
+        ("camera", "face", "recognition", "nightfall"),
+        "vision",
+        [
+            "alfred-web/src/components/CameraPreview.tsx",
+            "alfred-web/src/lib/useFaceIdentity.ts",
+            "alfred-core/src/alfred_core/api/vision.py",
+        ],
+    ),
+    (
+        ("hud", "widget", "layout", "earth"),
+        "hud-layout",
+        [
+            "alfred-web/src/components/ChatWindow.tsx",
+            "alfred-web/src/components/HudWidget.tsx",
+            "alfred-web/src/lib/hudLayout.ts",
+        ],
+    ),
+    (
+        ("auth", "login", "password", "session"),
+        "auth",
+        [
+            "alfred-core/src/alfred_core/api/auth.py",
+            "alfred-web/src/lib/AuthContext.tsx",
+            "alfred-web/src/components/LoginGate.tsx",
+        ],
+    ),
+)
+
+
+@router.post("/self-fix-hint", response_model=SelfFixHintReply)
+async def self_fix_hint(req: SelfFixHintRequest) -> SelfFixHintReply:
+    """Match the user's "Alfred, fix the X" utterance against the
+    topic registry and return candidate files. When nothing matches
+    we fall back to the broadest-impact files (chat + workshop) so
+    Alfred can still do *something* with the request rather than
+    refusing.
+
+    This is intentionally a thin endpoint — keyword matching, no LLM
+    call. The actual fix is a follow-up POST to ``/diagnose`` with
+    these paths. Splitting the two means the frontend can pop the
+    Workshop view immediately on voice intent without waiting for an
+    LLM round-trip.
+    """
+    text = req.problem.lower()
+    if not text.strip():
+        raise HTTPException(status_code=400, detail="Problem statement is empty.")
+    best: tuple[int, str, list[str]] | None = None
+    for keywords, topic, paths in _SELF_FIX_TOPICS:
+        score = sum(1 for k in keywords if k in text)
+        if score > 0 and (best is None or score > best[0]):
+            best = (score, topic, paths)
+    if best is None:
+        return SelfFixHintReply(
+            problem=req.problem,
+            paths=[
+                "alfred-web/src/components/ChatWindow.tsx",
+                "alfred-core/src/alfred_core/api/chat.py",
+                "alfred-core/src/alfred_core/api/workshop.py",
+            ],
+            matched_topic="generic",
+        )
+    return SelfFixHintReply(
+        problem=req.problem, paths=best[2], matched_topic=best[1]
     )

@@ -132,6 +132,7 @@ export async function fetchGitStatus(): Promise<GitStatus> {
 export interface CommitPushRequest {
   message: string;
   skip_push?: boolean;
+  branch_strategy?: "current" | "alfred-pr";
 }
 
 export interface CommitPushReply {
@@ -140,6 +141,8 @@ export interface CommitPushReply {
   commit_sha: string;
   files_committed: string[];
   detail: string;
+  branch?: string;
+  pr_url?: string;
 }
 
 export async function commitAndPush(
@@ -156,4 +159,61 @@ export async function commitAndPush(
     throw new Error(`Commit + push failed: ${resp.status} ${detail}`);
   }
   return resp.json() as Promise<CommitPushReply>;
+}
+
+export interface DryRunCommandResult {
+  command: string[];
+  returncode: number;
+  output: string;
+  passed: boolean;
+}
+
+export interface DryRunResult {
+  applied: boolean;
+  all_passed: boolean;
+  apply_detail: string;
+  command_results: DryRunCommandResult[];
+}
+
+export async function dryRunPatch(
+  diff: string,
+  testCommands?: string[][],
+): Promise<DryRunResult> {
+  const body: Record<string, unknown> = { diff };
+  if (testCommands && testCommands.length > 0) {
+    body.test_commands = testCommands;
+  }
+  const resp = await fetch(`${API_BASE}/workshop/dry-run`, {
+    ...FETCH_DEFAULTS,
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!resp.ok) {
+    const detail = await resp.text();
+    throw new Error(`Dry-run failed: ${resp.status} ${detail}`);
+  }
+  return resp.json() as Promise<DryRunResult>;
+}
+
+export interface SelfFixHintReply {
+  problem: string;
+  paths: string[];
+  matched_topic: string;
+}
+
+export async function fetchSelfFixHint(
+  problem: string,
+): Promise<SelfFixHintReply> {
+  const resp = await fetch(`${API_BASE}/workshop/self-fix-hint`, {
+    ...FETCH_DEFAULTS,
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ problem }),
+  });
+  if (!resp.ok) {
+    const detail = await resp.text();
+    throw new Error(`Self-fix hint failed: ${resp.status} ${detail}`);
+  }
+  return resp.json() as Promise<SelfFixHintReply>;
 }
