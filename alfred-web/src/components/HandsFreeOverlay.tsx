@@ -29,6 +29,15 @@ interface Props {
   wakeStatus: WakeStatus;
   wakeError: string | null;
   messages: ReadonlyArray<ChatMessageOut>;
+  /**
+   * Continuous-conversation mode is engaged. While true, Alfred
+   * automatically re-opens the mic after each reply so the user
+   * can keep talking without saying "hey alfred" again. Surfaces
+   * as a small green "ENGAGED" pip next to the status row.
+   */
+  conversationMode?: boolean;
+  /** Click-handler to manually end the conversation loop. */
+  onEndConversation?: () => void;
 }
 
 const FADE_AFTER_MS = 8_000;
@@ -40,6 +49,8 @@ export function HandsFreeOverlay({
   wakeStatus,
   wakeError,
   messages,
+  conversationMode = false,
+  onEndConversation,
 }: Props) {
   const lastUser = [...messages].reverse().find((m) => m.role === "user");
   const lastAssistant = [...messages]
@@ -156,6 +167,41 @@ export function HandsFreeOverlay({
           }}
         />
         <span data-testid="hands-free-status">{STATUS_LABEL[status]}</span>
+        {conversationMode ? (
+          <button
+            type="button"
+            data-testid="hands-free-engaged-pip"
+            onClick={() => onEndConversation?.()}
+            title="Conversation engaged — click to end. Say 'that's it for now' / 'thanks alfred' for the same effect."
+            style={{
+              marginLeft: "auto",
+              display: "inline-flex",
+              alignItems: "center",
+              gap: 6,
+              padding: "2px 8px",
+              fontSize: 9,
+              letterSpacing: 1.5,
+              border: "1px solid rgba(110, 230, 160, 0.5)",
+              borderRadius: 999,
+              background: "rgba(110, 230, 160, 0.08)",
+              color: "rgb(110, 230, 160)",
+              cursor: "pointer",
+              fontFamily: "inherit",
+            }}
+          >
+            <span
+              style={{
+                width: 6,
+                height: 6,
+                borderRadius: "50%",
+                background: "rgb(110, 230, 160)",
+                boxShadow: "0 0 6px rgb(110, 230, 160)",
+                animation: "hf-pulse 1400ms ease-in-out infinite",
+              }}
+            />
+            ENGAGED
+          </button>
+        ) : null}
       </div>
       {wakeError ? (
         <div

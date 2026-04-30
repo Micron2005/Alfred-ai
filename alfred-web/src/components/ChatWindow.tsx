@@ -254,6 +254,51 @@ function detectSelfFixIntent(raw: string): string | null {
 }
 
 /**
+ * "That's it for now" / "no thanks" / "that's all, thank you" /
+ * "I'm done" — ends a continuous-conversation session so Alfred
+ * stops auto-restarting the mic after each reply and waits for
+ * the next "hey alfred" wake word.
+ *
+ * Strict whole-utterance match so it can never be confused with
+ * a greeting or an actual request that happens to contain "thanks".
+ * Must be ≤ 8 words and start with one of a small set of canonical
+ * sign-off phrases.
+ */
+function detectGoodbyeIntent(raw: string): boolean {
+  const text = raw.trim().toLowerCase().replace(/[.?!,]+$/, "");
+  if (!text) return false;
+  const stripped = text
+    .replace(/^(?:hey\s+|ok\s+)?alfred[,\s]+/, "")
+    .replace(/[,.!?]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!stripped) return false;
+  if (stripped.split(/\s+/).length > 8) return false;
+  // Strict whole-utterance match. Each alternative is a complete
+  // canonical sign-off phrase.
+  const patterns: ReadonlyArray<RegExp> = [
+    /^no(?:\s+(?:thanks?|that[' ]?s\s+(?:it|all|enough)))?$/,
+    /^nope$/,
+    /^nah$/,
+    /^that[' ]?s\s+(?:it|all|enough)(?:\s+for\s+now)?(?:\s+thanks?(?:\s+alfred)?)?$/,
+    /^that[' ]?ll\s+(?:be\s+)?all(?:\s+thanks?)?$/,
+    /^nothing\s+(?:else|more|for\s+now)$/,
+    /^i[' ]?m\s+(?:good|done|fine|all\s+set|sorted)$/,
+    /^thanks?(?:\s+alfred)?$/,
+    /^thank\s+you(?:\s+alfred)?$/,
+    /^all\s+done$/,
+    /^stand\s+(?:down|by)$/,
+    /^done\s+for\s+now$/,
+    /^stop\s+listening$/,
+    /^that[' ]?s\s+everything(?:\s+for\s+now)?$/,
+    /^good\s*night(?:\s+alfred)?$/,
+    /^bye(?:\s+alfred)?$/,
+    /^goodbye(?:\s+alfred)?$/,
+  ];
+  return patterns.some((rx) => rx.test(stripped));
+}
+
+/**
  * "Alfred, remember my face as admin for nightfall protocol" — or
  * any reasonable variation. Returns the display-name to enroll
  * under (defaults to "Admin" when the user didn't say one).
@@ -364,6 +409,44 @@ export function ChatWindow() {
   // HUD tab landed on a null ref.
   const handsFreeComposerRef = useRef<ComposerHandle>(null);
 
+  // ─── Continuous-conversation mode ─────────────────────────────────
+  //
+  // After the wake word fires, Alfred stays "engaged" — the moment he
+  // finishes a reply, the mic re-opens automatically so the user can
+  // keep talking without saying "hey alfred" again. Each reply is
+  // followed by a short "Anything else, sir?" prompt. The session
+  // ends when the user says one of the goodbye phrases
+  // (``detectGoodbyeIntent``) or stays silent long enough for the
+  // recorder to time out.
+  //
+  // The ref is the source of truth — we read it from inside async
+  // callbacks (audio.onended, handleSend) where a stale closure on
+  // the React state would lie about the current value. The state
+  // mirror exists only so the UI can render a tiny "ENGAGED" pip.
+  const conversationModeRef = useRef(false);
+  const [conversationMode, setConversationModeState] = useState(false);
+  // ``activeTab`` snapshot for async callbacks — same staleness
+  // problem as ``conversationModeRef`` above.
+  const activeTabRef = useRef<TabId>("hud");
+  // ``unclearStreakRef`` counts consecutive "couldn't hear you"
+  // events. After two strikes in a row Alfred bails out of the
+  // continuous-conversation loop instead of badgering the user.
+  const unclearStreakRef = useRef(0);
+
+  function setConvoMode(active: boolean) {
+    conversationModeRef.current = active;
+    setConversationModeState(active);
+    if (!active) {
+      unclearStreakRef.current = 0;
+    }
+  }
+
+  // Mirror of (busy || loadingConvo) for the auto-restart guard inside
+  // ``finishPlayback``. We can't read state directly from there because
+  // the closure is created when speak() starts and would see stale
+  // values by the time TTS ends.
+  const disabledForLoopRef = useRef(false);
+
   // Restore the user's voice-out + hands-free + camera preferences. All
   // default to off so a fresh install doesn't surprise the user with
   // audio or a permission prompt.
@@ -379,6 +462,7 @@ export function ChatWindow() {
     setHandsFree(handsFreeStored === null ? true : handsFreeStored === "1");
     setCameraOn(localStorage.getItem(CAMERA_KEY) === "1");
     setActiveTab(loadTab());
+    activeTabRef.current = loadTab();
     // Now that the chat lives in the sidebar, the main pane would
     // be nearly empty without the HUD widgets — default the full HUD
     // *on* for users who haven't explicitly turned it off. Existing
@@ -429,6 +513,11 @@ export function ChatWindow() {
         // eslint-disable-next-line no-console
         console.warn("[wake] cue failed; proceeding without it", e);
       }
+      // Engage continuous-conversation mode the moment the wake word
+      // fires. From here until the user says a goodbye phrase, every
+      // reply auto-restarts the mic so they can keep talking without
+      // saying "hey alfred" again.
+      setConvoMode(true);
       try {
         const ref =
           activeTab === "chat"
@@ -700,6 +789,7 @@ export function ChatWindow() {
 
   function setActiveTabPersisted(tab: TabId) {
     setActiveTab(tab);
+    activeTabRef.current = tab;
     persistTab(tab);
   }
 
@@ -774,6 +864,12 @@ export function ChatWindow() {
     });
   }
 
+  // Mirror busy + loadingConvo so the TTS finishPlayback closure can
+  // read the live values without going through a stale capture.
+  useEffect(() => {
+    disabledForLoopRef.current = busy || loadingConvo;
+  }, [busy, loadingConvo]);
+
   // Capture the current frame and slot it into the composer's pending
   // attachments so the user can ask a question about it.
   async function handleLook() {
@@ -806,9 +902,17 @@ export function ChatWindow() {
   // race where one overrides the other.
   const { pause: wakePause, resume: wakeResume } = wake;
   useEffect(() => {
-    if (recording || busy || speaking) wakePause();
+    // Keep the wake-word engine paused throughout an active
+    // conversation loop, not just while the mic / TTS / handler is
+    // busy. Otherwise the very brief idle window between Alfred
+    // finishing TTS and the auto-restart firing would resume the
+    // engine, and Alfred's "anything else, sir?" could itself
+    // trigger detection (he's NOT going to say "hey alfred", but
+    // resuming during the gap is still wasteful and risks a false
+    // positive on the user's first word).
+    if (recording || busy || speaking || conversationMode) wakePause();
     else wakeResume();
-  }, [recording, busy, speaking, wakePause, wakeResume]);
+  }, [recording, busy, speaking, conversationMode, wakePause, wakeResume]);
 
   // Mirror ``busy`` onto the orb store as the "thinking" hold so the
   // JARVIS orb spins faster while Alfred composes a reply. Listening
@@ -853,11 +957,26 @@ export function ChatWindow() {
     // during the TTS network round-trip and resume listening.
     setSpeaking(true);
     orbStore.setHold("speaking", true);
+    // Continuous-conversation prompt: when the loop is active, append
+    // a short follow-up so the user knows the mic will reopen and
+    // he can keep talking. We don't write this into the chat history
+    // (it would visually clutter every reply) — only the spoken
+    // audio gets the suffix. Skip if Alfred's reply already ends
+    // with a question (no point asking twice) or is itself a
+    // sign-off.
+    let toSpeak = text;
+    if (
+      conversationModeRef.current &&
+      !/[?]\s*$/.test(text.trim()) &&
+      !/standing\s+by/i.test(text)
+    ) {
+      toSpeak = `${text.replace(/[.!]+\s*$/, "")} … Anything else, sir?`;
+    }
     let url: string | null = null;
     let audioCtx: AudioContext | null = null;
     let levelTimer: number | null = null;
     try {
-      const blob = await synthesizeSpeech(text);
+      const blob = await synthesizeSpeech(toSpeak);
       url = URL.createObjectURL(blob);
       const audio = new Audio(url);
       // Route TTS through a Web Audio analyser so the JARVIS orb can
@@ -920,6 +1039,36 @@ export function ChatWindow() {
           audioRef.current = null;
           setSpeaking(false);
           orbStore.setHold("speaking", false);
+          // Continuous-conversation: the moment Alfred finishes
+          // speaking, re-open the mic so the user can keep talking
+          // without re-triggering the wake word. The brief 350 ms
+          // delay gives the user a perceptible beat between the end
+          // of TTS and the mic opening (otherwise it feels jarring
+          // — the next utterance starts before the user has parsed
+          // the question). The loop ends when the user says a
+          // goodbye phrase or the silence detector times out twice.
+          if (
+            conversationModeRef.current &&
+            !disabledForLoopRef.current
+          ) {
+            window.setTimeout(() => {
+              if (!conversationModeRef.current) return;
+              const composer =
+                activeTabRef.current === "chat"
+                  ? composerRef.current
+                  : handsFreeComposerRef.current;
+              try {
+                composer?.startVoice();
+              } catch (e) {
+                // eslint-disable-next-line no-console
+                console.warn(
+                  "[convo] auto-restart startVoice failed; ending loop",
+                  e,
+                );
+                setConvoMode(false);
+              }
+            }, 350);
+          }
         }
       };
       audio.onended = finishPlayback;
@@ -982,6 +1131,19 @@ export function ChatWindow() {
       const now = Date.now();
       if (now - lastUnclearAtRef.current < 4000) return;
       lastUnclearAtRef.current = now;
+      // Continuous-conversation: bail out of the loop after two
+      // consecutive "couldn't hear you" events instead of badgering
+      // the user. The next "hey alfred" wake re-engages.
+      if (conversationModeRef.current) {
+        unclearStreakRef.current += 1;
+        if (unclearStreakRef.current >= 2) {
+          setConvoMode(false);
+          if (voiceOut) {
+            void speak("Standing by, sir. Ping me when you need me.");
+          }
+          return;
+        }
+      }
       // Prefer voice if it's enabled — otherwise leave the inline
       // mic-error banner as the only feedback.
       if (voiceOut) {
@@ -1045,6 +1207,37 @@ export function ChatWindow() {
 
   async function handleSend(text: string, images: ChatImage[] = []) {
     setError(null);
+
+    // Continuous-conversation goodbye phrases. End the loop here
+    // instead of sending the message to the LLM — they're not
+    // questions, they're sign-offs. We DO want them in the chat
+    // history so the user can scroll back and see when the session
+    // ended; we just don't want Alfred replying as if "thanks"
+    // were a question.
+    if (
+      images.length === 0 &&
+      conversationModeRef.current &&
+      detectGoodbyeIntent(text)
+    ) {
+      const ack = "Very good, sir. Standing by.";
+      setMessages((prev) => [
+        ...prev,
+        { id: crypto.randomUUID(), role: "user", content: text },
+        { id: crypto.randomUUID(), role: "assistant", content: ack },
+      ]);
+      setConvoMode(false);
+      if (voiceOut) {
+        // Speak() will NOT auto-restart the mic this time because
+        // setConvoMode(false) has already run before TTS finishes.
+        void speak(ack);
+      }
+      return;
+    }
+
+    // Reset the unclear-streak the moment we get a real utterance —
+    // partial misses earlier shouldn't end the loop after the user
+    // finally got through.
+    unclearStreakRef.current = 0;
 
     // Intercept tab-switch voice/text intents BEFORE sending to the
     // LLM. Lets the user say "Alfred, go to the workout tab" / "open
@@ -1654,6 +1847,8 @@ export function ChatWindow() {
             wakeStatus={wake.status}
             wakeError={wake.error ?? null}
             messages={messages}
+            conversationMode={conversationMode}
+            onEndConversation={() => setConvoMode(false)}
           /> : null}
           <div
             data-testid="hands-free-composer-host"

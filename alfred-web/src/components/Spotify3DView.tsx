@@ -109,9 +109,15 @@ export function Spotify3DView({ onBack }: Spotify3DViewProps) {
         const resp = await listSpotifyPlaylists(50, 0);
         if (cancelled) return;
         setPlaylists(resp.items);
+        // eslint-disable-next-line no-console
+        console.info(
+          `[spotify3d] loaded ${resp.items.length} playlists`,
+        );
       } catch (exc) {
         if (cancelled) return;
         const message = exc instanceof Error ? exc.message : String(exc);
+        // eslint-disable-next-line no-console
+        console.error("[spotify3d] listPlaylists failed:", exc);
         setError(`Couldn't load playlists: ${message}`);
       }
     })();
@@ -186,9 +192,15 @@ export function Spotify3DView({ onBack }: Spotify3DViewProps) {
         const resp = await searchSpotifyTracks(q, 30);
         if (cancelled) return;
         setSearchResults(resp.items);
+        // eslint-disable-next-line no-console
+        console.info(
+          `[spotify3d] search "${q}" returned ${resp.items.length} tracks`,
+        );
       } catch (exc) {
         if (cancelled) return;
         const message = exc instanceof Error ? exc.message : String(exc);
+        // eslint-disable-next-line no-console
+        console.error("[spotify3d] searchTracks failed:", exc);
         setError(`Search failed: ${message}`);
       } finally {
         if (!cancelled) setSearching(false);
@@ -360,6 +372,51 @@ export function Spotify3DView({ onBack }: Spotify3DViewProps) {
             {status?.linked
               ? `LIBRARY · ${status.display_name || "CONNECTED"}`
               : "LIBRARY"}
+          </div>
+
+          {/* Diagnostics pill — always shows the exact state of the
+              Spotify integration so it's obvious why the library
+              isn't loading. Pre-Feb-2026 the pane silently went
+              blank when configured=false / linked=false, leaving
+              the user guessing. */}
+          <div
+            data-testid="spotify-3d-debug"
+            style={{
+              fontSize: 10,
+              color: "var(--muted)",
+              letterSpacing: 1.2,
+              fontFamily:
+                'ui-monospace, SFMono-Regular, "JetBrains Mono", monospace',
+              padding: "4px 8px",
+              border: "1px dashed var(--border)",
+              borderRadius: 3,
+              background: "rgba(108,214,255,0.04)",
+            }}
+          >
+            STATE · configured:
+            <span
+              style={{
+                color: status?.configured ? "rgb(110,230,160)" : "rgb(255,160,80)",
+                fontWeight: 600,
+              }}
+            >
+              {status === null ? "?" : status.configured ? "Y" : "N"}
+            </span>{" "}
+            linked:
+            <span
+              style={{
+                color: status?.linked ? "rgb(110,230,160)" : "rgb(255,160,80)",
+                fontWeight: 600,
+              }}
+            >
+              {status === null ? "?" : status.linked ? "Y" : "N"}
+            </span>
+            {status?.user_id ? (
+              <>
+                {" "}
+                user:<span style={{ color: "var(--orb)" }}>{status.user_id}</span>
+              </>
+            ) : null}
           </div>
 
           {!status && !statusError ? (
