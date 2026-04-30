@@ -15,6 +15,26 @@ Single user — Mukarram Mohammad Alam. Alfred is a dry, witty British butler.
 
 ## What's been implemented (Feb 2026 fork — all sessions, current state)
 
+### Spotify 3D View — REAL Spotify library (Feb 2026 — NEW, this session)
+- ✅ **`Spotify3DView.tsx` rebuilt from scratch.** The old local-file uploader + 3-band EQ has been retired (DRM blocks EQ on streamed audio anyway, and the user explicitly didn't want to download/upload songs). The view is now a full Spotify browser:
+  - LEFT half: pulsing JARVIS orb visualiser with album art at its heart, now-playing caption beneath, transport controls (⏮ ⏯ ⏭) floating below the orb
+  - RIGHT half: tabbed browser — PLAYLISTS (50 newest, click → tracks slide in) + SEARCH (debounced 350 ms, catalog-wide). Click any track → plays via `/api/spotify/play` on the active device
+  - OAuth Connect button when not linked, distinct messaging for unconfigured / not-linked states
+  - Premium-required errors caught and shown as a friendly hint instead of a stack trace
+- ✅ **3 new backend endpoints** (`alfred-core/src/alfred_core/api/spotify.py`):
+  - `GET /api/spotify/playlists?limit=&offset=` — user's playlists (id, name, image, track_count, owner)
+  - `GET /api/spotify/playlists/{id}/tracks?limit=&offset=` — track list inside a playlist (slim `fields=` projection so payloads stay <50 KB)
+  - `GET /api/spotify/search?q=&limit=` — multi-result catalog search (existing `search_track` was 1-result for the chat tool; this is the multi-result UI counterpart)
+- ✅ **3 new SpotifyClient methods** (`alfred-core/src/alfred_core/tools/spotify.py`): `list_playlists`, `list_playlist_tracks`, `search_tracks`. All use a shared `_compact_track` static helper that picks the smallest image (≈64 px so the SVG ring stays snappy), joins artist names, and marks local-file tracks `is_playable: false` so the UI greys them out instead of trying to play unplayable URIs
+- ✅ **8 new pytest cases** (`tests/test_spotify_browser.py`): _compact_track image picking, local-file unplayability flag, missing-fields tolerance, non-dict tolerance, empty-query short-circuit, route registration. **Total backend tests: 235 passing.**
+- ✅ **Frontend client helpers** in `lib/spotify.ts`: `listSpotifyPlaylists`, `listSpotifyPlaylistTracks`, `searchSpotifyTracks`, `playSpotifyUri`. The existing `SpotifyPlayer` HUD widget continues to handle the Web Playback SDK + transport controls; the 3D view delegates playback through the same `/api/spotify/play` so transport stays consistent across all surfaces (HUD widget, 3D view, voice command).
+
+### Wake-word "swallow" bug fixed (Feb 2026 — NEW, this session)
+- ✅ **Root cause**: `playWakeCue()` was called in `ChatWindow.tsx`'s `onWake` handler but **was never imported or defined**. Result: every wake-word fire threw a `ReferenceError` inside the openWakeWord engine's detect listener BEFORE the next line (`ref?.startVoice()`) could run. The wake word detected "hey alfred" successfully but the speech that followed was never recorded.
+- ✅ **Fix**: created `alfred-web/src/lib/wakeCue.ts` — a proper Web Audio E5→A5 ping (one-shot, ≤350 ms, AudioContext closed immediately after to stay under the per-tab AC budget). Wired into `ChatWindow.tsx`. **Wrapped both `playWakeCue()` and `ref?.startVoice()` in independent try/catch blocks** so a future bug in one branch can never again kill the other — a missing-ref scenario now resumes the wake-word engine instead of leaving it paused forever.
+- ✅ Bumped `silenceDetector.ts` warmup window 500 ms → 900 ms so the wake cue beep doesn't bleed into the start of the user's utterance.
+
+
 ### HUD layout
 - ✅ 4 tabs (HUD / CHAT / WORKOUT / DESIGN)
 - ✅ **No ALFRED title block / "At your service" card** — minimal HUD per user request

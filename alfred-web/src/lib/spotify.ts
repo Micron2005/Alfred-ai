@@ -114,6 +114,81 @@ export function fetchAudioAnalysis(
   );
 }
 
+// ─── Library / playlist browsing (used by Spotify3DView) ─────────────
+
+export interface SpotifyPlaylistSummary {
+  id: string;
+  name: string;
+  uri: string;
+  image_url: string;
+  track_count: number;
+  owner: string;
+}
+
+export interface SpotifyTrackSummary {
+  track_id: string;
+  uri: string;
+  title: string;
+  artists: string;
+  album: string;
+  duration_ms: number;
+  image_url: string;
+  is_playable: boolean;
+}
+
+export function listSpotifyPlaylists(
+  limit = 50,
+  offset = 0,
+): Promise<{ items: SpotifyPlaylistSummary[] }> {
+  const params = new URLSearchParams({
+    limit: String(limit),
+    offset: String(offset),
+  });
+  return jsonFetch<{ items: SpotifyPlaylistSummary[] }>(
+    `/api/spotify/playlists?${params.toString()}`,
+  );
+}
+
+export function listSpotifyPlaylistTracks(
+  playlistId: string,
+  limit = 100,
+  offset = 0,
+): Promise<{ items: SpotifyTrackSummary[] }> {
+  const params = new URLSearchParams({
+    limit: String(limit),
+    offset: String(offset),
+  });
+  return jsonFetch<{ items: SpotifyTrackSummary[] }>(
+    `/api/spotify/playlists/${encodeURIComponent(playlistId)}/tracks?${params.toString()}`,
+  );
+}
+
+export function searchSpotifyTracks(
+  query: string,
+  limit = 20,
+): Promise<{ items: SpotifyTrackSummary[] }> {
+  const params = new URLSearchParams({ q: query, limit: String(limit) });
+  return jsonFetch<{ items: SpotifyTrackSummary[] }>(
+    `/api/spotify/search?${params.toString()}`,
+  );
+}
+
+/**
+ * Play a specific Spotify track URI on the user's active device
+ * (or the in-browser SDK device when Alfred is HERE). Mirrors the
+ * shape of the existing ``/api/spotify/play`` endpoint.
+ */
+export function playSpotifyUri(
+  uri: string,
+  deviceId?: string,
+): Promise<{ played_uri: string | null }> {
+  return jsonFetch<{ played_uri: string | null }>("/api/spotify/play", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ uri, device_id: deviceId ?? null }),
+  });
+}
+
 export function transferPlayback(
   deviceId: string,
   play = true,

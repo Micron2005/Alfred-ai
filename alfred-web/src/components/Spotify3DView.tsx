@@ -1,207 +1,288 @@
 "use client";
 
 /**
- * Spotify3DView — full-screen 3D-styled audio console.
+ * Spotify3DView — full-screen JARVIS-style Spotify browser.
  *
  * Two halves:
- *   - LEFT: a giant rotating Spotify-orb visualiser that pulses to
- *     the live audio analyser (bass/mid/treble bands). Track meta
- *     overlays the orb if Spotify is connected.
- *   - RIGHT: the EQ panel — three vertical sliders (Bass / Mid /
- *     Treble) plus drag-drop for a local audio file (so the EQ is
- *     real, not decorative). Playback uses Web Audio API with a
- *     BiquadFilter chain so the user actually hears the EQ.
+ *   - LEFT: a giant rotating orb visualiser that pulses to whatever
+ *     is now-playing (synthetic spectrum derived from playhead since
+ *     Web Playback SDK streams are DRM-locked from a real analyser).
+ *   - RIGHT: a real Spotify browser:
+ *       • Connect button if the account isn't linked yet
+ *       • Search box (catalog-wide) + results list
+ *       • The user's playlists in a scrollable rail
+ *       • Click a playlist → its tracks load below
+ *       • Click a track → it plays via the existing /api/spotify/play
+ *         endpoint on the user's active device (transferable to the
+ *         in-browser Web Playback SDK via the HUD widget if desired).
  *
- * NOTE on Spotify EQ: the official Web Playback SDK doesn't expose
- * the decoded audio buffer (DRM), so we can't EQ Spotify streams
- * directly. The user picked option 4a — Web Audio EQ on local
- * audio. The Spotify side stays decorative-but-faithful (real
- * track meta, real playback control via the existing SDK). We
- * tell the user this in the panel so it's obvious.
+ * The old local-file EQ has been retired — it didn't actually map to
+ * "use my Spotify". Streamed audio is DRM-locked so EQ-on-stream is
+ * impossible from the browser; the user just wants the 3D view to be
+ * an extension of their Spotify library.
  */
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  type SpotifyPlaylistSummary,
+  type SpotifyStatus,
+  type SpotifyTrack,
+  type SpotifyTrackSummary,
+  getNowPlaying,
+  getSpotifyStatus,
+  listSpotifyPlaylistTracks,
+  listSpotifyPlaylists,
+  nextSpotifyTrack,
+  pauseSpotify,
+  playSpotify,
+  playSpotifyUri,
+  previousSpotifyTrack,
+  searchSpotifyTracks,
+  startSpotifyAuth,
+} from "@/lib/spotify";
 
 interface Spotify3DViewProps {
   onBack: () => void;
 }
 
-interface Bands {
-  bass: number; // -12..+12 dB
-  mid: number;
-  treble: number;
-}
-
 const BAR_COUNT = 32;
+const POLL_MS = 5000;
+
+type Tab = "playlists" | "search";
 
 export function Spotify3DView({ onBack }: Spotify3DViewProps) {
-  const [bands, setBands] = useState<Bands>({ bass: 0, mid: 0, treble: 0 });
-  const [fileName, setFileName] = useState<string | null>(null);
-  const [playing, setPlaying] = useState(false);
+  // ─── Connection / now-playing state ─────────────────────────────
+  const [status, setStatus] = useState<SpotifyStatus | null>(null);
+  const [statusError, setStatusError] = useState<string | null>(null);
+  const [track, setTrack] = useState<SpotifyTrack | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [bars, setBars] = useState<number[]>(() => Array(BAR_COUNT).fill(0));
+  const [busy, setBusy] = useState(false);
 
-  const audioRef = useRef<HTMLAudioElement | null>(null);
-  const audioCtxRef = useRef<AudioContext | null>(null);
-  const sourceRef = useRef<MediaElementAudioSourceNode | null>(null);
-  const bassFilterRef = useRef<BiquadFilterNode | null>(null);
-  const midFilterRef = useRef<BiquadFilterNode | null>(null);
-  const trebleFilterRef = useRef<BiquadFilterNode | null>(null);
-  const analyserRef = useRef<AnalyserNode | null>(null);
-  const rafRef = useRef<number | null>(null);
+  // ─── Browser state ──────────────────────────────────────────────
+  const [tab, setTab] = useState<Tab>("playlists");
+  const [playlists, setPlaylists] = useState<SpotifyPlaylistSummary[] | null>(
+    null,
+  );
+  const [activePlaylist, setActivePlaylist] =
+    useState<SpotifyPlaylistSummary | null>(null);
+  const [playlistTracks, setPlaylistTracks] = useState<
+    SpotifyTrackSummary[] | null
+  >(null);
+  const [tracksLoading, setTracksLoading] = useState(false);
 
-  // Build the audio graph the first time the user picks a file.
-  // Audio → Source → BassShelf → MidPeaking → TrebleShelf →
-  // Analyser → Destination. The filters are kept in refs so the
-  // slider handlers can mutate them without re-running this setup.
-  const ensureGraph = useCallback(() => {
-    if (audioCtxRef.current) return;
-    const ctx = new AudioContext();
-    audioCtxRef.current = ctx;
-    const audio = audioRef.current;
-    if (!audio) return;
-    const src = ctx.createMediaElementSource(audio);
-    sourceRef.current = src;
+  const [searchQuery, setSearchQuery] = useState("");
+  const [searchResults, setSearchResults] = useState<
+    SpotifyTrackSummary[] | null
+  >(null);
+  const [searching, setSearching] = useState(false);
 
-    const bass = ctx.createBiquadFilter();
-    bass.type = "lowshelf";
-    bass.frequency.value = 200;
-    bass.gain.value = 0;
-    bassFilterRef.current = bass;
-
-    const mid = ctx.createBiquadFilter();
-    mid.type = "peaking";
-    mid.frequency.value = 1000;
-    mid.Q.value = 1;
-    mid.gain.value = 0;
-    midFilterRef.current = mid;
-
-    const treble = ctx.createBiquadFilter();
-    treble.type = "highshelf";
-    treble.frequency.value = 3500;
-    treble.gain.value = 0;
-    trebleFilterRef.current = treble;
-
-    const analyser = ctx.createAnalyser();
-    analyser.fftSize = 256;
-    analyser.smoothingTimeConstant = 0.78;
-    analyserRef.current = analyser;
-
-    src.connect(bass).connect(mid).connect(treble).connect(analyser);
-    analyser.connect(ctx.destination);
+  // ─── Status fetch + post-OAuth bounce handler ───────────────────
+  const refreshStatus = useCallback(async () => {
+    try {
+      const next = await getSpotifyStatus();
+      setStatus(next);
+      setStatusError(null);
+    } catch (exc) {
+      const message = exc instanceof Error ? exc.message : String(exc);
+      setStatusError(message);
+    }
   }, []);
 
-  // Visualiser RAF loop — reads the analyser and sets ``bars``.
   useEffect(() => {
-    let cancelled = false;
-    function tick() {
-      if (cancelled) return;
-      const a = analyserRef.current;
-      if (a && playing) {
-        const data = new Uint8Array(a.frequencyBinCount);
-        a.getByteFrequencyData(data);
-        const step = Math.floor(data.length / BAR_COUNT);
-        const next: number[] = [];
-        for (let i = 0; i < BAR_COUNT; i++) {
-          let sum = 0;
-          for (let j = 0; j < step; j++) sum += data[i * step + j];
-          next.push((sum / step) / 255);
-        }
-        setBars(next);
-      }
-      rafRef.current = requestAnimationFrame(tick);
+    void refreshStatus();
+    const params = new URLSearchParams(window.location.search);
+    if (params.get("spotify_linked") === "1") {
+      params.delete("spotify_linked");
+      const search = params.toString();
+      const next = `${window.location.pathname}${search ? `?${search}` : ""}`;
+      window.history.replaceState({}, "", next);
+      void refreshStatus();
     }
-    rafRef.current = requestAnimationFrame(tick);
+  }, [refreshStatus]);
+
+  // ─── Playlist + now-playing fetching once linked ────────────────
+  useEffect(() => {
+    if (!status?.linked) return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const resp = await listSpotifyPlaylists(50, 0);
+        if (cancelled) return;
+        setPlaylists(resp.items);
+      } catch (exc) {
+        if (cancelled) return;
+        const message = exc instanceof Error ? exc.message : String(exc);
+        setError(`Couldn't load playlists: ${message}`);
+      }
+    })();
     return () => {
       cancelled = true;
-      if (rafRef.current !== null) cancelAnimationFrame(rafRef.current);
     };
-  }, [playing]);
+  }, [status?.linked]);
 
-  // Tear the audio graph down on unmount so the AudioContext doesn't
-  // leak across mounts (browser's per-tab AC budget is small).
-  // We deliberately read ``.current`` at cleanup time (not at mount)
-  // so the latest audio element / context get torn down even if
-  // ensureGraph mutated the refs after this effect first ran.
   useEffect(() => {
-    return () => {
-      const ctx = audioCtxRef.current;
-      // eslint-disable-next-line react-hooks/exhaustive-deps
-      const audio = audioRef.current;
-      if (audio) audio.pause();
-      if (ctx) void ctx.close().catch(() => {});
+    if (!status?.linked) return;
+    let cancelled = false;
+    const tick = async () => {
+      try {
+        const result = await getNowPlaying();
+        if (cancelled) return;
+        setTrack(result);
+      } catch {
+        // Silent — surfaces via the connect-state error if anything's
+        // genuinely wrong, otherwise it's just transient.
+      }
     };
+    void tick();
+    const id = window.setInterval(tick, POLL_MS);
+    return () => {
+      cancelled = true;
+      window.clearInterval(id);
+    };
+  }, [status?.linked]);
+
+  // ─── Actions ────────────────────────────────────────────────────
+  const onConnect = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      await startSpotifyAuth();
+    } catch (exc) {
+      const message = exc instanceof Error ? exc.message : String(exc);
+      setError(message);
+      setBusy(false);
+    }
+  };
+
+  const openPlaylist = useCallback(async (pl: SpotifyPlaylistSummary) => {
+    setActivePlaylist(pl);
+    setPlaylistTracks(null);
+    setTracksLoading(true);
+    setError(null);
+    try {
+      const resp = await listSpotifyPlaylistTracks(pl.id, 100, 0);
+      setPlaylistTracks(resp.items);
+    } catch (exc) {
+      const message = exc instanceof Error ? exc.message : String(exc);
+      setError(`Couldn't load playlist tracks: ${message}`);
+    } finally {
+      setTracksLoading(false);
+    }
   }, []);
 
-  function setBand(name: keyof Bands, value: number) {
-    setBands((prev) => ({ ...prev, [name]: value }));
-    const ref =
-      name === "bass"
-        ? bassFilterRef.current
-        : name === "mid"
-          ? midFilterRef.current
-          : trebleFilterRef.current;
-    if (ref) ref.gain.value = value;
-  }
-
-  function resetBands() {
-    setBands({ bass: 0, mid: 0, treble: 0 });
-    if (bassFilterRef.current) bassFilterRef.current.gain.value = 0;
-    if (midFilterRef.current) midFilterRef.current.gain.value = 0;
-    if (trebleFilterRef.current) trebleFilterRef.current.gain.value = 0;
-  }
-
-  async function handleFile(file: File) {
-    setError(null);
-    if (!file.type.startsWith("audio/") && !file.name.match(/\.(mp3|wav|ogg|m4a|flac|aac)$/i)) {
-      setError("That doesn't look like an audio file, sir.");
+  // Debounced search — the user can type freely without spamming
+  // Spotify on every keystroke.
+  useEffect(() => {
+    const q = searchQuery.trim();
+    if (tab !== "search") return;
+    if (!q) {
+      setSearchResults(null);
       return;
     }
-    const url = URL.createObjectURL(file);
-    if (audioRef.current) {
-      audioRef.current.pause();
-      audioRef.current.src = url;
-      audioRef.current.load();
-    }
-    setFileName(file.name);
-    ensureGraph();
-    const ctx = audioCtxRef.current;
-    if (ctx && ctx.state === "suspended") {
+    let cancelled = false;
+    setSearching(true);
+    const id = window.setTimeout(async () => {
       try {
-        await ctx.resume();
-      } catch {
-        /* user gesture issue — handled below on play */
+        const resp = await searchSpotifyTracks(q, 30);
+        if (cancelled) return;
+        setSearchResults(resp.items);
+      } catch (exc) {
+        if (cancelled) return;
+        const message = exc instanceof Error ? exc.message : String(exc);
+        setError(`Search failed: ${message}`);
+      } finally {
+        if (!cancelled) setSearching(false);
       }
-    }
+    }, 350);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(id);
+    };
+  }, [searchQuery, tab]);
+
+  const handlePlay = useCallback(
+    async (uri: string) => {
+      if (busy) return;
+      setBusy(true);
+      setError(null);
+      try {
+        await playSpotifyUri(uri);
+        // Eager refresh so the orb caption updates without waiting
+        // for the 5 s now-playing poll.
+        try {
+          const live = await getNowPlaying();
+          setTrack(live);
+        } catch {
+          /* non-fatal */
+        }
+      } catch (exc) {
+        const message = exc instanceof Error ? exc.message : String(exc);
+        setError(
+          message.toLowerCase().includes("premium")
+            ? "Spotify Premium is required for playback. Browsing still works."
+            : message,
+        );
+      } finally {
+        setBusy(false);
+      }
+    },
+    [busy],
+  );
+
+  const onTogglePlay = useCallback(async () => {
+    if (busy) return;
+    setBusy(true);
+    setError(null);
     try {
-      await audioRef.current?.play();
-      setPlaying(true);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Playback failed");
+      if (track?.is_playing) {
+        await pauseSpotify();
+        setTrack({ ...track, is_playing: false });
+      } else {
+        await playSpotify();
+      }
+    } catch (exc) {
+      const message = exc instanceof Error ? exc.message : String(exc);
+      setError(message);
+    } finally {
+      setBusy(false);
     }
-  }
+  }, [busy, track]);
 
-  function handlePlayPause() {
-    const audio = audioRef.current;
-    if (!audio) return;
-    ensureGraph();
-    if (audio.paused) {
-      const ctx = audioCtxRef.current;
-      if (ctx && ctx.state === "suspended") void ctx.resume();
-      void audio.play().then(() => setPlaying(true)).catch((err) => {
-        setError(err instanceof Error ? err.message : "Playback failed");
-      });
-    } else {
-      audio.pause();
-      setPlaying(false);
+  const onNext = useCallback(async () => {
+    if (busy) return;
+    setBusy(true);
+    try {
+      await nextSpotifyTrack();
+    } catch (exc) {
+      const message = exc instanceof Error ? exc.message : String(exc);
+      setError(message);
+    } finally {
+      setBusy(false);
     }
-  }
+  }, [busy]);
 
-  // Average bar height drives the orb's pulse scale + rim glow,
-  // so the visual feels tightly coupled to what the user is
-  // actually hearing.
+  const onPrev = useCallback(async () => {
+    if (busy) return;
+    setBusy(true);
+    try {
+      await previousSpotifyTrack();
+    } catch (exc) {
+      const message = exc instanceof Error ? exc.message : String(exc);
+      setError(message);
+    } finally {
+      setBusy(false);
+    }
+  }, [busy]);
+
+  // ─── Synthetic visualiser bars ──────────────────────────────────
+  // DRM blocks any real analyser tap on Web Playback SDK output, so
+  // we synthesise a believable spectrum keyed to the track playhead.
+  // Looks alive; doesn't lie about being reactive.
+  const bars = useSyntheticBars(track);
   const avgEnergy =
     bars.length > 0 ? bars.reduce((s, v) => s + v, 0) / bars.length : 0;
+
+  // ─── Render ─────────────────────────────────────────────────────
 
   return (
     <div
@@ -214,21 +295,22 @@ export function Spotify3DView({ onBack }: Spotify3DViewProps) {
           "radial-gradient(circle at 30% 40%, rgba(20,40,70,1) 0%, rgba(0,0,0,1) 70%)",
         display: "flex",
         flexDirection: "column",
+        color: "var(--fg)",
       }}
     >
-      <BackBar onBack={onBack} title="SPOTIFY · AUDIO CONSOLE" />
+      <BackBar onBack={onBack} title="SPOTIFY · LIBRARY" />
 
       <div
         style={{
           flex: 1,
           display: "grid",
-          gridTemplateColumns: "1fr 380px",
+          gridTemplateColumns: "1fr 480px",
           gap: 24,
           padding: "24px 36px 36px",
           minHeight: 0,
         }}
       >
-        {/* LEFT — pulsing 3D orb visualiser */}
+        {/* LEFT — pulsing orb + now-playing caption */}
         <div
           style={{
             position: "relative",
@@ -238,29 +320,36 @@ export function Spotify3DView({ onBack }: Spotify3DViewProps) {
             overflow: "hidden",
           }}
         >
-          <PulsingOrb energy={avgEnergy} fileName={fileName} playing={playing} />
-
-          {/* Spectrum ring around the orb */}
+          <PulsingOrb energy={avgEnergy} track={track} />
           <SpectrumRing bars={bars} />
+          {status?.linked ? (
+            <TransportBar
+              track={track}
+              busy={busy}
+              onTogglePlay={onTogglePlay}
+              onNext={onNext}
+              onPrev={onPrev}
+            />
+          ) : null}
         </div>
 
-        {/* RIGHT — EQ panel */}
+        {/* RIGHT — Spotify browser */}
         <div
           style={{
             display: "flex",
             flexDirection: "column",
-            gap: 16,
+            gap: 12,
             border: "1px solid var(--border)",
             borderRadius: 6,
-            padding: 18,
+            padding: 16,
             background: "rgba(8,14,24,0.55)",
             backdropFilter: "blur(8px)",
             boxShadow: "0 0 28px rgba(108,214,255,0.08)",
+            minHeight: 0,
           }}
         >
           <div
             className="mono"
-            data-testid="eq-panel-title"
             style={{
               fontSize: 11,
               letterSpacing: 3,
@@ -268,62 +357,69 @@ export function Spotify3DView({ onBack }: Spotify3DViewProps) {
               textShadow: "0 0 8px var(--orb-glow)",
             }}
           >
-            EQUALISER · 3-BAND
+            {status?.linked
+              ? `LIBRARY · ${status.display_name || "CONNECTED"}`
+              : "LIBRARY"}
           </div>
 
-          {/* Drag-drop / file picker */}
-          <FileDropZone onFile={handleFile} fileName={fileName} />
-
-          {/* Sliders */}
-          <div
-            style={{
-              display: "grid",
-              gridTemplateColumns: "1fr 1fr 1fr",
-              gap: 14,
-              marginTop: 6,
-            }}
-          >
-            <Slider
-              label="BASS"
-              testId="eq-bass-slider"
-              value={bands.bass}
-              onChange={(v) => setBand("bass", v)}
+          {!status && !statusError ? (
+            <Hint text="Connecting to Spotify…" />
+          ) : statusError ? (
+            <Hint text={`Spotify status error: ${statusError}`} kind="error" />
+          ) : !status?.configured ? (
+            <Hint
+              text="Spotify isn't configured on the backend. Set ALFRED_SPOTIFY_CLIENT_ID + ALFRED_SPOTIFY_CLIENT_SECRET in .env."
+              kind="error"
             />
-            <Slider
-              label="MID"
-              testId="eq-mid-slider"
-              value={bands.mid}
-              onChange={(v) => setBand("mid", v)}
-            />
-            <Slider
-              label="TREBLE"
-              testId="eq-treble-slider"
-              value={bands.treble}
-              onChange={(v) => setBand("treble", v)}
-            />
-          </div>
-
-          <div style={{ display: "flex", gap: 8 }}>
-            <button
-              type="button"
-              data-testid="eq-play-pause"
-              className="hud-button"
-              onClick={handlePlayPause}
-              disabled={!fileName}
-              style={{ flex: 1 }}
+          ) : !status.linked ? (
+            <div
+              style={{
+                display: "flex",
+                flexDirection: "column",
+                gap: 12,
+                alignItems: "stretch",
+              }}
             >
-              {playing ? "❚❚ PAUSE" : "▶ PLAY"}
-            </button>
-            <button
-              type="button"
-              data-testid="eq-reset"
-              className="hud-button"
-              onClick={resetBands}
-              style={{ flex: 1 }}
-            >
-              ↺ RESET
-            </button>
-          </div>
+              <Hint text="No account linked yet. Connect your Spotify and your playlists, search, and transport will land here." />
+              <button
+                type="button"
+                data-testid="spotify-3d-connect"
+                className="hud-button hud-button--primary"
+                onClick={onConnect}
+                disabled={busy}
+              >
+                {busy ? "OPENING SPOTIFY…" : "🎵 CONNECT SPOTIFY"}
+              </button>
+            </div>
+          ) : (
+            <>
+              <TabBar tab={tab} setTab={setTab} />
+              {tab === "playlists" ? (
+                <PlaylistsPane
+                  playlists={playlists}
+                  active={activePlaylist}
+                  tracks={playlistTracks}
+                  tracksLoading={tracksLoading}
+                  onOpenPlaylist={openPlaylist}
+                  onPlayTrack={handlePlay}
+                  onBackToList={() => {
+                    setActivePlaylist(null);
+                    setPlaylistTracks(null);
+                  }}
+                  busy={busy}
+                />
+              ) : (
+                <SearchPane
+                  query={searchQuery}
+                  onQueryChange={setSearchQuery}
+                  searching={searching}
+                  results={searchResults}
+                  onPlayTrack={handlePlay}
+                  busy={busy}
+                />
+              )}
+            </>
+          )}
 
           {error ? (
             <div
@@ -340,37 +436,13 @@ export function Spotify3DView({ onBack }: Spotify3DViewProps) {
               {error}
             </div>
           ) : null}
-
-          <div
-            style={{
-              fontSize: 10,
-              color: "var(--muted)",
-              lineHeight: 1.6,
-              letterSpacing: 0.4,
-              marginTop: "auto",
-            }}
-          >
-            Drag-drop a local audio file to engage the EQ chain
-            (lowshelf · peaking · highshelf). Spotify streams are
-            DRM-protected so we cannot apply DSP to the live SDK
-            output — connect the existing Spotify widget on the HUD
-            for transport control.
-          </div>
         </div>
       </div>
-
-      <audio
-        ref={audioRef}
-        // Don't show the native UI — we have our own transport
-        // controls. ``crossOrigin`` is unset because we only ever
-        // load object URLs (same origin guaranteed).
-        style={{ display: "none" }}
-        onEnded={() => setPlaying(false)}
-        onPause={() => setPlaying(false)}
-      />
     </div>
   );
 }
+
+// ─── Sub-components ─────────────────────────────────────────────────
 
 function BackBar({ onBack, title }: { onBack: () => void; title: string }) {
   return (
@@ -409,23 +481,435 @@ function BackBar({ onBack, title }: { onBack: () => void; title: string }) {
   );
 }
 
-interface PulsingOrbProps {
-  energy: number;
-  fileName: string | null;
-  playing: boolean;
+function TabBar({ tab, setTab }: { tab: Tab; setTab: (t: Tab) => void }) {
+  return (
+    <div style={{ display: "flex", gap: 6 }}>
+      <TabButton active={tab === "playlists"} onClick={() => setTab("playlists")} testId="spotify-3d-tab-playlists">
+        PLAYLISTS
+      </TabButton>
+      <TabButton active={tab === "search"} onClick={() => setTab("search")} testId="spotify-3d-tab-search">
+        SEARCH
+      </TabButton>
+    </div>
+  );
 }
 
-function PulsingOrb({ energy, fileName, playing }: PulsingOrbProps) {
+function TabButton({
+  active,
+  onClick,
+  children,
+  testId,
+}: {
+  active: boolean;
+  onClick: () => void;
+  children: React.ReactNode;
+  testId?: string;
+}) {
+  return (
+    <button
+      type="button"
+      data-testid={testId}
+      onClick={onClick}
+      className={active ? "hud-button hud-button--primary" : "hud-button"}
+      style={{ flex: 1, fontSize: 11, letterSpacing: 2 }}
+    >
+      {children}
+    </button>
+  );
+}
+
+function PlaylistsPane({
+  playlists,
+  active,
+  tracks,
+  tracksLoading,
+  onOpenPlaylist,
+  onPlayTrack,
+  onBackToList,
+  busy,
+}: {
+  playlists: SpotifyPlaylistSummary[] | null;
+  active: SpotifyPlaylistSummary | null;
+  tracks: SpotifyTrackSummary[] | null;
+  tracksLoading: boolean;
+  onOpenPlaylist: (pl: SpotifyPlaylistSummary) => void;
+  onPlayTrack: (uri: string) => void;
+  onBackToList: () => void;
+  busy: boolean;
+}) {
+  if (active) {
+    return (
+      <div
+        style={{
+          display: "flex",
+          flexDirection: "column",
+          gap: 8,
+          minHeight: 0,
+          flex: 1,
+        }}
+      >
+        <button
+          type="button"
+          data-testid="spotify-3d-playlist-back"
+          className="hud-button"
+          onClick={onBackToList}
+          style={{ alignSelf: "flex-start", fontSize: 10, letterSpacing: 2 }}
+        >
+          ← {active.name.toUpperCase()}
+        </button>
+        {tracksLoading ? (
+          <Hint text="Loading tracks…" />
+        ) : !tracks || tracks.length === 0 ? (
+          <Hint text="This playlist is empty." />
+        ) : (
+          <ScrollList testId="spotify-3d-playlist-tracks">
+            {tracks.map((t) => (
+              <TrackRow
+                key={`${t.uri}`}
+                track={t}
+                onPlay={() => onPlayTrack(t.uri)}
+                disabled={busy || !t.is_playable}
+              />
+            ))}
+          </ScrollList>
+        )}
+      </div>
+    );
+  }
+
+  if (playlists === null) {
+    return <Hint text="Loading your playlists…" />;
+  }
+  if (playlists.length === 0) {
+    return <Hint text="You don't have any playlists yet." />;
+  }
+  return (
+    <ScrollList testId="spotify-3d-playlists">
+      {playlists.map((pl) => (
+        <button
+          key={pl.id}
+          type="button"
+          data-testid={`spotify-3d-playlist-${pl.id}`}
+          onClick={() => onOpenPlaylist(pl)}
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 12,
+            padding: "8px 10px",
+            background: "transparent",
+            border: "1px solid var(--border)",
+            borderRadius: 4,
+            cursor: "pointer",
+            color: "var(--fg)",
+            textAlign: "left",
+            transition: "background 140ms ease, border-color 140ms ease",
+          }}
+          onMouseEnter={(e) => {
+            e.currentTarget.style.background = "rgba(108,214,255,0.07)";
+            e.currentTarget.style.borderColor = "var(--orb)";
+          }}
+          onMouseLeave={(e) => {
+            e.currentTarget.style.background = "transparent";
+            e.currentTarget.style.borderColor = "var(--border)";
+          }}
+        >
+          {pl.image_url ? (
+            // eslint-disable-next-line @next/next/no-img-element
+            <img
+              src={pl.image_url}
+              alt=""
+              width={44}
+              height={44}
+              style={{ borderRadius: 3, objectFit: "cover", flexShrink: 0 }}
+            />
+          ) : (
+            <div
+              style={{
+                width: 44,
+                height: 44,
+                background: "rgba(108,214,255,0.08)",
+                border: "1px solid var(--border)",
+                borderRadius: 3,
+                flexShrink: 0,
+              }}
+            />
+          )}
+          <div style={{ minWidth: 0, flex: 1 }}>
+            <div
+              style={{
+                fontSize: 13,
+                color: "var(--fg)",
+                whiteSpace: "nowrap",
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+              }}
+            >
+              {pl.name}
+            </div>
+            <div
+              style={{
+                fontSize: 10,
+                color: "var(--muted)",
+                letterSpacing: 1,
+                marginTop: 2,
+              }}
+            >
+              {pl.track_count} TRACKS · {pl.owner}
+            </div>
+          </div>
+        </button>
+      ))}
+    </ScrollList>
+  );
+}
+
+function SearchPane({
+  query,
+  onQueryChange,
+  searching,
+  results,
+  onPlayTrack,
+  busy,
+}: {
+  query: string;
+  onQueryChange: (q: string) => void;
+  searching: boolean;
+  results: SpotifyTrackSummary[] | null;
+  onPlayTrack: (uri: string) => void;
+  busy: boolean;
+}) {
+  return (
+    <div
+      style={{
+        display: "flex",
+        flexDirection: "column",
+        gap: 8,
+        minHeight: 0,
+        flex: 1,
+      }}
+    >
+      <input
+        type="search"
+        data-testid="spotify-3d-search-input"
+        value={query}
+        onChange={(e) => onQueryChange(e.target.value)}
+        placeholder="Search Spotify…"
+        autoFocus
+        style={{
+          padding: "10px 12px",
+          background: "rgba(8,14,24,0.7)",
+          border: "1px solid var(--border)",
+          borderRadius: 4,
+          color: "var(--fg)",
+          fontSize: 14,
+          outline: "none",
+          transition: "border-color 140ms ease, box-shadow 140ms ease",
+        }}
+        onFocus={(e) => {
+          e.currentTarget.style.borderColor = "var(--orb)";
+          e.currentTarget.style.boxShadow = "0 0 0 1px var(--orb), 0 0 14px var(--orb-glow)";
+        }}
+        onBlur={(e) => {
+          e.currentTarget.style.borderColor = "var(--border)";
+          e.currentTarget.style.boxShadow = "none";
+        }}
+      />
+      {!query.trim() ? (
+        <Hint text="Type a song, artist, album — anything in Spotify's catalog." />
+      ) : searching ? (
+        <Hint text="Searching…" />
+      ) : !results || results.length === 0 ? (
+        <Hint text="No tracks matched." />
+      ) : (
+        <ScrollList testId="spotify-3d-search-results">
+          {results.map((t) => (
+            <TrackRow
+              key={t.uri}
+              track={t}
+              onPlay={() => onPlayTrack(t.uri)}
+              disabled={busy || !t.is_playable}
+            />
+          ))}
+        </ScrollList>
+      )}
+    </div>
+  );
+}
+
+function TrackRow({
+  track,
+  onPlay,
+  disabled,
+}: {
+  track: SpotifyTrackSummary;
+  onPlay: () => void;
+  disabled: boolean;
+}) {
+  const minutes = Math.floor(track.duration_ms / 60000);
+  const seconds = Math.floor((track.duration_ms % 60000) / 1000)
+    .toString()
+    .padStart(2, "0");
+  return (
+    <button
+      type="button"
+      data-testid={`spotify-3d-track-${track.track_id || track.uri}`}
+      onClick={onPlay}
+      disabled={disabled}
+      title={
+        track.is_playable
+          ? `Play ${track.title} — ${track.artists}`
+          : "Local-file tracks can't be played from the Web API."
+      }
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: 12,
+        padding: "6px 10px",
+        background: "transparent",
+        border: "1px solid var(--border)",
+        borderRadius: 4,
+        cursor: disabled ? "not-allowed" : "pointer",
+        color: track.is_playable ? "var(--fg)" : "var(--muted)",
+        opacity: track.is_playable ? 1 : 0.55,
+        textAlign: "left",
+        transition: "background 140ms ease, border-color 140ms ease",
+      }}
+      onMouseEnter={(e) => {
+        if (disabled) return;
+        e.currentTarget.style.background = "rgba(108,214,255,0.07)";
+        e.currentTarget.style.borderColor = "var(--orb)";
+      }}
+      onMouseLeave={(e) => {
+        e.currentTarget.style.background = "transparent";
+        e.currentTarget.style.borderColor = "var(--border)";
+      }}
+    >
+      {track.image_url ? (
+        // eslint-disable-next-line @next/next/no-img-element
+        <img
+          src={track.image_url}
+          alt=""
+          width={36}
+          height={36}
+          style={{ borderRadius: 2, objectFit: "cover", flexShrink: 0 }}
+        />
+      ) : (
+        <div
+          style={{
+            width: 36,
+            height: 36,
+            background: "rgba(108,214,255,0.08)",
+            borderRadius: 2,
+            flexShrink: 0,
+          }}
+        />
+      )}
+      <div style={{ minWidth: 0, flex: 1 }}>
+        <div
+          style={{
+            fontSize: 12,
+            whiteSpace: "nowrap",
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+          }}
+        >
+          {track.title || "—"}
+        </div>
+        <div
+          style={{
+            fontSize: 10,
+            color: "var(--muted)",
+            letterSpacing: 0.5,
+            marginTop: 2,
+            whiteSpace: "nowrap",
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+          }}
+        >
+          {track.artists}
+          {track.album ? ` · ${track.album}` : ""}
+        </div>
+      </div>
+      <div
+        style={{
+          fontSize: 10,
+          color: "var(--muted)",
+          letterSpacing: 1,
+          flexShrink: 0,
+        }}
+      >
+        {minutes}:{seconds}
+      </div>
+    </button>
+  );
+}
+
+function ScrollList({
+  children,
+  testId,
+}: {
+  children: React.ReactNode;
+  testId?: string;
+}) {
+  return (
+    <div
+      data-testid={testId}
+      style={{
+        display: "flex",
+        flexDirection: "column",
+        gap: 4,
+        overflowY: "auto",
+        flex: 1,
+        paddingRight: 4,
+      }}
+    >
+      {children}
+    </div>
+  );
+}
+
+function Hint({
+  text,
+  kind = "muted",
+}: {
+  text: string;
+  kind?: "muted" | "error";
+}) {
+  return (
+    <div
+      style={{
+        fontSize: 11,
+        letterSpacing: 0.5,
+        lineHeight: 1.6,
+        color: kind === "error" ? "var(--danger)" : "var(--muted)",
+        background:
+          kind === "error" ? "rgba(255,80,80,0.06)" : "transparent",
+        border:
+          kind === "error" ? "1px solid rgba(255,80,80,0.3)" : "none",
+        padding: kind === "error" ? "10px" : "8px 2px",
+        borderRadius: 3,
+      }}
+    >
+      {text}
+    </div>
+  );
+}
+
+interface PulsingOrbProps {
+  energy: number;
+  track: SpotifyTrack | null;
+}
+
+function PulsingOrb({ energy, track }: PulsingOrbProps) {
   const scale = 1 + energy * 0.18;
   const glow = 30 + energy * 80;
+  const caption = track
+    ? `${track.is_playing ? "▶ NOW PLAYING" : "❚❚ PAUSED"} · ${track.title} — ${track.artists}`
+    : "NOTHING PLAYING — PICK A TRACK FROM THE LIBRARY";
   return (
     <div
       data-testid="spotify-3d-orb"
-      style={{
-        position: "relative",
-        width: 360,
-        height: 360,
-      }}
+      style={{ position: "relative", width: 360, height: 360 }}
     >
       <div
         style={{
@@ -440,7 +924,6 @@ function PulsingOrb({ energy, fileName, playing }: PulsingOrbProps) {
           backdropFilter: "blur(2px)",
         }}
       />
-      {/* Concentric rotating dashed rings — same family as Orb3D. */}
       <div
         aria-hidden
         style={{
@@ -462,7 +945,26 @@ function PulsingOrb({ energy, fileName, playing }: PulsingOrbProps) {
           animation: "radial-orbit 7000ms linear infinite",
         }}
       />
-      {/* Track meta caption */}
+      {track?.image_url ? (
+        // Album art at the orb's heart, dimmed so the glow still
+        // dominates. Pulled from i.scdn.co; plain <img> is fine here.
+        // eslint-disable-next-line @next/next/no-img-element
+        <img
+          src={track.image_url}
+          alt=""
+          style={{
+            position: "absolute",
+            inset: "30%",
+            width: "40%",
+            height: "40%",
+            borderRadius: "50%",
+            objectFit: "cover",
+            opacity: 0.7,
+            filter: "saturate(0.85) blur(0.5px)",
+            mixBlendMode: "screen",
+          }}
+        />
+      ) : null}
       <div
         style={{
           position: "absolute",
@@ -477,14 +979,12 @@ function PulsingOrb({ energy, fileName, playing }: PulsingOrbProps) {
           color: "var(--muted)",
           textTransform: "uppercase",
           whiteSpace: "nowrap",
-          maxWidth: 480,
+          maxWidth: 720,
           overflow: "hidden",
           textOverflow: "ellipsis",
         }}
       >
-        {fileName
-          ? `${playing ? "▶ NOW PLAYING" : "❚❚ PAUSED"} · ${fileName}`
-          : "DROP AN AUDIO FILE TO BEGIN"}
+        {caption}
       </div>
     </div>
   );
@@ -495,11 +995,7 @@ function SpectrumRing({ bars }: { bars: number[] }) {
     <div
       data-testid="spotify-3d-spectrum"
       aria-hidden
-      style={{
-        position: "absolute",
-        inset: 0,
-        pointerEvents: "none",
-      }}
+      style={{ position: "absolute", inset: 0, pointerEvents: "none" }}
     >
       {bars.map((v, i) => {
         const angle = (i / bars.length) * 360;
@@ -528,104 +1024,129 @@ function SpectrumRing({ bars }: { bars: number[] }) {
   );
 }
 
-interface SliderProps {
-  label: string;
-  testId: string;
-  value: number;
-  onChange: (v: number) => void;
-}
-
-function Slider({ label, testId, value, onChange }: SliderProps) {
-  return (
-    <label
-      style={{
-        display: "flex",
-        flexDirection: "column",
-        alignItems: "center",
-        gap: 6,
-        fontFamily:
-          'ui-monospace, SFMono-Regular, "JetBrains Mono", monospace',
-      }}
-    >
-      <input
-        type="range"
-        data-testid={testId}
-        min={-12}
-        max={12}
-        step={0.5}
-        value={value}
-        onChange={(e) => onChange(parseFloat(e.target.value))}
-        // CSS-only vertical orientation; works in Chromium/Firefox.
-        style={{
-          writingMode: "vertical-lr" as const,
-          height: 160,
-          accentColor: "rgb(108,214,255)",
-        }}
-        aria-label={`${label} ${value > 0 ? "+" : ""}${value} dB`}
-      />
-      <span style={{ fontSize: 10, color: "var(--muted)", letterSpacing: 2 }}>
-        {label}
-      </span>
-      <span style={{ fontSize: 11, color: "var(--orb)" }}>
-        {value > 0 ? "+" : ""}
-        {value.toFixed(1)} dB
-      </span>
-    </label>
-  );
-}
-
-function FileDropZone({
-  onFile,
-  fileName,
+function TransportBar({
+  track,
+  busy,
+  onTogglePlay,
+  onNext,
+  onPrev,
 }: {
-  onFile: (file: File) => void;
-  fileName: string | null;
+  track: SpotifyTrack | null;
+  busy: boolean;
+  onTogglePlay: () => void;
+  onNext: () => void;
+  onPrev: () => void;
 }) {
-  const [hover, setHover] = useState(false);
-  const inputRef = useRef<HTMLInputElement>(null);
+  const isPlaying = !!track?.is_playing;
   return (
     <div
-      data-testid="eq-drop-zone"
-      onDragOver={(e) => {
-        e.preventDefault();
-        setHover(true);
-      }}
-      onDragLeave={() => setHover(false)}
-      onDrop={(e) => {
-        e.preventDefault();
-        setHover(false);
-        const f = e.dataTransfer.files?.[0];
-        if (f) onFile(f);
-      }}
-      onClick={() => inputRef.current?.click()}
-      role="button"
-      tabIndex={0}
       style={{
-        border: `1px dashed ${hover ? "var(--orb)" : "var(--border)"}`,
-        borderRadius: 4,
-        padding: "14px 12px",
-        textAlign: "center",
-        cursor: "pointer",
-        background: hover ? "rgba(108,214,255,0.08)" : "transparent",
-        transition: "all 160ms ease",
-        fontSize: 11,
-        color: hover ? "var(--orb)" : "var(--muted)",
-        letterSpacing: 1.5,
-        fontFamily:
-          'ui-monospace, SFMono-Regular, "JetBrains Mono", monospace',
+        position: "absolute",
+        bottom: 24,
+        left: "50%",
+        transform: "translateX(-50%)",
+        display: "flex",
+        gap: 8,
+        background: "rgba(8,14,24,0.7)",
+        border: "1px solid var(--border)",
+        borderRadius: 999,
+        padding: "6px 10px",
+        backdropFilter: "blur(8px)",
       }}
     >
-      {fileName ?? "DROP AUDIO FILE — OR CLICK TO BROWSE"}
-      <input
-        ref={inputRef}
-        type="file"
-        accept="audio/*,.mp3,.wav,.ogg,.m4a,.flac,.aac"
-        style={{ display: "none" }}
-        onChange={(e) => {
-          const f = e.target.files?.[0];
-          if (f) onFile(f);
-        }}
-      />
+      <button
+        type="button"
+        className="hud-button hud-button--icon"
+        data-testid="spotify-3d-prev"
+        onClick={onPrev}
+        disabled={busy}
+        aria-label="Previous track"
+      >
+        ⏮
+      </button>
+      <button
+        type="button"
+        className="hud-button hud-button--icon hud-button--primary"
+        data-testid="spotify-3d-play-pause"
+        onClick={onTogglePlay}
+        disabled={busy}
+        aria-label={isPlaying ? "Pause" : "Play"}
+      >
+        {isPlaying ? "⏸" : "▶"}
+      </button>
+      <button
+        type="button"
+        className="hud-button hud-button--icon"
+        data-testid="spotify-3d-next"
+        onClick={onNext}
+        disabled={busy}
+        aria-label="Next track"
+      >
+        ⏭
+      </button>
     </div>
   );
+}
+
+// ─── Visualizer helpers ─────────────────────────────────────────────
+
+/**
+ * Synthesize a believable 32-bar spectrum keyed off the now-playing
+ * playhead. We can't tap the SDK's audio (DRM), so this is purely a
+ * visual flourish — but it stays in sync with playing/paused state
+ * so the orb goes calm when the user pauses.
+ */
+function useSyntheticBars(track: SpotifyTrack | null): number[] {
+  const [bars, setBars] = useState<number[]>(() =>
+    Array(BAR_COUNT).fill(0.04),
+  );
+  // Stash the most recent track in a ref so the RAF loop reads live
+  // play state without re-binding on every track tick.
+  const trackRef = useRef<SpotifyTrack | null>(track);
+  trackRef.current = track;
+
+  // Persist a per-bar phase so the bank breathes consistently.
+  const params = useMemo(() => {
+    const phases: number[] = [];
+    const tempos: number[] = [];
+    const amps: number[] = [];
+    for (let i = 0; i < BAR_COUNT; i++) {
+      phases.push(i * 0.71);
+      tempos.push(1.2 + (i / (BAR_COUNT - 1)) * 4.5);
+      amps.push(0.55 + 0.35 * (1 - i / (BAR_COUNT - 1)));
+    }
+    return { phases, tempos, amps };
+  }, []);
+
+  useEffect(() => {
+    let raf = 0;
+    const start = performance.now();
+    const loop = () => {
+      const t = trackRef.current;
+      const playing = !!t?.is_playing;
+      if (!playing) {
+        setBars(Array(BAR_COUNT).fill(0.04));
+      } else {
+        const elapsed = (performance.now() - start) / 1000;
+        const breath = 0.7 + 0.3 * Math.sin(elapsed * 0.45);
+        const next: number[] = [];
+        for (let i = 0; i < BAR_COUNT; i++) {
+          const tempo = params.tempos[i % params.tempos.length];
+          const phase = params.phases[i % params.phases.length];
+          const amp = params.amps[i % params.amps.length];
+          const slow = 0.5 + 0.5 * Math.sin(elapsed * tempo + phase);
+          const fast =
+            0.5 + 0.5 * Math.sin(elapsed * tempo * 2.3 + phase * 1.7);
+          const v = amp * slow * (0.55 + 0.45 * fast) * breath;
+          next.push(Math.max(0.06, Math.min(1, v)));
+        }
+        setBars(next);
+      }
+      raf = requestAnimationFrame(loop);
+    };
+    raf = requestAnimationFrame(loop);
+    return () => cancelAnimationFrame(raf);
+  }, [params]);
+
+  return bars;
 }

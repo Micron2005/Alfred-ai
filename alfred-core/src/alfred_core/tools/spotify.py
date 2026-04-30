@@ -377,6 +377,160 @@ class SpotifyClient:
         uri = items[0].get("uri")
         return str(uri) if uri else None
 
+    # ─── Library / playlist browsing for the 3D view ─────────────────
+    #
+    # These return lightweight dicts (not Pydantic models) so the
+    # FastAPI endpoint can pass them straight through without an
+    # extra serialization layer. Shapes are stable across Spotify
+    # API revisions for the fields we touch.
+
+    async def list_playlists(self, *, limit: int = 50, offset: int = 0) -> list[dict[str, Any]]:
+        """List the user's own + saved playlists.
+
+        Spotify caps ``limit`` at 50 per request. We expose pagination
+        via ``offset`` so the UI can lazy-load past 50 if the user has
+        a huge library. Each entry includes the playlist id, name,
+        track count, owner display name, and a 300-px cover image URL.
+        """
+        token = await self.get_access_token()
+        response = await self._http(
+            "GET",
+            f"{_API_BASE}/me/playlists",
+            headers=self._auth_headers(token),
+            params={"limit": min(50, max(1, limit)), "offset": max(0, offset)},
+        )
+        if response.status_code >= 400:
+            raise SpotifyError(
+                f"Spotify playlists returned HTTP {response.status_code}: "
+                f"{response.text[:200]}"
+            )
+        body: dict[str, Any] = response.json()
+        items: list[dict[str, Any]] = body.get("items") or []
+        out: list[dict[str, Any]] = []
+        for it in items:
+            if not isinstance(it, dict):
+                continue
+            images: list[dict[str, Any]] = it.get("images") or []
+            image_url = ""
+            if images:
+                # Spotify orders largest-first; pick the middle one
+                # (~300px) when available, else fall back to the
+                # smallest, else the first.
+                picked = images[1] if len(images) > 1 else images[0]
+                image_url = str(picked.get("url") or "")
+            tracks_meta: dict[str, Any] = it.get("tracks") or {}
+            owner: dict[str, Any] = it.get("owner") or {}
+            out.append(
+                {
+                    "id": str(it.get("id") or ""),
+                    "name": str(it.get("name") or ""),
+                    "uri": str(it.get("uri") or ""),
+                    "image_url": image_url,
+                    "track_count": int(tracks_meta.get("total") or 0),
+                    "owner": str(owner.get("display_name") or owner.get("id") or ""),
+                }
+            )
+        return out
+
+    async def list_playlist_tracks(
+        self,
+        playlist_id: str,
+        *,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        """List the tracks inside a playlist.
+
+        Filters out local files (Spotify lets users add local tracks
+        to playlists; their URIs start with ``spotify:local:`` and
+        can't be played via the Web API).
+        """
+        if not playlist_id:
+            raise SpotifyError("playlist_id is required.")
+        token = await self.get_access_token()
+        response = await self._http(
+            "GET",
+            f"{_API_BASE}/playlists/{playlist_id}/tracks",
+            headers=self._auth_headers(token),
+            params={
+                "limit": min(100, max(1, limit)),
+                "offset": max(0, offset),
+                # Slim the response so we don't ship 50 KB per page.
+                "fields": (
+                    "items(track(id,uri,name,duration_ms,is_local,"
+                    "artists(name),album(name,images)))"
+                ),
+            },
+        )
+        if response.status_code >= 400:
+            raise SpotifyError(
+                f"Spotify playlist tracks returned HTTP {response.status_code}: "
+                f"{response.text[:200]}"
+            )
+        body: dict[str, Any] = response.json()
+        items: list[dict[str, Any]] = body.get("items") or []
+        return [self._compact_track(it.get("track") or {}) for it in items if (it.get("track") or {}).get("uri")]
+
+    async def search_tracks(self, query: str, *, limit: int = 20) -> list[dict[str, Any]]:
+        """Search Spotify's catalog and return up to ``limit`` tracks.
+
+        This is the multi-result counterpart to ``search_track``,
+        which only returns the top URI for the chat-tool play
+        intent. Used by the 3D view's search box.
+        """
+        if not query.strip():
+            return []
+        token = await self.get_access_token()
+        response = await self._http(
+            "GET",
+            f"{_API_BASE}/search",
+            headers=self._auth_headers(token),
+            params={
+                "q": query,
+                "type": "track",
+                "limit": min(50, max(1, limit)),
+            },
+        )
+        if response.status_code >= 400:
+            raise SpotifyError(
+                f"Spotify search returned HTTP {response.status_code}: "
+                f"{response.text[:200]}"
+            )
+        body: dict[str, Any] = response.json()
+        tracks: dict[str, Any] = body.get("tracks") or {}
+        items: list[dict[str, Any]] = tracks.get("items") or []
+        return [self._compact_track(it) for it in items if it.get("uri")]
+
+    @staticmethod
+    def _compact_track(item: dict[str, Any]) -> dict[str, Any]:
+        """Reduce a Spotify track object to the minimum the UI needs.
+
+        Local-file tracks (``is_local: true``) are still emitted but
+        with ``is_playable: false`` so the UI can grey them out — the
+        Web Playback SDK refuses to play them.
+        """
+        if not isinstance(item, dict):
+            return {}
+        artist_list: list[dict[str, Any]] = item.get("artists") or []
+        artists = ", ".join(str(a.get("name", "")) for a in artist_list if isinstance(a, dict))
+        album: dict[str, Any] = item.get("album") or {}
+        images: list[dict[str, Any]] = album.get("images") or []
+        image_url = ""
+        if images:
+            picked = images[-1] if len(images) >= 1 else images[0]
+            image_url = str(picked.get("url") or "")
+        is_local = bool(item.get("is_local"))
+        return {
+            "track_id": str(item.get("id") or ""),
+            "uri": str(item.get("uri") or ""),
+            "title": str(item.get("name") or ""),
+            "artists": artists,
+            "album": str(album.get("name") or ""),
+            "duration_ms": int(item.get("duration_ms") or 0),
+            "image_url": image_url,
+            "is_playable": not is_local,
+        }
+
     async def audio_analysis(self, track_id: str) -> dict[str, Any]:
         """Fetch beat/segment-level analysis for the visualizer.
 
