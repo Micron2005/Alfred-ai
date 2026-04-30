@@ -52,6 +52,7 @@ import {
   type HudWidgetId,
 } from "@/lib/hudLayout";
 import { orbStore } from "@/lib/orbState";
+import { playWakeCue } from "@/lib/wakeCue";
 import { RadialMenu, type RadialMenuItem } from "@/components/RadialMenu";
 import { Spotify3DView } from "@/components/Spotify3DView";
 import { WorkshopView } from "@/components/WorkshopView";
@@ -354,12 +355,42 @@ export function ChatWindow() {
       // latter eats 600+ms before the composer is recording. The
       // beep is best-effort — if the AudioContext can't open we
       // silently skip it.
-      void playWakeCue();
-      const ref =
-        activeTab === "chat"
-          ? composerRef.current
-          : handsFreeComposerRef.current;
-      ref?.startVoice();
+      //
+      // CRITICAL: every step here is wrapped in its own try/catch
+      // because openWakeWord's detect emitter does NOT swallow
+      // exceptions thrown inside listeners — a single ReferenceError
+      // (e.g. a missing import) would propagate up and kill the
+      // listener thread, which is what caused the "wake word detected
+      // but speech swallowed" regression. Defending each branch lets
+      // ``startVoice()`` always run regardless of beep / cue failures.
+      try {
+        void playWakeCue();
+      } catch (e) {
+        // eslint-disable-next-line no-console
+        console.warn("[wake] cue failed; proceeding without it", e);
+      }
+      try {
+        const ref =
+          activeTab === "chat"
+            ? composerRef.current
+            : handsFreeComposerRef.current;
+        if (!ref) {
+          // eslint-disable-next-line no-console
+          console.warn(
+            "[wake] no composer ref for active tab — speech will be lost",
+            { activeTab },
+          );
+          // Resume listening so the next "hey Alfred" still has a
+          // chance instead of leaving the engine paused forever.
+          wake.resume();
+          return;
+        }
+        ref.startVoice();
+      } catch (e) {
+        // eslint-disable-next-line no-console
+        console.error("[wake] startVoice failed", e);
+        wake.resume();
+      }
     },
   });
 
