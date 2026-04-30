@@ -56,6 +56,7 @@ import { RadialMenu, type RadialMenuItem } from "@/components/RadialMenu";
 import { Spotify3DView } from "@/components/Spotify3DView";
 import { WorkshopView } from "@/components/WorkshopView";
 import { VitalsPanel } from "@/components/VitalsPanel";
+import { HandsFreeOverlay } from "@/components/HandsFreeOverlay";
 
 const ACTIVE_CONVO_KEY = "alfred.activeConversationId";
 const VOICE_OUT_KEY = "alfred.voiceOutEnabled";
@@ -253,6 +254,13 @@ export function ChatWindow() {
   // without this the orb would stay pulsing forever on a silent track.
   const audioCleanupRef = useRef<(() => void) | null>(null);
   const composerRef = useRef<ComposerHandle>(null);
+  // Second ref for the always-mounted off-screen Composer that
+  // services voice input on non-chat tabs. The wake-word handler
+  // below picks whichever one is visible at the time so hands-free
+  // works on every tab — the original bug was that the chat tab's
+  // Composer was the only mount point, and wake-word firing on the
+  // HUD tab landed on a null ref.
+  const handsFreeComposerRef = useRef<ComposerHandle>(null);
 
   // Restore the user's voice-out + hands-free + camera preferences. All
   // default to off so a fresh install doesn't surprise the user with
@@ -284,7 +292,19 @@ export function ChatWindow() {
   const wake = useWakeWord({
     enabled: handsFree,
     keyword: WAKE_KEYWORD,
-    onWake: () => composerRef.current?.startVoice(),
+    // Pick the Composer that's actually visible right now. On the
+    // chat tab that's ``composerRef`` (the inline one inside
+    // ChatTabView); on every other tab it's ``handsFreeComposerRef``
+    // (the always-mounted off-screen one at the root). Without this
+    // dual-ref dance, hands-free was deaf on the HUD/Workout/Design
+    // tabs because the only Composer was unmounted.
+    onWake: () => {
+      const ref =
+        activeTab === "chat"
+          ? composerRef.current
+          : handsFreeComposerRef.current;
+      ref?.startVoice();
+    },
   });
 
   const camera = useCamera({ enabled: cameraOn });
@@ -1383,8 +1403,21 @@ export function ChatWindow() {
           {/* Chat tab gets its own dedicated full-screen layout
               (narrow conversation list rail + flex:1 chat pane).
               The legacy ConversationSidebar's collapse/HUD-overlap
-              behaviour was confusing — replaced by ChatTabView. */}
-          {activeTab === "chat" ? (
+              behaviour was confusing — replaced by ChatTabView.
+
+              We render ChatTabView ALWAYS (display:none when not on
+              the chat tab) so the embedded Composer stays mounted
+              across tab switches. Without this, the wake word fires
+              on the HUD tab → ``composerRef.current`` is null →
+              ``startVoice()`` does nothing → user thinks Alfred has
+              gone deaf in hands-free mode. The chat history /
+              busy state survive too, so coming back to the chat
+              tab feels instant rather than a cold-load. */}
+          <div
+            style={{
+              display: activeTab === "chat" ? "contents" : "none",
+            }}
+          >
             <ChatTabView
               conversations={conversations}
               activeId={convoId}
@@ -1396,7 +1429,58 @@ export function ChatWindow() {
               busy={busy || loadingConvo}
               chatPane={chatPane}
             />
-          ) : null}
+          </div>
+          {/* Always-mounted off-screen Composer so the wake word can
+              trigger ``startVoice()`` from any tab. When the user is
+              on the chat tab the visible Composer (above) is the
+              one they see; this hidden one is purely for routing
+              voice from non-chat tabs. We use a SECOND ref so the
+              two don't fight over wake-word ownership.
+
+              In practice this is never visible — the wrapper has
+              ``display:none`` when on the chat tab (where the
+              visible Composer takes over) and is visually hidden
+              but functionally alive on every other tab. */}
+          {/* Hands-free voice overlay — visible only on non-chat
+              tabs. Shows the live recording state, the last
+              utterance the user spoke, and Alfred's latest reply,
+              so voice on the HUD/Workout/Design tabs feels like a
+              real conversation rather than firing into the void.
+              Without this, the user could say "hey Alfred, what's
+              the weather" on the HUD and only hear the TTS reply
+              — they couldn't see what Alfred actually heard or what
+              he wrote back. */}
+          {handsFree ? <HandsFreeOverlay
+            recording={recording}
+            speaking={speaking}
+            busy={busy}
+            wakeStatus={wake.status}
+            wakeError={wake.error ?? null}
+            messages={messages}
+          /> : null}
+          <div
+            data-testid="hands-free-composer-host"
+            style={{
+              display: activeTab === "chat" ? "none" : "block",
+              position: "fixed",
+              bottom: 0,
+              left: 0,
+              right: 0,
+              zIndex: 4,
+              padding: "0 12px 8px",
+              pointerEvents: "auto",
+              background:
+                "linear-gradient(180deg, transparent 0%, rgba(0,0,0,0.6) 60%, rgba(0,0,0,0.85) 100%)",
+            }}
+          >
+            <Composer
+              ref={handsFreeComposerRef}
+              onSend={handleSend}
+              disabled={busy || loadingConvo}
+              onMicStateChange={setRecording}
+              onUnclear={handleSpeechUnclear}
+            />
+          </div>
 
       <div
         style={{

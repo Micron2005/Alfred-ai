@@ -23,8 +23,11 @@
 import { useEffect, useState } from "react";
 import {
   applyWorkshopPatch,
+  commitAndPush,
   diagnoseProblem,
+  fetchGitStatus,
   listWorkshopFiles,
+  type GitStatus,
   type WorkshopFile,
 } from "@/lib/workshopApi";
 
@@ -53,6 +56,27 @@ export function WorkshopView({
   const [diff, setDiff] = useState<string | null>(null);
   const [applyResult, setApplyResult] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Commit + push state — populated after the user clicks APPLY,
+  // hidden until then. ``gitStatus`` polls /git-status so the user
+  // can see what branch they're on and whether the push will go to
+  // the right remote BEFORE they click commit.
+  const [gitStatus, setGitStatus] = useState<GitStatus | null>(null);
+  const [commitMessage, setCommitMessage] = useState("");
+  const [commitResult, setCommitResult] = useState<string | null>(null);
+
+  // After APPLY succeeds, refresh git-status so the COMMIT panel
+  // shows the dirty files. We deliberately don't poll on a timer —
+  // git status calls subprocess and we don't want to hammer it.
+  async function refreshGitStatus() {
+    try {
+      const s = await fetchGitStatus();
+      setGitStatus(s);
+    } catch (e) {
+      // Soft-fail: surface in UI but don't block apply.
+      setGitStatus(null);
+      console.warn("git-status fetch failed", e);
+    }
+  }
 
   useEffect(() => {
     void listWorkshopFiles()
@@ -105,6 +129,7 @@ export function WorkshopView({
       return;
     setBusy(true);
     setApplyResult(null);
+    setCommitResult(null);
     setError(null);
     try {
       const r = await applyWorkshopPatch(diff);
@@ -113,8 +138,52 @@ export function WorkshopView({
           ? `✓ Applied to ${r.files_touched.join(", ")}`
           : `✗ ${r.detail}`,
       );
+      if (r.applied) {
+        // Default the commit message to the first non-empty line of
+        // the user's problem statement — saves a trip to the input
+        // for the common "diagnose -> apply -> ship" flow.
+        const seed =
+          problem.trim().split("\n")[0]?.slice(0, 72) ?? "alfred: workshop patch";
+        setCommitMessage(`alfred: ${seed}`);
+        await refreshGitStatus();
+      }
     } catch (e) {
       setError(e instanceof Error ? e.message : "Apply failed");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function runCommitPush(skipPush: boolean) {
+    if (!commitMessage.trim()) return;
+    if (
+      !window.confirm(
+        skipPush
+          ? "Commit locally without pushing?"
+          : "Commit + push to origin? Make sure you're on the right branch.",
+      )
+    )
+      return;
+    setBusy(true);
+    setCommitResult(null);
+    setError(null);
+    try {
+      const r = await commitAndPush({
+        message: commitMessage.trim(),
+        skip_push: skipPush,
+      });
+      setCommitResult(
+        r.pushed
+          ? `✓ ${r.commit_sha.slice(0, 7)} pushed to origin (${r.files_committed.length} file(s))`
+          : r.committed
+            ? `⚠ Committed locally as ${r.commit_sha.slice(0, 7)}, but push failed:\n${r.detail}`
+            : `✗ ${r.detail}`,
+      );
+      if (r.committed) {
+        await refreshGitStatus();
+      }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Commit + push failed");
     } finally {
       setBusy(false);
     }
@@ -335,6 +404,137 @@ export function WorkshopView({
               }}
             >
               {applyResult}
+            </div>
+          ) : null}
+
+          {/* Commit + push panel — visible after a successful APPLY.
+              Shows the git branch / remote so the user knows where
+              this is going BEFORE pushing, plus a list of files that
+              would be committed. Files outside the allowlist (e.g.
+              .env, secrets) are surfaced in red as "left behind" so
+              the user knows we deliberately skipped them. */}
+          {gitStatus && applyResult?.startsWith("✓") ? (
+            <div
+              data-testid="workshop-commit-panel"
+              style={{
+                background: "rgba(8,14,24,0.55)",
+                border: "1px solid var(--border)",
+                borderRadius: 4,
+                padding: 12,
+                display: "flex",
+                flexDirection: "column",
+                gap: 10,
+              }}
+            >
+              <div
+                style={{
+                  fontSize: 10,
+                  letterSpacing: 2,
+                  color: "var(--orb)",
+                }}
+              >
+                COMMIT + PUSH
+              </div>
+              <div
+                style={{
+                  fontSize: 10,
+                  color: "var(--muted)",
+                  lineHeight: 1.6,
+                }}
+              >
+                <div>
+                  branch:{" "}
+                  <span style={{ color: "var(--orb)" }}>
+                    {gitStatus.branch}
+                  </span>{" "}
+                  · ahead {gitStatus.ahead} · behind {gitStatus.behind}
+                </div>
+                <div style={{ wordBreak: "break-all" }}>
+                  remote:{" "}
+                  <span style={{ color: "var(--orb)" }}>
+                    {gitStatus.remote || "(none — push will fail)"}
+                  </span>
+                </div>
+                {gitStatus.dirty_files.length > 0 ? (
+                  <div style={{ marginTop: 6 }}>
+                    will commit:{" "}
+                    {gitStatus.dirty_files
+                      .filter(
+                        (f) =>
+                          !gitStatus.dirty_files_outside_allowlist.includes(f),
+                      )
+                      .join(", ") || "(nothing)"}
+                  </div>
+                ) : null}
+                {gitStatus.dirty_files_outside_allowlist.length > 0 ? (
+                  <div
+                    style={{ color: "rgb(240,200,100)", marginTop: 4 }}
+                    data-testid="workshop-commit-skipped"
+                  >
+                    skipping (outside allowlist / read-only):{" "}
+                    {gitStatus.dirty_files_outside_allowlist.join(", ")}
+                  </div>
+                ) : null}
+              </div>
+              <input
+                data-testid="workshop-commit-message"
+                type="text"
+                value={commitMessage}
+                onChange={(e) => setCommitMessage(e.target.value)}
+                placeholder='Commit message (e.g. "alfred: tighten greeting")'
+                style={{
+                  padding: "6px 10px",
+                  fontSize: 12,
+                  background: "rgba(0,0,0,0.4)",
+                  border: "1px solid var(--border)",
+                  color: "var(--orb)",
+                  borderRadius: 3,
+                  fontFamily: "inherit",
+                }}
+              />
+              <div style={{ display: "flex", gap: 8 }}>
+                <button
+                  type="button"
+                  data-testid="workshop-commit-push"
+                  className="hud-button"
+                  onClick={() => runCommitPush(false)}
+                  disabled={busy || !commitMessage.trim()}
+                  style={{ flex: 1 }}
+                >
+                  {busy ? "…" : "⇧ COMMIT + PUSH"}
+                </button>
+                <button
+                  type="button"
+                  data-testid="workshop-commit-only"
+                  className="hud-button"
+                  onClick={() => runCommitPush(true)}
+                  disabled={busy || !commitMessage.trim()}
+                  style={{ flex: 1 }}
+                  title="Commit locally but skip pushing — useful when offline or when you want to review with git log first."
+                >
+                  ⇩ LOCAL ONLY
+                </button>
+              </div>
+              {commitResult ? (
+                <div
+                  data-testid="workshop-commit-result"
+                  style={{
+                    fontSize: 11,
+                    padding: 8,
+                    borderRadius: 3,
+                    border: "1px solid var(--border)",
+                    background: "rgba(0,0,0,0.4)",
+                    color: commitResult.startsWith("✓")
+                      ? "rgb(110,230,160)"
+                      : commitResult.startsWith("⚠")
+                        ? "rgb(240,200,100)"
+                        : "rgb(255,110,110)",
+                    whiteSpace: "pre-wrap",
+                  }}
+                >
+                  {commitResult}
+                </div>
+              ) : null}
             </div>
           ) : null}
 

@@ -130,9 +130,24 @@ Single user — Mukarram Mohammad Alam. Alfred is a dry, witty British butler.
 - ✅ When the backend is unreachable (preview, container down, network issue), the panel shows soft italic "backend offline · retrying every 30 s" instead of a harsh red 404 banner. Easier on the eyes when the backend is intentionally not running.
 
 **Workshop end-to-end test coverage** (Feb 2026)
-- ✅ `tests/test_workshop.py` (11 tests, all passing): list-files allowlist enforcement, file read with traversal/absolute/.env refusal, DIAGNOSE prompt construction with file contents + problem statement, full APPLY → file-on-disk-changed roundtrip, refusal of out-of-allowlist diffs, refusal of `.env` writes, partial-write prevention on bad diffs.
-- ✅ `tests/test_vitals.py` (5 tests, all passing): off-by-default state, ollama ok / missing-model warn / unreachable err, cloud-configured ok.
-- ✅ Total backend tests: **82 passing**. Including: auth (10), workshop (11), vitals (5), router (8), persona, ollama, wake, history-scrub, search markers, image markers, spotify markers, web search.
+- ✅ `tests/test_workshop.py` (19 tests, all passing): list-files allowlist, file read with traversal/absolute/.env refusal, DIAGNOSE prompt construction, full APPLY → file-on-disk-changed roundtrip, refusal of out-of-allowlist diffs, refusal of `.env` writes, partial-write prevention.
+- ✅ Plus the **commit-push test suite**: clean-tree status, dirty-files-outside-allowlist surfacing, full COMMIT → PUSH-to-bare-remote with Alfred authorship verified in remote's git log, .env left untouched in working tree, empty-message refusal, clean-tree refusal, skip_push local-only commit, push-failure-without-losing-local-commit.
+- ✅ `tests/test_vitals.py` (5 tests): off-by-default state, ollama ok / missing-model warn / unreachable err, cloud-configured ok.
+- ✅ Total backend tests: **96 passing**.
+
+### Feb 2026 — Auto-commit + push, hands-free voice fix (NEW)
+
+**Self-coding now ships to git** (P2 done)
+- ✅ `GET /api/workshop/git-status` — branch, remote URL, ahead/behind, dirty files, dirty-files-outside-allowlist (so the UI can warn the user that .env / secrets are deliberately being skipped).
+- ✅ `POST /api/workshop/commit-push` — body `{message, skip_push?, author_name?, author_email?}`. Stages ONLY allowlisted files (.env / secret.txt / out-of-tree changes are never swept up), commits as Alfred, pushes to `origin/HEAD`. On push failure: local commit is preserved + the response carries git's exact error so the user can fix auth (deploy key / PAT) and re-run.
+- ✅ Frontend Workshop view: after a successful APPLY, a COMMIT + PUSH panel appears showing branch, remote URL, files-to-commit, files-being-skipped (highlighted in amber), commit-message input pre-seeded from the problem statement, and two buttons: ⇧ COMMIT + PUSH or ⇩ LOCAL ONLY.
+
+**Hands-free voice fix** (the bug user reported)
+- ✅ Root cause: the only `<Composer>` was mounted inside `chatPane`, which only renders on the CHAT tab. When the user said "hey Alfred, go to chat" / "go to workout" on the HUD tab, the wake-word hook fired `composerRef.current?.startVoice()` on a NULL ref. Result: hands-free worked only on the chat tab.
+- ✅ Fix: `ChatTabView` now mounts always (`display: contents` when active, `display: none` otherwise) so its inline Composer survives tab switches. Plus a SECOND always-on off-screen Composer (`handsFreeComposerRef`) at the root for non-chat tabs so the user sees the recording UI on the HUD/Workout/Design too.
+- ✅ Wake-word handler now picks the right ref based on `activeTab` so both Composers can coexist without fighting over the mic.
+- ✅ New `<HandsFreeOverlay>` component pinned bottom-left of the HUD: shows live recording state (LISTENING / SPEAKING / THINKING / STANDING BY / WAKE ERROR with colour-coded pulse dot), the user's last utterance, and Alfred's last reply. Auto-fades after 8 s of silence so the HUD stays clean.
+- ✅ Verified: wake-word fires from any tab → mic activates → STT lands → `handleSend` runs intent detection → "go to chat" / "go to workout" / "open the menu" route correctly.
 
 ### Existing backlog (unchanged)
 

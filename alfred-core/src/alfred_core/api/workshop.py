@@ -297,6 +297,22 @@ class ApplyReply(BaseModel):
     files_touched: list[str] = []
 
 
+def _git_run(
+    *args: str, cwd: Path | None = None, input_text: str | None = None
+) -> subprocess.CompletedProcess[str]:
+    """Wrapper around ``git`` that captures stdout/stderr as text and
+    enforces a hard timeout. We use this everywhere instead of
+    ad-hoc ``subprocess.run`` calls so failures surface consistently."""
+    return subprocess.run(  # noqa: S603 — we control all args
+        ["git", *args],
+        cwd=cwd or _REPO_ROOT,
+        input=input_text,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+
+
 @router.post("/apply", response_model=ApplyReply)
 async def apply_patch(req: ApplyRequest) -> ApplyReply:
     """Run ``git apply --check`` then ``git apply``, restricted to the
@@ -334,27 +350,13 @@ async def apply_patch(req: ApplyRequest) -> ApplyReply:
         )
 
     # ``git apply --check`` first so we fail fast on a bad diff.
-    check = subprocess.run(  # noqa: S603 — we control the inputs
-        ["git", "apply", "--check", "-"],
-        cwd=_REPO_ROOT,
-        input=req.diff,
-        capture_output=True,
-        text=True,
-        timeout=15,
-    )
+    check = _git_run("apply", "--check", "-", input_text=req.diff)
     if check.returncode != 0:
         return ApplyReply(
             applied=False,
             detail=f"git apply --check failed:\n{check.stderr.strip()}",
         )
-    real = subprocess.run(  # noqa: S603 — we control the inputs
-        ["git", "apply", "-"],
-        cwd=_REPO_ROOT,
-        input=req.diff,
-        capture_output=True,
-        text=True,
-        timeout=30,
-    )
+    real = _git_run("apply", "-", input_text=req.diff)
     if real.returncode != 0:
         return ApplyReply(
             applied=False,
@@ -364,4 +366,222 @@ async def apply_patch(req: ApplyRequest) -> ApplyReply:
         applied=True,
         detail=f"Applied cleanly to {len(targets)} file(s).",
         files_touched=targets,
+    )
+
+
+# ─── Git commit + push ────────────────────────────────────────────────────
+#
+# After APPLY succeeds, the next natural step is a commit + push to the
+# user's fork / origin. Two endpoints:
+#
+#   GET  /workshop/git-status   — branch, remote, dirty files, last commit.
+#                                 Shown to the user so they know what's
+#                                 about to ship.
+#   POST /workshop/commit-push  — commits the working-tree changes that
+#                                 fall inside the allowlist, authored as
+#                                 Alfred, and pushes to origin/<branch>.
+#
+# Safety rails:
+#   - Only allowlisted files are added. A stray change to `.env` won't
+#     be swept up by accident.
+#   - No force-push. No history rewriting. No ``git reset --hard``.
+#   - Authentication is whatever the host has configured on the git
+#     remote — SSH deploy key, GitHub PAT in a credential helper,
+#     etc. We don't touch credentials ourselves.
+#   - Every call returns verbose logs so a failing push tells the user
+#     exactly what git said.
+
+
+class GitStatus(BaseModel):
+    """Snapshot of the repo the user is about to commit against."""
+
+    branch: str
+    remote: str
+    ahead: int
+    behind: int
+    clean: bool
+    dirty_files: list[str]
+    dirty_files_outside_allowlist: list[str]
+    last_commit: str
+
+
+@router.get("/git-status", response_model=GitStatus)
+async def git_status() -> GitStatus:
+    branch_res = _git_run("rev-parse", "--abbrev-ref", "HEAD")
+    branch = branch_res.stdout.strip() if branch_res.returncode == 0 else "(detached)"
+
+    remote_res = _git_run("remote", "get-url", "origin")
+    remote = remote_res.stdout.strip() if remote_res.returncode == 0 else ""
+
+    # Ahead/behind vs upstream — best-effort. No upstream set is not an
+    # error, just means we report zeros.
+    ahead = behind = 0
+    counts = _git_run("rev-list", "--left-right", "--count", "HEAD...@{u}")
+    if counts.returncode == 0 and counts.stdout.strip():
+        parts = counts.stdout.split()
+        if len(parts) == 2:
+            ahead, behind = int(parts[0]), int(parts[1])
+
+    status = _git_run("status", "--porcelain")
+    raw_lines = [ln for ln in status.stdout.splitlines() if ln.strip()]
+    dirty: list[str] = []
+    outside: list[str] = []
+    for ln in raw_lines:
+        # Porcelain format: ``XY <path>`` where X/Y are status flags.
+        # Renames are ``XY <from> -> <to>`` — we just split on the
+        # first space and take everything after as the (possibly
+        # rename) path.
+        path_part = ln[3:].strip()
+        if " -> " in path_part:
+            path_part = path_part.split(" -> ", 1)[1]
+        path_part = path_part.strip('"')
+        dirty.append(path_part)
+        try:
+            _safe_path(path_part)
+        except HTTPException:
+            outside.append(path_part)
+
+    last = _git_run("log", "-1", "--pretty=%h %s")
+    last_commit = last.stdout.strip() if last.returncode == 0 else ""
+
+    return GitStatus(
+        branch=branch,
+        remote=remote,
+        ahead=ahead,
+        behind=behind,
+        clean=len(dirty) == 0,
+        dirty_files=dirty,
+        dirty_files_outside_allowlist=outside,
+        last_commit=last_commit,
+    )
+
+
+class CommitPushRequest(BaseModel):
+    message: str
+    # When true, do the commit but skip the push. Useful for users on
+    # airgapped setups or those who want to review ``git log`` before
+    # shipping. When false (default) we commit AND push.
+    skip_push: bool = False
+    # Author info the commit will carry. Defaults keep a consistent
+    # identity for Alfred's self-coding commits, distinct from the
+    # user's personal commits.
+    author_name: str = "Alfred"
+    author_email: str = "alfred@localhost"
+
+
+class CommitPushReply(BaseModel):
+    committed: bool
+    pushed: bool
+    commit_sha: str
+    files_committed: list[str]
+    detail: str
+
+
+@router.post("/commit-push", response_model=CommitPushReply)
+async def commit_and_push(req: CommitPushRequest) -> CommitPushReply:
+    """Commit allowlisted working-tree changes as Alfred + push to
+    origin. Refuses to run if the tree is clean or if there's nothing
+    inside the allowlist to commit."""
+    if not req.message.strip():
+        raise HTTPException(status_code=400, detail="Commit message is empty.")
+
+    status = _git_run("status", "--porcelain")
+    if status.returncode != 0:
+        raise HTTPException(
+            status_code=500,
+            detail=f"git status failed:\n{status.stderr.strip()}",
+        )
+
+    # Figure out which dirty files are inside the allowlist. Anything
+    # else gets left untouched — we'd rather commit too little than
+    # sweep up a secret.
+    to_add: list[str] = []
+    for ln in status.stdout.splitlines():
+        if not ln.strip():
+            continue
+        path_part = ln[3:].strip()
+        if " -> " in path_part:
+            path_part = path_part.split(" -> ", 1)[1]
+        path_part = path_part.strip('"')
+        try:
+            _safe_path(path_part)
+        except HTTPException:
+            # Outside the allowlist — silently skip. The status
+            # endpoint surfaces these so the user knows what was
+            # left behind.
+            continue
+        # Refuse .env even if it lives inside an allowlisted dir.
+        if Path(path_part).name in _READ_ONLY_NAMES:
+            continue
+        to_add.append(path_part)
+
+    if not to_add:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Nothing in the allowlist to commit. Run APPLY PATCH first, "
+                "or check /workshop/git-status to see what's dirty."
+            ),
+        )
+
+    add = _git_run("add", "--", *to_add)
+    if add.returncode != 0:
+        raise HTTPException(
+            status_code=500, detail=f"git add failed:\n{add.stderr.strip()}"
+        )
+
+    commit_env_args = (
+        "-c",
+        f"user.name={req.author_name}",
+        "-c",
+        f"user.email={req.author_email}",
+    )
+    commit = _git_run(*commit_env_args, "commit", "-m", req.message)
+    if commit.returncode != 0:
+        return CommitPushReply(
+            committed=False,
+            pushed=False,
+            commit_sha="",
+            files_committed=[],
+            detail=f"git commit failed:\n{commit.stderr.strip() or commit.stdout.strip()}",
+        )
+
+    sha_res = _git_run("rev-parse", "HEAD")
+    sha = sha_res.stdout.strip() if sha_res.returncode == 0 else ""
+
+    if req.skip_push:
+        return CommitPushReply(
+            committed=True,
+            pushed=False,
+            commit_sha=sha,
+            files_committed=to_add,
+            detail=(
+                f"Committed {len(to_add)} file(s) as {sha[:7]} — push skipped "
+                "per request."
+            ),
+        )
+
+    # ``git push`` picks up whatever credentials the host has
+    # configured. We never see or handle them.
+    push = _git_run("push", "origin", "HEAD")
+    if push.returncode != 0:
+        return CommitPushReply(
+            committed=True,
+            pushed=False,
+            commit_sha=sha,
+            files_committed=to_add,
+            detail=(
+                f"Committed {sha[:7]} locally, but push failed:\n"
+                f"{push.stderr.strip() or push.stdout.strip()}\n\n"
+                "Fix the git remote auth on the host (deploy key / PAT) "
+                "and re-run the push manually, or set up the remote "
+                "correctly and try again."
+            ),
+        )
+    return CommitPushReply(
+        committed=True,
+        pushed=True,
+        commit_sha=sha,
+        files_committed=to_add,
+        detail=f"Committed {sha[:7]} and pushed {len(to_add)} file(s) to origin.",
     )

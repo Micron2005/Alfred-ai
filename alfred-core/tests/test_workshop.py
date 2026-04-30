@@ -334,3 +334,261 @@ def test_apply_returns_failure_for_bad_diff(
     text = (fake_repo / "alfred-core/src/alfred_core/api/chat.py").read_text()
     assert "handle_chat" in text
     assert "wrong base" not in text
+
+
+# ─── Git status + commit/push ────────────────────────────────────────────
+
+
+@pytest.fixture
+def fake_repo_with_remote(
+    fake_repo: Path, tmp_path: Path
+) -> tuple[Path, Path]:
+    """Attach a bare remote to ``fake_repo`` so we can push against it
+    and assert the push actually landed. Returns ``(work_tree, remote)``.
+
+    The remote lives in a SIBLING directory (``tmp_path.parent``) so it
+    doesn't pollute the work-tree's ``git status`` output as an
+    untracked ``remote.git/`` entry — that's what bit the first run."""
+    import subprocess
+
+    remote = tmp_path.parent / "alfred-test-remote.git"
+    if remote.exists():
+        # ``tmp_path.parent`` is shared across tests in the same run;
+        # wipe any prior bare repo so we always start clean.
+        import shutil
+        shutil.rmtree(remote)
+    subprocess.run(["git", "init", "--bare", "-q", str(remote)], check=True)
+    subprocess.run(
+        ["git", "remote", "add", "origin", str(remote)], cwd=fake_repo, check=True
+    )
+    # Push the initial commit so subsequent pushes have a base.
+    subprocess.run(
+        ["git", "push", "-q", "-u", "origin", "HEAD"], cwd=fake_repo, check=True
+    )
+    return fake_repo, remote
+
+
+def test_git_status_reports_clean_tree(
+    fake_repo_with_remote: tuple[Path, Path], settings: Settings
+) -> None:
+    app = _make_app(settings)
+    with TestClient(app) as client:
+        r = client.get("/api/workshop/git-status")
+        assert r.status_code == 200, r.text
+        body = r.json()
+        # Diagnostic if this assertion ever fails again — porcelain
+        # output is the source of truth.
+        import subprocess
+        debug = subprocess.run(
+            ["git", "status", "--porcelain"],
+            cwd=fake_repo_with_remote[0], capture_output=True, text=True
+        )
+        assert body["clean"] is True, (
+            f"clean=false, dirty={body['dirty_files']}, "
+            f"porcelain={debug.stdout!r}"
+        )
+        assert body["dirty_files"] == []
+        assert body["last_commit"]  # non-empty
+
+
+def test_git_status_surfaces_outside_allowlist_files(
+    fake_repo_with_remote: tuple[Path, Path], settings: Settings
+) -> None:
+    """When the user has dirty ``.env`` or out-of-allowlist files, the
+    status endpoint separates them from the safe ones so the UI can
+    warn that they WON'T be committed."""
+    work, _ = fake_repo_with_remote
+    # Mutate a safe file + an unsafe one.
+    (work / "alfred-core/src/alfred_core/api/chat.py").write_text(
+        "def handle_chat():\n    return 'hi'\n"
+    )
+    (work / ".env").write_text("SECRET=changed\n")
+    app = _make_app(settings)
+    with TestClient(app) as client:
+        r = client.get("/api/workshop/git-status")
+        body = r.json()
+        assert body["clean"] is False
+        assert "alfred-core/src/alfred_core/api/chat.py" in body["dirty_files"]
+        assert ".env" in body["dirty_files"]
+        assert ".env" in body["dirty_files_outside_allowlist"]
+        # Safe file is NOT flagged as outside-allowlist.
+        assert (
+            "alfred-core/src/alfred_core/api/chat.py"
+            not in body["dirty_files_outside_allowlist"]
+        )
+
+
+def test_commit_push_lands_in_remote(
+    fake_repo_with_remote: tuple[Path, Path], settings: Settings
+) -> None:
+    """The real end-to-end: APPLY a patch → commit + push → the commit
+    shows up in the bare remote with Alfred's authorship."""
+    work, remote = fake_repo_with_remote
+    # Change a safe file so there's something to commit.
+    (work / "alfred-core/src/alfred_core/api/chat.py").write_text(
+        "def handle_chat():\n    return 'hi, sir'\n"
+    )
+    app = _make_app(settings)
+    with TestClient(app) as client:
+        r = client.post(
+            "/api/workshop/commit-push",
+            json={"message": "alfred: tighten greeting"},
+        )
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["committed"] is True
+        assert body["pushed"] is True
+        assert body["commit_sha"]  # non-empty hash
+        assert body["files_committed"] == [
+            "alfred-core/src/alfred_core/api/chat.py"
+        ]
+
+    # Confirm the commit actually landed in the bare remote.
+    import subprocess
+
+    log = subprocess.run(
+        ["git", "--git-dir", str(remote), "log", "-1", "--pretty=%an <%ae>|%s"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    line = log.stdout.strip()
+    assert "Alfred <alfred@localhost>" in line
+    assert "tighten greeting" in line
+
+
+def test_commit_push_skips_outside_allowlist_files(
+    fake_repo_with_remote: tuple[Path, Path], settings: Settings
+) -> None:
+    """If the user dirties BOTH an allowlisted file AND ``.env``, only
+    the allowlisted one ends up in the commit. The ``.env`` stays
+    dirty in the working tree (not reset, not added, not pushed)."""
+    work, remote = fake_repo_with_remote
+    (work / "alfred-core/src/alfred_core/api/chat.py").write_text(
+        "def handle_chat():\n    return 'hi'\n"
+    )
+    (work / ".env").write_text("SECRET=oh-no\n")
+    app = _make_app(settings)
+    with TestClient(app) as client:
+        r = client.post(
+            "/api/workshop/commit-push", json={"message": "alfred: tweak"}
+        )
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["committed"] is True
+        assert body["files_committed"] == [
+            "alfred-core/src/alfred_core/api/chat.py"
+        ]
+    # ``.env`` should still be dirty in the working tree — proving we
+    # didn't accidentally stage it.
+    import subprocess
+
+    st = subprocess.run(
+        ["git", "status", "--porcelain"],
+        cwd=work,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert ".env" in st.stdout
+    # And it should NOT be in the latest commit.
+    show = subprocess.run(
+        ["git", "--git-dir", str(remote), "log", "-1", "--name-only", "--pretty="],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert ".env" not in show.stdout
+
+
+def test_commit_push_refuses_empty_message(
+    fake_repo_with_remote: tuple[Path, Path], settings: Settings
+) -> None:
+    app = _make_app(settings)
+    with TestClient(app) as client:
+        r = client.post("/api/workshop/commit-push", json={"message": "  "})
+        assert r.status_code == 400
+
+
+def test_commit_push_refuses_clean_tree(
+    fake_repo_with_remote: tuple[Path, Path], settings: Settings
+) -> None:
+    """Nothing to commit inside the allowlist → 400 rather than an
+    empty commit. Empty commits confuse `git log` and break the
+    diagnose→apply→commit flow's feedback loop."""
+    app = _make_app(settings)
+    with TestClient(app) as client:
+        r = client.post("/api/workshop/commit-push", json={"message": "noop"})
+        assert r.status_code == 400
+
+
+def test_commit_push_skip_push_only_commits_locally(
+    fake_repo_with_remote: tuple[Path, Path], settings: Settings
+) -> None:
+    """``skip_push=true`` commits locally but doesn't talk to the
+    remote. Useful for offline / airgapped setups."""
+    work, remote = fake_repo_with_remote
+    (work / "alfred-core/src/alfred_core/api/chat.py").write_text(
+        "def handle_chat():\n    return 'local-only'\n"
+    )
+    app = _make_app(settings)
+    with TestClient(app) as client:
+        r = client.post(
+            "/api/workshop/commit-push",
+            json={"message": "alfred: local only", "skip_push": True},
+        )
+        assert r.status_code == 200
+        body = r.json()
+        assert body["committed"] is True
+        assert body["pushed"] is False
+    # Commit is in local HEAD but NOT in remote.
+    import subprocess
+
+    local_head = subprocess.run(
+        ["git", "log", "-1", "--pretty=%s"],
+        cwd=work,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    assert "local only" in local_head
+    remote_head = subprocess.run(
+        ["git", "--git-dir", str(remote), "log", "-1", "--pretty=%s"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    assert "local only" not in remote_head
+
+
+def test_commit_push_reports_push_failure_without_losing_commit(
+    fake_repo: Path, settings: Settings
+) -> None:
+    """If the remote isn't reachable (e.g. bad deploy key, network
+    down), the local commit still exists and the response tells the
+    user exactly what git said."""
+    # No remote attached = push will fail.
+    (fake_repo / "alfred-core/src/alfred_core/api/chat.py").write_text(
+        "def handle_chat():\n    return 'x'\n"
+    )
+    app = _make_app(settings)
+    with TestClient(app) as client:
+        r = client.post(
+            "/api/workshop/commit-push", json={"message": "alfred: x"}
+        )
+        assert r.status_code == 200
+        body = r.json()
+        assert body["committed"] is True
+        assert body["pushed"] is False
+        assert "push failed" in body["detail"].lower()
+    # Local commit is still there.
+    import subprocess
+
+    head = subprocess.run(
+        ["git", "log", "-1", "--pretty=%s"],
+        cwd=fake_repo,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    assert head == "alfred: x"

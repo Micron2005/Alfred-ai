@@ -108,3 +108,52 @@ export async function applyWorkshopPatch(diff: string): Promise<ApplyReply> {
   }
   return resp.json() as Promise<ApplyReply>;
 }
+
+export interface GitStatus {
+  branch: string;
+  remote: string;
+  ahead: number;
+  behind: number;
+  clean: boolean;
+  dirty_files: string[];
+  dirty_files_outside_allowlist: string[];
+  last_commit: string;
+}
+
+export async function fetchGitStatus(): Promise<GitStatus> {
+  const resp = await fetch(`${API_BASE}/workshop/git-status`, FETCH_DEFAULTS);
+  if (!resp.ok) {
+    const detail = await resp.text();
+    throw new Error(`git-status failed: ${resp.status} ${detail}`);
+  }
+  return resp.json() as Promise<GitStatus>;
+}
+
+export interface CommitPushRequest {
+  message: string;
+  skip_push?: boolean;
+}
+
+export interface CommitPushReply {
+  committed: boolean;
+  pushed: boolean;
+  commit_sha: string;
+  files_committed: string[];
+  detail: string;
+}
+
+export async function commitAndPush(
+  req: CommitPushRequest,
+): Promise<CommitPushReply> {
+  const resp = await fetch(`${API_BASE}/workshop/commit-push`, {
+    ...FETCH_DEFAULTS,
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(req),
+  });
+  if (!resp.ok) {
+    const detail = await resp.text();
+    throw new Error(`Commit + push failed: ${resp.status} ${detail}`);
+  }
+  return resp.json() as Promise<CommitPushReply>;
+}
