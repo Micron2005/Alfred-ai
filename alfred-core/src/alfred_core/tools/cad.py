@@ -125,7 +125,7 @@ async def _run_openscad(args: list[str], timeout: float = _TIMEOUT_S) -> tuple[i
     )
     try:
         stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-    except asyncio.TimeoutError:
+    except TimeoutError as exc:
         # Best-effort kill — we don't care about its exit, we just want
         # to free the process slot before raising.
         try:
@@ -136,7 +136,7 @@ async def _run_openscad(args: list[str], timeout: float = _TIMEOUT_S) -> tuple[i
         raise CadError(
             f"OpenSCAD render exceeded {int(timeout)} s — script may be "
             "too complex (try simpler primitives or fewer Boolean ops)."
-        )
+        ) from exc
     return proc.returncode or 0, stdout, stderr
 
 
@@ -148,9 +148,10 @@ async def render_openscad(script: str, name: str | None = None) -> CadResult:
     that and surface a user-readable apology in chat.
     """
 
-    if len(script.encode("utf-8")) > _MAX_SCRIPT_BYTES:
+    encoded_len = len(script.encode("utf-8"))
+    if encoded_len > _MAX_SCRIPT_BYTES:
         raise CadError(
-            f"Script too large ({len(script)} bytes; max "
+            f"Script too large ({encoded_len} bytes; max "
             f"{_MAX_SCRIPT_BYTES})."
         )
 

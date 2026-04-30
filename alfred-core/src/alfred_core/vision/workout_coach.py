@@ -35,7 +35,7 @@ class PoseSnapshot(BaseModel):
 
     exercise: str
     angles: dict[str, float] = Field(default_factory=dict)
-    formScore: float
+    formScore: float  # noqa: N815 — wire-compat with frontend (poseAnalyzer.ts)
     cues: list[dict[str, str]] = Field(default_factory=list)
 
 
@@ -148,7 +148,7 @@ async def run_workout_coach(
     pose: PoseSnapshot | None,
     history: list[str],
     llm_router: Router,
-    settings: Settings,  # noqa: ARG001 — kept for parity with chat handler
+    settings: Settings,
 ) -> CoachResponse:
     """Drive the LLM with the current pose + goal and return a structured reply."""
     user_prompt = _format_user_prompt(goal, pose, history)

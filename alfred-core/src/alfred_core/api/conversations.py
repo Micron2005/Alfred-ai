@@ -62,7 +62,7 @@ def _extract_images(metadata: dict[str, object] | None) -> list[MessageImageOut]
     return out
 
 
-def _extract_models(metadata: dict[str, object] | None) -> list["MessageModelOut"]:
+def _extract_models(metadata: dict[str, object] | None) -> list[MessageModelOut]:
     """Pull rendered CAD models out of a Message's ``metadata_json`` blob.
 
     Models live there as ``{"models": [{"name": "...", "stl_data": "...",

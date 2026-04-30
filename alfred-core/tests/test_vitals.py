@@ -57,7 +57,7 @@ def _ollama_mock(monkeypatch: pytest.MonkeyPatch, *, status: str) -> None:
         def __init__(self, *_a: Any, **_kw: Any) -> None:
             pass
 
-        async def __aenter__(self) -> "_Client":
+        async def __aenter__(self) -> _Client:
             return self
 
         async def __aexit__(self, *_a: Any) -> None:

@@ -109,7 +109,7 @@ async def _check_db(session: AsyncSession) -> Vital:
             status="ok",
             detail="Postgres reachable, schema in place.",
         )
-    except Exception as exc:  # noqa: BLE001 — surface any DB failure
+    except Exception as exc:
         return Vital(
             id="db",
             label="Database",
