@@ -340,6 +340,21 @@ export function ChatWindow() {
     // dual-ref dance, hands-free was deaf on the HUD/Workout/Design
     // tabs because the only Composer was unmounted.
     onWake: () => {
+      // Pause the wake-word engine SYNCHRONOUSLY before starting the
+      // recorder. Without this, the wake-word's audio stream and the
+      // composer's getUserMedia stream both consume the mic for a
+      // few hundred ms while React state updates propagate — on
+      // some browsers this caused the composer to record silence
+      // ("alfred detected the wake word but didn't register anything
+      // I said after"). Pausing first frees the mic device so the
+      // composer's stream lands cleanly.
+      wake.pause();
+      // Tiny audible cue so the user knows the mic is hot. A short
+      // synthetic beep beats trying to TTS "yes sir" because the
+      // latter eats 600+ms before the composer is recording. The
+      // beep is best-effort — if the AudioContext can't open we
+      // silently skip it.
+      void playWakeCue();
       const ref =
         activeTab === "chat"
           ? composerRef.current
