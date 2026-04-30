@@ -67,6 +67,7 @@ from alfred_core.tools.images import (
     ImageValidationError,
     validate_images,
 )
+from alfred_core.tools.onshape import OnshapeError, publish_to_onshape
 from alfred_core.tools.search_marker import (
     SearchInvocation,
     extract_invocations,
@@ -159,11 +160,17 @@ class CadModelOut(BaseModel):
     ``stl_data`` and ``preview_data`` are both base64-encoded — the
     UI lifts them straight into ``data:`` URLs (preview as an image
     src; STL as a download blob).
+
+    ``document_url`` is populated when the part was also published
+    to an Onshape document (Phase 18b). The UI shows an "Open in
+    Onshape" link when this is set; left ``None`` for the default
+    OpenSCAD-only path.
     """
 
     name: str
     stl_data: str
     preview_data: str
+    document_url: str | None = None
 
 
 class ChatMessageOut(BaseModel):
@@ -621,6 +628,8 @@ _MAX_CAD_PER_TURN = 1
 
 async def _process_cad_requests(
     reply: str,
+    *,
+    settings: Settings,
 ) -> tuple[str, list[CadResult]]:
     """Render each ``[CAD]`` marker, inline a confirmation, return models.
 
@@ -630,9 +639,15 @@ async def _process_cad_requests(
     ``ChatReply`` so the UI can render the preview + download
     button on the new turn without an extra fetch.
 
+    If the request asked for the Onshape backend *and* Onshape keys
+    are configured, we additionally publish the rendered STL to a
+    fresh Onshape document and attach its URL. OpenSCAD rendering is
+    the canonical source of truth either way — Onshape is purely a
+    publish-to-cloud step on top.
+
     Any failure (binary missing, syntax error, timeout, manifold
-    warnings) is folded into the visible reply as a polite apology
-    rather than 500ing the whole turn.
+    warnings, Onshape upload error) is folded into the visible reply
+    as a polite apology rather than 500ing the whole turn.
     """
 
     requests = extract_cad_requests(reply)
@@ -661,15 +676,47 @@ async def _process_cad_requests(
                 f"_(I couldn't render that — {exc})_",
             )
             continue
+
+        # Optional Onshape publish pass. We only do this when the
+        # LLM explicitly asked for ``backend: onshape`` *and* the
+        # user has keys configured. Missing keys on an explicit
+        # request fall through to a visible note so the user knows
+        # why the cloud version didn't appear.
+        confirmation = "_(Rendered. STL ready to download.)_"
+        if req.backend == "onshape":
+            if not settings.has_onshape:
+                confirmation = (
+                    "_(Rendered locally — Onshape keys aren't configured, "
+                    "so I skipped the cloud upload. STL ready to download.)_"
+                )
+            else:
+                try:
+                    doc_url = await publish_to_onshape(
+                        name=result.name,
+                        stl_bytes=result.stl_data,
+                        settings=settings,
+                    )
+                except OnshapeError as exc:
+                    confirmation = (
+                        "_(Rendered locally, but Onshape publish failed — "
+                        f"{exc}. STL is still downloadable.)_"
+                    )
+                else:
+                    # Swap the result for one with the document URL
+                    # filled in. ``CadResult`` is frozen so we rebuild.
+                    result = CadResult(
+                        script=result.script,
+                        stl_data=result.stl_data,
+                        preview_data=result.preview_data,
+                        name=result.name,
+                        document_url=doc_url,
+                    )
+                    confirmation = (
+                        f"_(Rendered and published to Onshape: {doc_url})_"
+                    )
+
         rendered.append(result)
-        # Visible confirmation; the preview PNG + download link render
-        # above the text bubble via the message-models pipeline. Keep
-        # this short — the model speaks for itself.
-        reply = replace_cad_marker(
-            reply,
-            req,
-            "_(Rendered. STL ready to download.)_",
-        )
+        reply = replace_cad_marker(reply, req, confirmation)
         honoured += 1
 
     return reply, rendered
@@ -858,7 +905,8 @@ async def chat(req: ChatRequest, session: AsyncSession = Depends(get_session)) -
         visible_reply
     )
     visible_reply, rendered_models = await _process_cad_requests(
-        visible_reply
+        visible_reply,
+        settings=settings,
     )
 
     # Persist sources, generated images, and rendered CAD models in
@@ -882,7 +930,7 @@ async def chat(req: ChatRequest, session: AsyncSession = Depends(get_session)) -
                 }
             )
         metadata_payload["images"] = encoded_images
-    encoded_models: list[dict[str, str]] = []
+    encoded_models: list[dict[str, str | None]] = []
     if rendered_models:
         for mdl in rendered_models:
             encoded_models.append(
@@ -894,6 +942,7 @@ async def chat(req: ChatRequest, session: AsyncSession = Depends(get_session)) -
                         if mdl.preview_data
                         else ""
                     ),
+                    "document_url": mdl.document_url,
                 }
             )
         metadata_payload["models"] = encoded_models
@@ -934,9 +983,14 @@ async def chat(req: ChatRequest, session: AsyncSession = Depends(get_session)) -
             ],
             models=[
                 CadModelOut(
-                    name=entry["name"],
-                    stl_data=entry["stl_data"],
-                    preview_data=entry["preview_data"],
+                    name=str(entry["name"]),
+                    stl_data=str(entry["stl_data"]),
+                    preview_data=str(entry["preview_data"]),
+                    document_url=(
+                        str(entry["document_url"])
+                        if entry.get("document_url")
+                        else None
+                    ),
                 )
                 for entry in encoded_models
             ],

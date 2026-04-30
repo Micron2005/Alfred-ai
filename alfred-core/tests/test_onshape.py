@@ -1,0 +1,269 @@
+"""Unit tests for the Onshape backend (Phase 18b).
+
+We can't hit the real Onshape API without live credentials, so these
+focus on the parts we *can* exercise deterministically: HMAC
+signing, header shape, and the marker-backend plumbing that routes
+requests at ``onshape`` vs ``openscad``. Integration against the real
+API is covered manually when keys are configured in the environment.
+"""
+
+from __future__ import annotations
+
+import base64
+import hashlib
+import hmac
+
+import pytest
+
+from alfred_core.config import Settings
+from alfred_core.tools.cad_marker import extract_requests
+from alfred_core.tools.onshape import (
+    OnshapeError,
+    _build_auth_headers,
+    document_url,
+    publish_to_onshape,
+)
+
+
+def _recompute_signature(
+    *,
+    method: str,
+    nonce: str,
+    date: str,
+    content_type: str,
+    path: str,
+    query: str,
+    secret_key: str,
+) -> str:
+    """Re-derive the signature the way Onshape will on its side.
+
+    Kept private to this test file; the real one is in ``onshape.py``
+    but we want an independent implementation here so a bug in the
+    production signer would actually trip a mismatch.
+    """
+    string_to_sign = (
+        f"{method.lower()}\n{nonce}\n{date}\n{content_type}\n{path}\n{query}"
+    ).lower()
+    return base64.b64encode(
+        hmac.new(
+            secret_key.encode("utf-8"),
+            string_to_sign.encode("utf-8"),
+            hashlib.sha256,
+        ).digest()
+    ).decode("ascii")
+
+
+def test_build_auth_headers_signature_matches_spec() -> None:
+    """HMAC signature round-trips against an independent recompute."""
+    access = "ACCESS_KEY_ABC"
+    secret = "SECRET_KEY_XYZ"
+    headers = _build_auth_headers(
+        "GET",
+        "/api/documents",
+        "",
+        access_key=access,
+        secret_key=secret,
+    )
+    auth = headers["Authorization"]
+    assert auth.startswith(f"On {access}:HmacSHA256:")
+    signature = auth.split(":HmacSHA256:", 1)[1]
+
+    expected = _recompute_signature(
+        method="GET",
+        nonce=headers["On-Nonce"],
+        date=headers["Date"],
+        content_type="",
+        path="/api/documents",
+        query="",
+        secret_key=secret,
+    )
+    assert signature == expected
+
+
+def test_build_auth_headers_path_normalization() -> None:
+    """Missing leading slash is added; trailing query is stripped from path."""
+    # The signer should tolerate both "/api/documents" and "api/documents"
+    # and produce identical signatures, because the canonical form is
+    # identical. Query params go in their own slot — stripping any from
+    # ``path`` ensures we don't double-count them.
+    a = _build_auth_headers(
+        "POST",
+        "api/documents?foo=bar",
+        "foo=bar",
+        access_key="K",
+        secret_key="S",
+    )
+    # Rebuild with the canonical path to confirm the signer produced
+    # exactly the expected string-to-sign.
+    expected = _recompute_signature(
+        method="POST",
+        nonce=a["On-Nonce"],
+        date=a["Date"],
+        content_type="",
+        path="/api/documents",
+        query="foo=bar",
+        secret_key="S",
+    )
+    signature = a["Authorization"].split(":HmacSHA256:", 1)[1]
+    assert signature == expected
+
+
+def test_build_auth_headers_includes_required_fields() -> None:
+    """Every authed request needs Date, On-Nonce, Authorization."""
+    headers = _build_auth_headers(
+        "GET", "/api/users/sessioninfo", "", access_key="a", secret_key="s"
+    )
+    # The full set of headers Onshape *requires*. ``Authorization``
+    # carries the signature; ``Date`` + ``On-Nonce`` are inputs to the
+    # signed string-to-sign and so have to appear on the wire too.
+    assert set(headers.keys()) == {"Date", "On-Nonce", "Authorization"}
+    # Nonce format: at most 25 alphanumeric chars (Onshape's spec says
+    # 25; some examples show less, but always alnum only).
+    nonce = headers["On-Nonce"]
+    assert 1 <= len(nonce) <= 25
+    assert nonce.isalnum()
+
+
+def test_build_auth_headers_different_requests_produce_different_nonces() -> None:
+    """Nonces must vary — otherwise replay attacks are trivial."""
+    h1 = _build_auth_headers("GET", "/api/x", "", access_key="a", secret_key="s")
+    h2 = _build_auth_headers("GET", "/api/x", "", access_key="a", secret_key="s")
+    assert h1["On-Nonce"] != h2["On-Nonce"]
+
+
+def test_build_auth_headers_content_type_propagates_into_signature() -> None:
+    """Content-Type change must change the signature."""
+    base_kwargs = {
+        "method": "POST",
+        "path": "/api/documents",
+        "query": "",
+        "access_key": "a",
+        "secret_key": "s",
+    }
+    plain = _build_auth_headers(content_type="", **base_kwargs)
+    # Re-derive both signatures against the same nonce so we can assert
+    # that ``content_type`` alone meaningfully changes the signature.
+    # Nonces between real calls always differ, which would make the
+    # signatures trivially different for an uninteresting reason.
+    expected_plain = _recompute_signature(
+        method="POST",
+        nonce=plain["On-Nonce"],
+        date=plain["Date"],
+        content_type="",
+        path="/api/documents",
+        query="",
+        secret_key="s",
+    )
+    expected_json = _recompute_signature(
+        method="POST",
+        nonce=plain["On-Nonce"],
+        date=plain["Date"],
+        content_type="application/json",
+        path="/api/documents",
+        query="",
+        secret_key="s",
+    )
+    assert expected_plain != expected_json
+    sig_plain = plain["Authorization"].split(":HmacSHA256:", 1)[1]
+    assert sig_plain == expected_plain
+
+
+def test_marker_backend_openscad_default() -> None:
+    """Markers without a ``backend`` header default to openscad."""
+    reply = "[CAD]\nscript:\ncube([5, 5, 5]);\n[/CAD]"
+    reqs = extract_requests(reply)
+    assert len(reqs) == 1
+    assert reqs[0].backend == "openscad"
+
+
+def test_marker_backend_onshape_explicit() -> None:
+    """``backend: onshape`` in the header routes to cloud."""
+    reply = (
+        "[CAD]\nname: bracket\nbackend: onshape\nscript:\n"
+        "cube([10, 10, 10]);\n[/CAD]"
+    )
+    reqs = extract_requests(reply)
+    assert len(reqs) == 1
+    assert reqs[0].backend == "onshape"
+    assert reqs[0].name == "bracket"
+
+
+def test_marker_backend_unknown_falls_back_to_openscad() -> None:
+    """Typos / stray values default to openscad rather than 500ing."""
+    reply = "[CAD]\nbackend: mars-rover\nscript:\ncube([1, 1, 1]);\n[/CAD]"
+    reqs = extract_requests(reply)
+    assert len(reqs) == 1
+    assert reqs[0].backend == "openscad"
+
+
+def test_marker_backend_is_case_insensitive() -> None:
+    """``Onshape`` / ``ONSHAPE`` / ``onshape`` all route identically."""
+    for variant in ("onshape", "Onshape", "ONSHAPE"):
+        reply = f"[CAD]\nbackend: {variant}\nscript:\ncube([1, 1, 1]);\n[/CAD]"
+        reqs = extract_requests(reply)
+        assert len(reqs) == 1
+        assert reqs[0].backend == "onshape"
+
+
+def test_has_onshape_false_when_keys_missing() -> None:
+    """Onshape backend is disabled by default (no keys configured)."""
+    s = Settings(
+        alfred_onshape_access_key="",
+        alfred_onshape_secret_key="",
+    )
+    assert s.has_onshape is False
+
+
+def test_has_onshape_true_when_both_keys_present() -> None:
+    """Both keys non-empty → feature enabled."""
+    s = Settings(
+        alfred_onshape_access_key="access",
+        alfred_onshape_secret_key="secret",
+    )
+    assert s.has_onshape is True
+
+
+def test_has_onshape_false_when_only_one_key_present() -> None:
+    """Partial configuration counts as off — both halves are required."""
+    s_access_only = Settings(
+        alfred_onshape_access_key="access",
+        alfred_onshape_secret_key="",
+    )
+    s_secret_only = Settings(
+        alfred_onshape_access_key="",
+        alfred_onshape_secret_key="secret",
+    )
+    assert s_access_only.has_onshape is False
+    assert s_secret_only.has_onshape is False
+
+
+def test_document_url_builds_expected_path() -> None:
+    """Shareable URL is ``<base>/documents/<doc>/w/<workspace>``."""
+    s = Settings(alfred_onshape_base_url="https://cad.onshape.com")
+    url = document_url("doc123", "ws456", settings=s)
+    assert url == "https://cad.onshape.com/documents/doc123/w/ws456"
+
+
+def test_document_url_strips_trailing_slash_from_base() -> None:
+    """A user-supplied base URL with a trailing slash still produces a clean URL."""
+    s = Settings(alfred_onshape_base_url="https://cad.onshape.com/")
+    url = document_url("d", "w", settings=s)
+    assert url == "https://cad.onshape.com/documents/d/w/w"
+
+
+async def test_publish_to_onshape_raises_without_keys() -> None:
+    """Explicit error surfaces when Onshape keys aren't set."""
+    s = Settings(
+        alfred_onshape_access_key="",
+        alfred_onshape_secret_key="",
+    )
+    with pytest.raises(OnshapeError, match="API keys are not configured"):
+        await publish_to_onshape(
+            name="test part",
+            stl_bytes=b"\x00\x00\x00\x00",
+            settings=s,
+        )
+
+
+# Project pytest config runs ``asyncio_mode = "auto"`` so async tests
+# are picked up implicitly. No per-file marker needed.

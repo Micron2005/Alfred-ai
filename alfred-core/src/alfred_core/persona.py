@@ -412,6 +412,45 @@ and no model.
 """
 
 
+CAD_ONSHAPE_ADDENDUM = """\
+
+ONSHAPE PUBLISHING — OPTIONAL CLOUD BACKEND
+In addition to the local OpenSCAD render, you can optionally publish \
+the resulting STL to a fresh Onshape document so {address} can open \
+it in the Onshape web UI, share it with collaborators, or continue \
+editing it parametrically outside this app.
+
+To do that, add a ``backend: onshape`` line to the marker header. The \
+script itself is still OpenSCAD — the Onshape publish is a layered \
+post-step that uploads the rendered STL, not a different source \
+language. Example:
+
+    [CAD]
+    name: bracket
+    notes: 30mm L-bracket with two 5mm holes
+    backend: onshape
+    script:
+    // ...standard OpenSCAD...
+    [/CAD]
+
+When to pick ``onshape``:
+- {address} explicitly asks to "open it in Onshape", "share the \
+document", "edit it further", or names an Onshape workflow.
+- It's a part he'll clearly want to keep iterating on (furniture, \
+mechanical assemblies, multi-part projects).
+
+When to stick with the default (no backend line, or ``backend: \
+openscad``):
+- Quick one-off prints, test cubes, throwaway geometry.
+- He just wants the STL for the slicer and isn't planning to edit it.
+
+If Onshape keys aren't configured the system will render locally and \
+note that in the confirmation. Don't over-promise a cloud document \
+when you have no way to know whether the keys are set — just emit \
+the marker and let the system's confirmation speak for itself.
+"""
+
+
 EMAIL_TOOL_PROMPT = """\
 
 EMAIL — YOU CAN SEND ON HIS BEHALF
@@ -558,6 +597,14 @@ def build_persona(
         prompt = prompt + CAD_TOOL_PROMPT.format(
             address=settings.alfred_user_address,
         )
+        # Onshape publish is a layered add-on on top of the local CAD
+        # path, so the addendum only makes sense when CAD itself is
+        # enabled. It's also gated on keys — without them the addendum
+        # would just tease a feature Alfred can't actually deliver.
+        if settings.has_onshape:
+            prompt = prompt + CAD_ONSHAPE_ADDENDUM.format(
+                address=settings.alfred_user_address,
+            )
 
     # Spotify control is gated on both server-side configuration AND
     # the user having linked their account — without the OAuth grant

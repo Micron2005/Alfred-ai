@@ -84,6 +84,7 @@ def _extract_models(metadata: dict[str, object] | None) -> list[MessageModelOut]
         name = entry.get("name")
         stl_data = entry.get("stl_data")
         preview_data = entry.get("preview_data", "")
+        document_url = entry.get("document_url")
         if (
             isinstance(name, str)
             and isinstance(stl_data, str)
@@ -94,6 +95,9 @@ def _extract_models(metadata: dict[str, object] | None) -> list[MessageModelOut]
                     name=name,
                     stl_data=stl_data,
                     preview_data=preview_data,
+                    document_url=(
+                        document_url if isinstance(document_url, str) else None
+                    ),
                 )
             )
     return out
@@ -156,6 +160,7 @@ class MessageModelOut(BaseModel):
     name: str
     stl_data: str
     preview_data: str
+    document_url: str | None = None
 
 
 class MessageOut(BaseModel):

@@ -73,12 +73,17 @@ class CadResult:
     ``preview_data`` is a PNG render, suitable for inlining into the
     chat as an image attachment. Both are stored as bytes so the
     chat handler can base64-encode them for ``metadata_json``.
+
+    ``document_url`` is populated when the part was also published to
+    an Onshape document (Phase 18b, ``backend: onshape``). The frontend
+    renders a "View in Onshape" link when this is set.
     """
 
     script: str
     stl_data: bytes
     preview_data: bytes
     name: str
+    document_url: str | None = None
 
 
 class CadError(RuntimeError):
