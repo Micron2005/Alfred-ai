@@ -279,6 +279,19 @@ class Settings(BaseSettings):
             and self.alfred_spotify_client_secret.strip()
         )
 
+    @property
+    def has_cad(self) -> bool:
+        """Whether the local OpenSCAD binary is available.
+
+        Resolved lazily by shelling out via ``shutil.which`` — see
+        ``alfred_core.tools.cad.has_openscad``. We do the import
+        inline to avoid a startup-time dependency cycle (the tools
+        module imports ``Settings`` itself).
+        """
+        from alfred_core.tools.cad import has_openscad
+
+        return has_openscad()
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:

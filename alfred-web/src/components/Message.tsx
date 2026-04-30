@@ -1,15 +1,61 @@
 "use client";
 
-import type { ChatMessageOut, ChatSource } from "@/lib/api";
+import { useEffect, useMemo } from "react";
+
+import type { ChatMessageOut, ChatModel, ChatSource } from "@/lib/api";
+
+/** Decode a base-64 string into a ``Blob`` of the given MIME type.
+ *
+ * Used to materialise STL bytes for the "Download" link without
+ * keeping them as a giant data: URL (Chrome caps anchor href length
+ * around ~2 MB). The blob: URL approach handles arbitrary sizes. */
+function base64ToBlob(b64: string, mime: string): Blob {
+  const binary = atob(b64);
+  const len = binary.length;
+  const bytes = new Uint8Array(len);
+  for (let i = 0; i < len; i++) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return new Blob([bytes], { type: mime });
+}
 
 export function Message({ msg }: { msg: ChatMessageOut }) {
   const isUser = msg.role === "user";
   const images = msg.images ?? [];
+  // Memoise so the ``useMemo``/``useEffect`` cleanup below see a
+  // stable reference rather than a brand-new array on every render.
+  // Without this the blob: URLs would be revoked + recreated each
+  // tick, causing the download link to break mid-click.
+  const models: ChatModel[] = useMemo(() => msg.models ?? [], [msg.models]);
   // Sources only appear on assistant turns, and only when Alfred
   // actually consulted the web for this reply. Drop the synthetic
   // "Search summary" entry from the visible list — it has no URL,
   // so a footer chip would be confusing.
   const sources: ChatSource[] = (msg.sources ?? []).filter((s) => !!s.url);
+
+  // Materialise STL bytes into stable blob: URLs once per mount.
+  // Recomputing on every render would leak a URL each time; revoking
+  // on unmount keeps memory bounded as the user scrolls back through
+  // long histories with many models.
+  const stlUrls = useMemo(
+    () =>
+      models.map((mdl) => {
+        const blob = base64ToBlob(mdl.stl_data, "model/stl");
+        return URL.createObjectURL(blob);
+      }),
+    // We deliberately key on the models reference, not their content.
+    // Messages are immutable after they land, so the ref change only
+    // happens when a new message arrives, which is the correct moment
+    // to recompute.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [models],
+  );
+  useEffect(() => {
+    return () => {
+      stlUrls.forEach((url) => URL.revokeObjectURL(url));
+    };
+  }, [stlUrls]);
+
   return (
     <div
       style={{
@@ -54,7 +100,10 @@ export function Message({ msg }: { msg: ChatMessageOut }) {
             lineHeight: 1.55,
             display: "flex",
             flexDirection: "column",
-            gap: images.length > 0 && msg.content ? 8 : 0,
+            gap:
+              (images.length > 0 || models.length > 0) && msg.content
+                ? 8
+                : 0,
             color: "var(--fg)",
           }}
         >
@@ -101,6 +150,88 @@ export function Message({ msg }: { msg: ChatMessageOut }) {
                       objectFit: "contain",
                     }}
                   />
+                );
+              })}
+            </div>
+          )}
+          {models.length > 0 && (
+            <div
+              style={{
+                display: "flex",
+                flexDirection: "column",
+                gap: 6,
+                maxWidth: "100%",
+              }}
+            >
+              {models.map((mdl, idx) => {
+                const previewSrc = mdl.preview_data
+                  ? `data:image/png;base64,${mdl.preview_data}`
+                  : null;
+                const stlHref = stlUrls[idx];
+                const filename = `${mdl.name || "model"}.stl`;
+                return (
+                  <div
+                    key={idx}
+                    style={{
+                      display: "flex",
+                      flexDirection: "column",
+                      gap: 6,
+                      padding: 8,
+                      background: "rgba(0,0,0,0.2)",
+                      border: "1px solid var(--border-warm)",
+                      borderRadius: 3,
+                    }}
+                  >
+                    {previewSrc && (
+                      // eslint-disable-next-line @next/next/no-img-element
+                      <img
+                        src={previewSrc}
+                        alt={mdl.name || "model preview"}
+                        style={{
+                          maxWidth: 480,
+                          width: "100%",
+                          borderRadius: 3,
+                          background: "rgba(0,0,0,0.4)",
+                        }}
+                      />
+                    )}
+                    <div
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "space-between",
+                        gap: 8,
+                      }}
+                    >
+                      <span
+                        className="mono"
+                        style={{
+                          fontSize: 10,
+                          color: "var(--accent)",
+                          opacity: 0.85,
+                          letterSpacing: 1.5,
+                        }}
+                      >
+                        ⌬ {filename}
+                      </span>
+                      <a
+                        href={stlHref}
+                        download={filename}
+                        className="mono"
+                        style={{
+                          fontSize: 11,
+                          color: "var(--accent)",
+                          textDecoration: "none",
+                          padding: "3px 10px",
+                          border: "1px solid var(--border-warm)",
+                          borderRadius: 2,
+                          letterSpacing: 1,
+                        }}
+                      >
+                        DOWNLOAD STL
+                      </a>
+                    </div>
+                  </div>
                 );
               })}
             </div>
