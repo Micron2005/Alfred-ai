@@ -55,7 +55,19 @@ export interface SpotifyAudioAnalysis {
 }
 
 async function jsonFetch<T>(path: string, init?: RequestInit): Promise<T> {
-  const resp = await fetch(`${API_BASE}${path}`, init);
+  // Always send the auth cookie. The frontend's password gate uses
+  // an httpOnly cookie that browsers won't include on cross-origin
+  // requests unless the call explicitly opts in. Without this flag,
+  // every Spotify API call would be rejected with 401 the moment the
+  // user enables auth — even though the existing SpotifyPlayer HUD
+  // widget happens to work because it routes its calls through other
+  // helpers that already include credentials. (The Spotify3DView
+  // browse + search calls go through THIS helper, so they need it.)
+  const merged: RequestInit = {
+    credentials: "include",
+    ...(init ?? {}),
+  };
+  const resp = await fetch(`${API_BASE}${path}`, merged);
   if (!resp.ok) {
     let detail = resp.statusText;
     try {

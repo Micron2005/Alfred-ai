@@ -99,14 +99,49 @@ const WAKE_LABEL = WAKE_KEYWORD.replace(/_/g, " ").replace(
  * is treated as conversation.
  */
 type TabIntent = { tab: TabId; label: string };
+/** Voice-reachable destination — either a real tab or a radial-menu sub-view. */
+export type NavDestination =
+  | { kind: "tab"; tab: TabId; label: string }
+  | { kind: "subview"; view: "spotify" | "workshop"; label: string }
+  | { kind: "subview-close"; label: string };
+
 const TAB_NOUNS: ReadonlyArray<{ noun: RegExp; tab: TabId; label: string }> = [
   { noun: /workout|form\s*coach|exercise|fitness|gym/, tab: "workout", label: "the Workout tab" },
   { noun: /design|cad(?:\s*studio)?|3d\s*print(?:er|ing)?|model(?:l?ing|ler)?/, tab: "design", label: "the Design tab" },
   { noun: /chat|messages?|conversation|inbox/, tab: "chat", label: "the Chat tab" },
   { noun: /hud|home|standby|main|dashboard|overview/, tab: "hud", label: "the HUD" },
 ];
+
+/**
+ * Sub-view nouns — these aren't real tabs but full-screen views
+ * launched from the radial menu. Must be voice-reachable from any
+ * tab so the user can say "Alfred, go to spotify" / "open workshop"
+ * / "go to diagnosis" without first popping the radial menu.
+ *
+ * "diagnosis" / "diagnose" / "diagnostics" are aliased to workshop
+ * because the user thinks of the Workshop view as the
+ * "diagnosis" screen (it runs the diagnose endpoint).
+ */
+const SUBVIEW_NOUNS: ReadonlyArray<{
+  noun: RegExp;
+  view: "spotify" | "workshop";
+  label: string;
+}> = [
+  {
+    noun: /spotify|music(?:\s*player)?|songs?|playlists?|audio\s*console/,
+    view: "spotify",
+    label: "Spotify",
+  },
+  {
+    noun: /workshop|diagnos(?:is|tics?|e)|self[-\s]*fix|self[-\s]*heal|repair(?:s)?/,
+    view: "workshop",
+    label: "the Workshop",
+  },
+];
+
 const NAV_VERB =
   /^(?:go(?:\s+back)?|take\s+me|switch|open|show\s+me|navigate|jump|bring\s+me|pull\s+up|head\s+(?:to|over)|move\s+to)/;
+
 function detectTabIntent(raw: string): TabIntent | null {
   const trimmed = raw.trim().toLowerCase().replace(/[.?!]+$/, "");
   if (!trimmed) return null;
@@ -132,6 +167,31 @@ function detectTabIntent(raw: string): TabIntent | null {
       "i",
     );
     if (full.test(stripped)) return { tab, label };
+  }
+  return null;
+}
+
+/**
+ * Detect a voice command to open one of the radial-menu sub-views
+ * (Spotify, Workshop). Same strict-match shape as ``detectTabIntent``
+ * — verb + noun + optional suffix, no extra words. Returns ``null``
+ * for anything that isn't a sub-view command.
+ */
+function detectSubViewIntent(
+  raw: string,
+): { view: "spotify" | "workshop"; label: string } | null {
+  const trimmed = raw.trim().toLowerCase().replace(/[.?!]+$/, "");
+  if (!trimmed) return null;
+  const stripped = trimmed.replace(/^(?:hey\s+|ok\s+)?alfred[,\s]+/, "").trim();
+  if (!stripped) return null;
+  if (stripped.split(/\s+/).length > 8) return null;
+  if (!NAV_VERB.test(stripped)) return null;
+  for (const { noun, view, label } of SUBVIEW_NOUNS) {
+    const full = new RegExp(
+      `^(?:go(?:\\s+back)?|take\\s+me|switch|open|show\\s+me|navigate|jump|bring\\s+me|pull\\s+up|head\\s+(?:to|over)|move\\s+to)\\s+(?:to\\s+|over\\s+to\\s+|into\\s+|me\\s+to\\s+|on\\s+to\\s+|back\\s+to\\s+)?(?:the\\s+)?(?:${noun.source})(?:\\s+(?:tab|screen|view|page|section|module|app))?$`,
+      "i",
+    );
+    if (full.test(stripped)) return { view, label };
   }
   return null;
 }
@@ -1033,8 +1093,30 @@ export function ChatWindow() {
         return;
       }
 
+      const subViewIntent = detectSubViewIntent(text);
+      if (subViewIntent) {
+        // Voice nav into a radial-menu sub-view (Spotify or Workshop).
+        // Closing the view ("go back to hud") is already handled by
+        // the regular tab intent below — this branch is only for
+        // OPENING a sub-view by name.
+        setSubView(subViewIntent.view);
+        const ack = `Opening ${subViewIntent.label}, sir.`;
+        setMessages((prev) => [
+          ...prev,
+          { id: crypto.randomUUID(), role: "user", content: text },
+          { id: crypto.randomUUID(), role: "assistant", content: ack },
+        ]);
+        if (voiceOut) void speak(ack);
+        return;
+      }
+
       const intent = detectTabIntent(text);
       if (intent) {
+        // Closing any open sub-view if the user is navigating to a
+        // real tab — otherwise "go to chat" while in the Spotify
+        // sub-view would silently flip the underlying activeTab but
+        // the sub-view would still cover the screen.
+        setSubView(null);
         setActiveTabPersisted(intent.tab);
         const ack = `Switching to ${intent.label}, sir.`;
         setMessages((prev) => [
@@ -1576,17 +1658,30 @@ export function ChatWindow() {
           <div
             data-testid="hands-free-composer-host"
             style={{
+              // Composer must stay mounted on every non-chat tab so
+              // the wake-word handler's ``handsFreeComposerRef`` is
+              // valid and ``startVoice()`` records audio. But the
+              // user doesn't want to SEE a chat input bar on the HUD,
+              // Workout, or Design tabs — just the orb + widgets.
+              // So on non-chat tabs we keep the Composer alive
+              // off-screen with no visual footprint, no pointer
+              // capture, no tab-stop. The HandsFreeOverlay (above)
+              // shows recording state, last utterance, and Alfred's
+              // last reply, which is the actual feedback the user
+              // wants on those tabs.
               display: activeTab === "chat" ? "none" : "block",
               position: "fixed",
-              bottom: 0,
-              left: 0,
-              right: 0,
-              zIndex: 4,
-              padding: "0 12px 8px",
-              pointerEvents: "auto",
-              background:
-                "linear-gradient(180deg, transparent 0%, rgba(0,0,0,0.6) 60%, rgba(0,0,0,0.85) 100%)",
+              left: -10000,
+              top: -10000,
+              width: 1,
+              height: 1,
+              opacity: 0,
+              pointerEvents: "none",
+              visibility: "hidden",
+              zIndex: -1,
+              overflow: "hidden",
             }}
+            aria-hidden="true"
           >
             <Composer
               ref={handsFreeComposerRef}
