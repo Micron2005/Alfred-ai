@@ -315,6 +315,26 @@ def test_document_url_strips_trailing_slash_from_base() -> None:
     assert url == "https://cad.onshape.com/documents/d/w/w"
 
 
+def test_query_string_url_encodes_special_chars() -> None:
+    """Signed query must match what httpx actually sends on the wire.
+
+    ``_onshape_request`` builds the string-to-sign from
+    ``urllib.parse.urlencode(params)``; httpx does the same under the
+    hood when it constructs the request URL. Special characters
+    (spaces, ``&``, ``=``, unicode) have to be percent-encoded
+    identically on both sides or the server's HMAC verifier sees a
+    different string than we signed and returns 401. Pin the
+    expected encoded form here.
+    """
+    from urllib.parse import urlencode  # local import for clarity
+
+    params = {"name": "hello world", "foo": "a&b=c"}
+    # ``urlencode`` default ``quote_via`` is ``quote_plus`` — spaces
+    # become ``+``, ``&`` and ``=`` are percent-encoded. This is
+    # exactly what httpx emits for query strings.
+    assert urlencode(params) == "name=hello+world&foo=a%26b%3Dc"
+
+
 async def test_publish_to_onshape_raises_without_keys() -> None:
     """Explicit error surfaces when Onshape keys aren't set."""
     s = Settings(

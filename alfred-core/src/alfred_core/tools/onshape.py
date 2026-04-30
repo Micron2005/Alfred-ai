@@ -34,6 +34,7 @@ import secrets
 from datetime import UTC, datetime
 from email.utils import format_datetime
 from typing import TYPE_CHECKING
+from urllib.parse import urlencode
 
 import httpx
 
@@ -158,10 +159,11 @@ async def _onshape_request(
 
     # Serialise the query string the same way httpx will, so the
     # signed query matches what the server actually receives. httpx
-    # uses ``urlencode`` under the hood, which is what Onshape expects.
-    query_string = ""
-    if params:
-        query_string = "&".join(f"{k}={v}" for k, v in params.items())
+    # uses ``urllib.parse.urlencode`` under the hood, so any special
+    # characters (spaces, ``&``, ``=``, unicode…) get percent-encoded
+    # identically on both sides — otherwise the signed and transmitted
+    # strings diverge and the server 401s silently.
+    query_string = urlencode(params) if params else ""
 
     content_type = ""
     if json_body is not None:
