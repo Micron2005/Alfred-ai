@@ -4,9 +4,9 @@
 
 A self-hosted personal AI assistant in the spirit of Alfred Pennyworth: dry, loyal, quietly competent. Inspired by JARVIS in capability, but with a butler's manners and a sarcastic streak.
 
-This is a personal assistant AI inspired by jarvis, but made to be your butler like alfred and will treat you like Batman for **Your_Name**
+This is a personal assistant AI Made to treat **Your_Name**
 
-## Current status: Phase 1 — Core chat scaffold
+## Current status: Self-Improvement/Developer Mode
 
 - [x] FastAPI backend (`alfred-core`) with Alfred persona
 - [x] Next.js chat UI (`alfred-web`)
