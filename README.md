@@ -4,7 +4,7 @@
 
 A self-hosted personal AI assistant in the spirit of Alfred Pennyworth: dry, loyal, quietly competent. Inspired by JARVIS in capability, but with a butler's manners and a sarcastic streak.
 
-This is a hobby project for **Mukarram Mohammad Alam**, built to run on a home PC and be reachable from anywhere via Tailscale.
+This is a personal assistant AI inspired by jarvis, but made to be your butler like alfred and will treat you like Batman for **Your_Name**
 
 ## Current status: Phase 1 — Core chat scaffold
 
@@ -16,7 +16,7 @@ This is a hobby project for **Mukarram Mohammad Alam**, built to run on a home P
 - [x] Docker Compose for one-command local run
 - [ ] Smart-home control via Home Assistant (Phase 2)
 - [ ] Creality K1 Max printer control + CAD generation (Phase 3)
-- [ ] Voice in/out with Whisper + Piper (Phase 4)
+- [x] Voice in/out with Whisper + Piper (Phase 4)
 - [ ] Feedback-driven LoRA fine-tuning (Phase 5)
 - [ ] Self-improvement / developer mode (Phase 6)
 - [ ] Mobile app (Phase 7)
@@ -49,7 +49,7 @@ See [docs/SETUP_WINDOWS_WSL.md](docs/SETUP_WINDOWS_WSL.md) for the detailed step
 Alfred has two modes:
 
 ### Standard Mode (default)
-Dry, witty, sarcastic British butler. Calls you **"sir"**. Knows your name is **Mukarram Mohammad Alam**. Helpful and loyal, but will happily puncture your ego when you deserve it.
+Dry, witty, sarcastic British butler. Calls you **"sir"**. Knows your name is **Your_Name**. Helpful and loyal, but will happily puncture your ego when you deserve it.
 
 ### Nightfall Protocol
 Triggered by saying **"Alfred, activate Nightfall Protocol"**. Alfred becomes more clipped, serious, and brooding. Still calls you "sir" but also addresses you as **"Batman"**. Web UI dims to a dark cape-and-cowl theme. Deactivated with **"Alfred, deactivate Nightfall Protocol"** or **"stand down"**.
