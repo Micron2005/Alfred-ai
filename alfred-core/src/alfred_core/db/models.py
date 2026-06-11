@@ -11,7 +11,7 @@ from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
 from pgvector.sqlalchemy import Vector
-from sqlalchemy import ForeignKey, String, Text
+from sqlalchemy import Boolean, ForeignKey, String, Text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
@@ -191,6 +191,43 @@ class MemoryNote(Base):
     markdown_filename: Mapped[str] = mapped_column(String(200), default="")
     embedding: Mapped[list[float] | None] = mapped_column(
         Vector(MEMORY_EMBEDDING_DIM), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(default=_utcnow)
+    updated_at: Mapped[datetime] = mapped_column(default=_utcnow, onupdate=_utcnow)
+
+
+# Identity vector dimensionality for face enrollments. Matches the
+# 96-D normalized pairwise-distance signature emitted by
+# ``alfred-web/src/lib/useFaceTracking.ts``. If you swap that
+# pipeline for a learned embedding (FaceNet 128-D, ArcFace 512-D),
+# update both this constant and the schema migration.
+FACE_IDENTITY_DIM = 96
+
+
+class FaceEnrollment(Base):
+    """A known face — name + identity vector — for the recognition
+    panel.
+
+    The identity vector comes from MediaPipe FaceLandmarker landmark
+    geometry on the client (cheap, no extra deps). For production
+    accuracy, swap the client-side vector for a learned face
+    embedding (see ``alfred_core.vision.face_recognition``).
+    """
+
+    __tablename__ = "face_enrollments"
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    name: Mapped[str] = mapped_column(String(120), index=True)
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # ``is_admin`` enrollments unlock privileged voice commands —
+    # most importantly the Nightfall protocol, which only flips
+    # when an admin face is currently in frame. There can be
+    # multiple admins (e.g. you + a trusted family member); they
+    # all carry equal weight. Defaults to false so casual
+    # enrollments via the panel never accidentally grant access.
+    is_admin: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    identity_vector: Mapped[list[float]] = mapped_column(
+        Vector(FACE_IDENTITY_DIM)
     )
     created_at: Mapped[datetime] = mapped_column(default=_utcnow)
     updated_at: Mapped[datetime] = mapped_column(default=_utcnow, onupdate=_utcnow)

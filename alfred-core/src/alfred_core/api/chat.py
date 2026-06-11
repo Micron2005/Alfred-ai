@@ -972,12 +972,22 @@ async def chat(req: ChatRequest, session: AsyncSession = Depends(get_session)) -
     except LLMUnavailableError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except Exception as exc:
+        # Surface the exception class too — some httpx / connection
+        # errors stringify as empty, which made the user-facing
+        # banner say "LLM backend failed: ." with no clue what went
+        # wrong. Including the class name keeps the hint useful
+        # even when the error has no message.
+        exc_text = str(exc).strip() or type(exc).__name__
         raise HTTPException(
             status_code=502,
             detail=(
-                f"LLM backend failed: {exc}. "
-                "If this is your first run, make sure Ollama is running and the "
-                "model in LOCAL_MODEL_CHAT has been pulled."
+                f"LLM backend failed: {exc_text}. "
+                "Two ways to fix this on your local PC: "
+                "(A) install Ollama on the host and run "
+                f"`ollama pull {settings.local_model_chat}` then `ollama serve`; "
+                "or (B) set `LOCAL_MODEL_CHAT=\"\"` and add a valid "
+                "`ANTHROPIC_API_KEY=sk-ant-…` in your .env, then "
+                "`docker compose restart` — Alfred will use Claude in the cloud."
             ),
         ) from exc
 

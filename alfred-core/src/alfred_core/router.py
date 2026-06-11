@@ -25,13 +25,18 @@ model or an LLM-based router). For now, simple is fine.
 
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass
+
+import httpx
 
 from alfred_core.config import Settings
 from alfred_core.llm.anthropic_backend import AnthropicBackend
 from alfred_core.llm.base import ChatMessage, ChatResponse, LLMBackend
 from alfred_core.llm.local import OllamaBackend
+
+_log = logging.getLogger(__name__)
 
 _CODE_SIGNALS = re.compile(
     r"\b("
@@ -41,6 +46,42 @@ _CODE_SIGNALS = re.compile(
     r")\b|```",
     re.IGNORECASE,
 )
+
+# Fast-tier qualifies short, conversational turns to a 3-4B model
+# instead of the 8B chat model. The whole point is shaving the
+# "thinking" pause on quick voice exchanges like "hey alfred",
+# "thanks", "what time is it", "set a timer for 5 minutes". For
+# anything that smells like a real query — code, long question,
+# document context — fall through to the smarter 8B model.
+_FAST_TIER_MAX_CHARS = 120
+# Markers that say "this is a real question, don't take a shortcut".
+_HEAVY_SIGNALS = re.compile(
+    r"\b(explain|why|how|describe|summari[sz]e|compare|design|plan|"
+    r"analy[sz]e|step.by.step|think\s+about|walk\s+me\s+through|elaborate|"
+    r"essay|paragraph|recipe|outline|story|article)\b",
+    re.IGNORECASE,
+)
+
+
+def _qualifies_for_fast_tier(text: str) -> bool:
+    """Return True iff the turn is short + conversational + non-coding.
+
+    Used by ``Router.pick`` to route to the 3.8B local model when the
+    user's turn is small-talk-shaped. Misses on this heuristic just
+    fall through to the regular 8B model — there's no quality risk,
+    only a perf miss.
+    """
+    if not text:
+        return False
+    if len(text) > _FAST_TIER_MAX_CHARS:
+        return False
+    if _CODE_SIGNALS.search(text):
+        return False
+    if _HEAVY_SIGNALS.search(text):
+        return False
+    # If the turn contains more than one sentence, it's probably a
+    # multi-part request — let the smarter model handle it.
+    return text.count(".") + text.count("?") + text.count("!") <= 1
 
 
 class VisionUnavailableError(RuntimeError):
@@ -54,6 +95,7 @@ class LLMUnavailableError(RuntimeError):
 @dataclass
 class Router:
     local: LLMBackend | None
+    local_fast: LLMBackend | None
     cloud: LLMBackend | None
     local_vision: LLMBackend | None
     use_cloud_for_coding: bool
@@ -69,6 +111,18 @@ class Router:
             local = OllamaBackend(
                 host=settings.ollama_host,
                 default_model=settings.local_model_chat,
+            )
+        # Fast-tier local model — phi3.5:3.8b by default. Used for
+        # short conversational turns ("hey alfred", "thanks", "what's
+        # the weather") where the 8B chat model's smarts are wasted
+        # and the 8B's 2-3s latency is the bottleneck. The 3.8B model
+        # responds in ~700ms on a typical CPU and feels instant on a
+        # GPU. We don't use it for code, vision, or long context.
+        local_fast: LLMBackend | None = None
+        if settings.has_local_chat and settings.local_model_fast.strip():
+            local_fast = OllamaBackend(
+                host=settings.ollama_host,
+                default_model=settings.local_model_fast,
             )
         cloud: LLMBackend | None = None
         if settings.has_cloud:
@@ -89,6 +143,7 @@ class Router:
             )
         return cls(
             local=local,
+            local_fast=local_fast,
             cloud=cloud,
             local_vision=local_vision,
             use_cloud_for_coding=settings.use_cloud_for_coding,
@@ -116,6 +171,14 @@ class Router:
             and _CODE_SIGNALS.search(last_user_message)
         ):
             return self.cloud
+        # Fast-tier path: short, conversational, non-coding turns go to
+        # the 3.8B local model. Roughly 3x faster than the 8B for
+        # what's overwhelmingly small-talk anyway.
+        if (
+            self.local_fast is not None
+            and _qualifies_for_fast_tier(last_user_message)
+        ):
+            return self.local_fast
         if self.local is not None:
             return self.local
         # No local — fall through to cloud. This is the
@@ -139,4 +202,27 @@ class Router:
         last_user_text = last_user_msg.content if last_user_msg else ""
         has_images = bool(last_user_msg and last_user_msg.images)
         backend = self.pick(last_user_text, has_images=has_images)
-        return await backend.complete(messages)
+        try:
+            return await backend.complete(messages)
+        except (httpx.TimeoutException, httpx.HTTPError, httpx.HTTPStatusError) as exc:
+            # Local Ollama fell over — most commonly a ReadTimeout when
+            # the model gets stuck looping on a tricky prompt. If the
+            # cloud (Anthropic) backend is configured AND we weren't
+            # already on it, transparently fall through. The user's
+            # turn still lands; he just gets a Claude reply instead of
+            # an Ollama one. Without this, the chat handler 502s and
+            # the user thinks Alfred is broken when in reality the
+            # local model just needed a poke.
+            is_local = (
+                backend is self.local
+                or backend is self.local_fast
+                or backend is self.local_vision
+            )
+            if is_local and self.cloud is not None:
+                _log.warning(
+                    "Local LLM failed (%s: %s) — falling back to cloud.",
+                    type(exc).__name__,
+                    exc,
+                )
+                return await self.cloud.complete(messages)
+            raise

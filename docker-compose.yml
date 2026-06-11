@@ -20,10 +20,18 @@ services:
     build:
       context: ./alfred-core
       dockerfile: Dockerfile
+      # Skip the Whisper pre-warm on tiny ARM SBCs (<= 2 GiB RAM)
+      # to avoid OOM during build. Comment out the line below on
+      # an x86 box for the snappier first /voice/stt response.
+      args:
+        ALFRED_SKIP_MODEL_PREFETCH: ${ALFRED_SKIP_MODEL_PREFETCH:-0}
     restart: unless-stopped
     env_file: .env
     environment:
       DATABASE_URL: ${DATABASE_URL}
+      # Tell the Workshop endpoint where the repo is on the
+      # container filesystem (matches the bind mount below).
+      ALFRED_REPO_ROOT: /app/repo
     depends_on:
       postgres:
         condition: service_healthy
@@ -35,10 +43,32 @@ services:
     # ``ALFRED_MEMORY_HOST_PATH`` isn't set in ``.env`` — handy on
     # Linux dev boxes. Windows users typically point this at
     # ``C:\Users\<them>\Documents\Alfred Memory``.
+    #
+    # Also bind-mount the host repo root at ``/app/repo`` so the
+    # Workshop self-coding endpoint can read the FULL project layout
+    # (alfred-core/src, alfred-web/src, scripts, docs, tests). Without
+    # this, the alfred-core container only sees its own src/ subtree
+    # and the Workshop file picker comes up empty. Writes go straight
+    # to the host repo so commit-push works on the user's actual git
+    # tree. ``ALFRED_REPO_ROOT`` (env below) tells the workshop
+    # endpoint to resolve the allowlist against this mount.
     volumes:
       - ${ALFRED_MEMORY_HOST_PATH:-./alfred-memory}:/app/alfred-memory
+      - .:/app/repo
+      # ─── Wingman file browsing (uncomment to enable) ────────────────
+      # Uncomment the lines below AND set ALFRED_ALLOWED_DIRS in .env
+      # to the matching in-container paths to let Alfred read your
+      # host's Documents / Downloads / Projects folders. ``:ro`` keeps
+      # the mount read-only so Alfred can never modify your files.
+      # See docs/WINGMAN.md for the full walkthrough.
+      # - ${HOME}/Documents:/host/Documents:ro
+      # - ${HOME}/Downloads:/host/Downloads:ro
+      # - ${HOME}/Projects:/host/Projects:ro
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    # Inherit the HEALTHCHECK from the Dockerfile so `docker compose ps`
+    # shows real readiness — a "running" alfred-core is not the same as
+    # one that's actually finished init_db() and is serving requests.
 
   alfred-web:
     build:
@@ -50,11 +80,19 @@ services:
         # change them, run `docker compose up --build`.
         NEXT_PUBLIC_API_BASE: ${NEXT_PUBLIC_API_BASE}
         NEXT_PUBLIC_WAKE_KEYWORD: ${NEXT_PUBLIC_WAKE_KEYWORD}
+        # Mapbox public token for the holographic Earth's 3D
+        # fly-over view (HoloMapView). Inlined at build time.
+        NEXT_PUBLIC_MAPBOX_ACCESS_TOKEN: ${NEXT_PUBLIC_MAPBOX_ACCESS_TOKEN}
     restart: unless-stopped
     environment:
       NEXT_PUBLIC_API_BASE: ${NEXT_PUBLIC_API_BASE}
+      NEXT_PUBLIC_MAPBOX_ACCESS_TOKEN: ${NEXT_PUBLIC_MAPBOX_ACCESS_TOKEN}
     depends_on:
-      - alfred-core
+      alfred-core:
+        # Wait for /health to actually return 200, not just for the
+        # process to start. Saves ~10 s of "Alfred is unreachable"
+        # errors in the browser on first boot.
+        condition: service_healthy
     ports:
       - "3000:3000"
 

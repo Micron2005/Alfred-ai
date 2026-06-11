@@ -212,3 +212,41 @@ async def delete_conversation(
         raise HTTPException(status_code=404, detail="Conversation not found.")
     await session.delete(convo)
     await session.commit()
+
+
+class _ModePatch(BaseModel):
+    """Body for ``PATCH /conversations/{id}/mode``.
+
+    The frontend already intercepts ``activate nightfall protocol`` /
+    ``stand down`` voice intents to give the user instant feedback
+    (and to gate Nightfall on a recognised admin face). When that
+    happens the chat handler never gets the chance to flip the
+    conversation's persisted ``mode`` column, so the next ordinary
+    message — read by the chat handler — would still see
+    ``standard`` and reply in the wrong persona, effectively
+    cancelling Nightfall behind the user's back. This endpoint lets
+    the frontend persist the mode change once the gate has passed.
+    """
+
+    mode: str
+
+
+@router.patch("/{conversation_id}/mode", status_code=204)
+async def set_conversation_mode(
+    conversation_id: UUID,
+    patch: _ModePatch,
+    session: AsyncSession = Depends(get_session),
+) -> None:
+    if patch.mode not in ("standard", "nightfall"):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Unknown mode {patch.mode!r}. Expected 'standard' or "
+                "'nightfall'."
+            ),
+        )
+    convo = await session.get(Conversation, conversation_id)
+    if convo is None:
+        raise HTTPException(status_code=404, detail="Conversation not found.")
+    convo.mode = patch.mode
+    await session.commit()

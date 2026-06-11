@@ -1,101 +1,90 @@
 "use client";
 
 /**
- * HandCursor — visualizes hand-tracking and synthesizes real DOM
- * pointer events so existing widget interactions (drag, click,
- * slider) work without per-component plumbing.
+ * HandCursor — synthetic pointer events from MediaPipe hand landmarks.
  *
- * Phase 12c.3: handles up to two hands. The right hand is the
- * cursor / pointer hand — its index fingertip drives the cursor
- * dot AND is the source of synthetic pointer events. The left hand
- * is the modifier / tool hand — only rendered as a skeleton in
- * gold; pinches on the left hand do NOT dispatch synthetic pointer
- * events (otherwise two-handed pinches would fire double clicks).
+ * Both hands are first-class cursors: each renders a glowing dot at
+ * its index fingertip, each fires synthetic pointerdown / pointermove
+ * / pointerup / click on pinch. They use distinct PointerEvent
+ * ``pointerId`` values so widgets that track per-pointer state (e.g.
+ * setPointerCapture) can keep them separate.
  *
- * Synthetic events fired on the element under the right cursor:
- *   - ``pointerdown`` when a right pinch starts
- *   - ``pointermove`` every frame while the right cursor moves
- *   - ``pointerup`` + ``click`` when the right pinch releases
+ * Two-hand pinch (both hands pinching at the same time) suppresses
+ * single-hand clicks — the user's intent is a resize, not a click.
+ * Active drags release cleanly via pointerup with no following click.
  *
- * Synthetic events use a dedicated ``pointerId`` of ``9999`` so
- * they don't collide with real touch / pen / mouse pointers.
+ * Skeleton overlay can be hidden via ``hideSkeleton`` (default
+ * false). When hidden, only the cursor dot remains. Useful when the
+ * HUD is projected onto a desk and the user can see their own hands
+ * already.
  */
 
 import { useEffect, useRef } from "react";
 import type { CursorPoint, HandState } from "@/lib/useHandTracking";
 
-interface Props {
-  enabled: boolean;
-  /** Right (cursor) hand state. ``null`` when not visible. */
-  rightHand: HandState | null;
-  /** Left (modifier) hand state. ``null`` when not visible. */
-  leftHand: HandState | null;
-}
-
 // MediaPipe's official HAND_CONNECTIONS list. Each pair is two
-// landmark indices that should be joined by a bone-segment line
-// when rendering a skeleton.
-// Reference:
-// https://developers.google.com/mediapipe/solutions/vision/hand_landmarker#models
+// landmark indices that should be drawn as a bone segment. Kept
+// inline (not imported) so HandCursor stays self-contained.
 const HAND_CONNECTIONS: ReadonlyArray<readonly [number, number]> = [
   // Thumb
-  [0, 1],
-  [1, 2],
-  [2, 3],
-  [3, 4],
-  // Index
-  [0, 5],
-  [5, 6],
-  [6, 7],
-  [7, 8],
-  // Middle
-  [5, 9],
-  [9, 10],
-  [10, 11],
-  [11, 12],
-  // Ring
-  [9, 13],
-  [13, 14],
-  [14, 15],
-  [15, 16],
-  // Pinky
-  [13, 17],
-  [17, 18],
-  [18, 19],
-  [19, 20],
-  // Wrist ↔ pinky base (closes the palm)
-  [0, 17],
+  [0, 1], [1, 2], [2, 3], [3, 4],
+  // Index finger
+  [0, 5], [5, 6], [6, 7], [7, 8],
+  // Middle finger
+  [9, 10], [10, 11], [11, 12],
+  // Ring finger
+  [13, 14], [14, 15], [15, 16],
+  // Pinky finger
+  [0, 17], [17, 18], [18, 19], [19, 20],
+  // Palm
+  [5, 9], [9, 13], [13, 17],
 ];
-
-// Indices of the five fingertips. Rendered with a slightly bigger
-// dot so the user can see where each finger ends.
 const FINGERTIPS = [4, 8, 12, 16, 20] as const;
 
-const SYNTHETIC_POINTER_ID = 9999;
-
 const CYAN_STROKE = "rgba(0, 229, 255, 0.95)";
-const CYAN_FILL = "rgba(0, 229, 255, 0.18)";
+const CYAN_FILL = "rgba(0, 229, 255, 0.65)";
 const GOLD_STROKE = "rgba(255, 200, 60, 0.95)";
-const GOLD_FILL = "rgba(255, 200, 60, 0.22)";
-const PINCH_FLASH = "rgba(255, 200, 60, 0.95)";
+const GOLD_FILL = "rgba(255, 200, 60, 0.6)";
+const PINCH_FLASH = "rgba(255, 240, 100, 0.95)";
 
-function elementAt(x: number, y: number): Element | null {
-  if (typeof document === "undefined") return null;
-  return document.elementFromPoint(x, y);
+interface Props {
+  enabled: boolean;
+  rightHand: HandState | null;
+  leftHand: HandState | null;
+  /** Hide the bone overlay + landmark dots while keeping the
+   *  fingertip cursor visible. Persisted by the parent. */
+  hideSkeleton?: boolean;
+}
+
+interface PointerInit {
+  pointerId: number;
+  pointerType: string;
+  isPrimary: boolean;
+  bubbles: boolean;
+  cancelable: boolean;
+  composed: boolean;
+  clientX: number;
+  clientY: number;
+  screenX: number;
+  screenY: number;
+  button: number;
+  buttons: number;
+  view?: Window;
 }
 
 function buildPointerInit(
   x: number,
   y: number,
   buttons: number,
-): PointerEventInit {
+  pointerId: number,
+): PointerInit {
   return {
+    pointerId,
+    pointerType: "pen", // "pen" matches stylus / fingertip semantics best
+    isPrimary: pointerId === 9999, // right hand acts as the primary pointer
     bubbles: true,
     cancelable: true,
     composed: true,
-    pointerId: SYNTHETIC_POINTER_ID,
-    pointerType: "mouse",
-    isPrimary: true,
     clientX: x,
     clientY: y,
     screenX: x,
@@ -106,17 +95,17 @@ function buildPointerInit(
   };
 }
 
+function elementAt(x: number, y: number): Element | null {
+  if (typeof document === "undefined") return null;
+  return document.elementFromPoint(x, y);
+}
+
 interface SkeletonProps {
   landmarks: CursorPoint[];
-  /** Stroke color for bones + non-tip landmarks. */
   stroke: string;
-  /** Fill color for non-tip landmarks. */
   fill: string;
-  /** ``true`` flashes the thumb + index tips gold to confirm pinch. */
   pinching: boolean;
-  /** Bone-line width — slightly thicker while pinching. */
   baseStroke: number;
-  /** SVG filter id (each hand needs its own glow defs). */
   filterId: string;
 }
 
@@ -169,302 +158,317 @@ function HandSkeleton({
   );
 }
 
-export function HandCursor({ enabled, rightHand, leftHand }: Props) {
-  // Tracks the *raw* right-hand pinch state from the previous
-  // frame so we can detect genuine pinch starts (false → true)
-  // and pinch ends (true → false) regardless of what the left
-  // hand is doing. Critical for distinguishing "user just started
-  // pinching" from "user dropped the left modifier while still
-  // pinching with the right" — the latter must NOT fire a new
-  // pointerdown.
-  const prevRawRightPinchRef = useRef(false);
-  // Tracks whether we currently hold an outstanding synthetic
-  // pointerdown that needs an eventual pointerup. ``true`` only
-  // between a pointerdown we dispatched and the matching pointerup.
-  const synthDownActiveRef = useRef(false);
-  const lastPosRef = useRef<CursorPoint | null>(null);
-  // The element the pinch *started* on. Used so the click event at
-  // pointerup goes to the right place if the cursor strayed off the
-  // original target during the gesture.
-  const downTargetRef = useRef<Element | null>(null);
+/**
+ * Per-hand state used by the synthetic-pointer-event effect. Kept as
+ * a single ref so the effect closure sees fresh values without re-
+ * binding (each frame's effect re-mutates the ref in place).
+ */
+interface HandPointerState {
+  prevPinch: boolean;
+  synthDownActive: boolean;
+  lastPos: CursorPoint | null;
+  downTarget: Element | null;
+}
 
-  const cursor = rightHand?.cursor ?? null;
-  const rawRightPinch = !!rightHand?.isPinching;
-  // The left hand counts as a "modifier" (suppressing single-hand
-  // pinch semantics) only when it's deliberately pinching — NOT
-  // when its pinch latch was incidentally tripped by a closed
-  // fist tucking the thumb against the fingers. Without this
-  // guard, every left-fist (which opens the Quick Tools menu)
-  // would also suppress all right-hand clicks, making the menu
-  // items unreachable.
-  const leftPinchModifier =
-    !!leftHand?.isPinching && !leftHand?.isFist;
+function newState(): HandPointerState {
+  return {
+    prevPinch: false,
+    synthDownActive: false,
+    lastPos: null,
+    downTarget: null,
+  };
+}
 
-  // Fire a clean (pointerup, pointercancel) pair on the captured
-  // down target if we currently hold a synthetic pointerdown. Used
-  // by both teardown paths (tracking toggled off, hand left the
-  // frame). Routing to ``downTargetRef`` rather than
-  // ``elementAt(x, y)`` is critical: during a drag the cursor may
-  // have moved off the original widget, so events sent to the
-  // current hover target would never reach the HudWidget that owns
-  // the gesture, leaving its drag state stuck.
-  function teardownDown() {
-    if (!synthDownActiveRef.current) return;
-    const last = lastPosRef.current;
-    const target = downTargetRef.current;
-    if (!target || !last) return;
-    target.dispatchEvent(
-      new PointerEvent("pointerup", buildPointerInit(last.x, last.y, 0)),
-    );
-    target.dispatchEvent(
-      new PointerEvent("pointercancel", buildPointerInit(last.x, last.y, 0)),
-    );
-  }
+export function HandCursor({
+  enabled,
+  rightHand,
+  leftHand,
+  hideSkeleton = false,
+}: Props) {
+  // Independent state per hand. Right uses pointerId 9999 (primary),
+  // left uses 8888 — keeps any setPointerCapture() handlers in
+  // widgets cleanly separated.
+  const rightStateRef = useRef<HandPointerState>(newState());
+  const leftStateRef = useRef<HandPointerState>(newState());
 
+  // Disabled / both hands gone → release any held pointers cleanly.
   useEffect(() => {
-    if (!enabled) {
-      // If hand tracking gets toggled off mid-pinch, fire a
-      // synthetic pointerup on the *down target* (not whatever's
-      // under the cursor right now) so the widget that owns the
-      // drag sees a matched up event and cleans up its
-      // setPointerCapture / drag state. Otherwise dragRef stays
-      // non-null and isDragging never clears, leaving the widget
-      // stuck "grabbing" until reload.
-      teardownDown();
-      synthDownActiveRef.current = false;
-      prevRawRightPinchRef.current = false;
-      lastPosRef.current = null;
-      downTargetRef.current = null;
-      return;
-    }
+    if (enabled) return;
+    teardown(rightStateRef.current, 9999);
+    teardown(leftStateRef.current, 8888);
+    rightStateRef.current = newState();
+    leftStateRef.current = newState();
+  }, [enabled]);
 
-    if (!cursor) {
-      // Right hand left the frame — same release path as
-      // toggle-off. Note: a left-hand-only frame still hits this
-      // branch, which is correct — we don't want a phantom right
-      // cursor lingering at its last position.
-      teardownDown();
-      synthDownActiveRef.current = false;
-      prevRawRightPinchRef.current = false;
-      lastPosRef.current = null;
-      downTargetRef.current = null;
-      return;
-    }
-
-    const { x, y } = cursor;
-    const last = lastPosRef.current;
-    const wasRawRightPinch = prevRawRightPinchRef.current;
-    const wasSynthDownActive = synthDownActiveRef.current;
-    const buttons = wasSynthDownActive ? 1 : 0;
-    const hover = elementAt(x, y);
-
-    // pointerdown — fires only when the right hand's RAW pinch
-    // transitions false → true AND no left modifier is currently
-    // active. Using the raw transition (not the gated
-    // ``isPinching`` value) prevents a spurious pointerdown when
-    // the user finishes a two-hand resize by releasing the left
-    // hand first while the right hand is still physically
-    // pinching: in that case the gated value would flip false →
-    // true with no actual new pinch, and a stale right-pinch
-    // would synthesise a click on whatever's under the cursor.
-    const rawRightJustStarted = rawRightPinch && !wasRawRightPinch;
-    if (
-      rawRightJustStarted &&
-      !leftPinchModifier &&
-      !wasSynthDownActive &&
-      hover
-    ) {
-      downTargetRef.current = hover;
-      synthDownActiveRef.current = true;
-      hover.dispatchEvent(
-        new PointerEvent("pointerdown", buildPointerInit(x, y, 1)),
-      );
-    }
-
-    // While we hold an outstanding pointerdown, route pointermove
-    // + pointerup to the element the gesture started on, NOT
-    // whatever's currently under the cursor. This emulates the
-    // browser's native pointer-capture behavior: synthetic events
-    // bypass setPointerCapture (the browser only tracks real
-    // hardware pointers), so the widget would lose move events
-    // the moment the cursor strayed off its bounds during a fast
-    // drag. Manual capture here makes the gesture stick to the
-    // original target until release.
-    const moveTarget = synthDownActiveRef.current
-      ? (downTargetRef.current ?? hover)
-      : hover;
-
-    // pointermove — fire whenever the cursor actually changed
-    // position. This covers both hovering and dragging.
-    if (last && (last.x !== x || last.y !== y) && moveTarget) {
-      moveTarget.dispatchEvent(
-        new PointerEvent("pointermove", buildPointerInit(x, y, buttons)),
-      );
-    }
-
-    // pointerup + click — fires when our held synthetic
-    // pointerdown needs to be released. Two distinct paths:
-    //
-    //   1. Genuine release: raw right pinch transitioned true →
-    //      false. Both pointerup AND click fire (click respects
-    //      the same drag-off-target → no-click rule that mouse
-    //      events follow).
-    //   2. Modifier interruption: raw right is still pinching but
-    //      the left hand started its own deliberate pinch. The
-    //      user's intent is now a two-hand resize, not a click —
-    //      fire pointerup so any in-progress drag releases
-    //      cleanly, but skip the click.
-    //
-    // ``synthDownActiveRef`` is the source of truth for "do we
-    // owe a pointerup to someone?" — using a raw-transition test
-    // here would miss the modifier-interruption case.
-    const rawRightJustEnded = !rawRightPinch && wasRawRightPinch;
-    const shouldRelease =
-      wasSynthDownActive && (rawRightJustEnded || leftPinchModifier);
-    if (shouldRelease) {
-      const downTarget = downTargetRef.current;
-      if (downTarget) {
-        downTarget.dispatchEvent(
-          new PointerEvent("pointerup", buildPointerInit(x, y, 0)),
-        );
-      }
-      const clickTarget = hover ?? downTarget;
-      if (
-        rawRightJustEnded &&
-        clickTarget &&
-        clickTarget === downTarget
-      ) {
-        clickTarget.dispatchEvent(
-          new MouseEvent("click", {
-            bubbles: true,
-            cancelable: true,
-            composed: true,
-            clientX: x,
-            clientY: y,
-            button: 0,
-            buttons: 0,
-            view: typeof window !== "undefined" ? window : undefined,
-          }),
-        );
-      }
-      synthDownActiveRef.current = false;
-      downTargetRef.current = null;
-    }
-
-    prevRawRightPinchRef.current = rawRightPinch;
-    lastPosRef.current = { x, y };
-  }, [enabled, cursor, rawRightPinch, leftPinchModifier]);
+  // Per-frame dispatcher. Runs on every render because hand frames
+  // come in via refs (the parent re-renders ChatWindow on each
+  // MediaPipe tick). Independent for each hand.
+  useEffect(() => {
+    if (!enabled) return;
+    const otherPinching = !!leftHand?.isPinching && !!rightHand?.isPinching;
+    runHandFrame({
+      hand: rightHand,
+      state: rightStateRef.current,
+      pointerId: 9999,
+      otherPinching,
+    });
+    runHandFrame({
+      hand: leftHand,
+      state: leftStateRef.current,
+      pointerId: 8888,
+      otherPinching,
+    });
+  });
 
   if (!enabled) return null;
-  // No hands visible at all — nothing to draw, but stay mounted so
-  // the gesture-cleanup effect above keeps running.
   if (!rightHand && !leftHand) return null;
 
-  // Visual pinch state reflects the *actual* right pinch — the
-  // user should see feedback that their pinch was detected even
-  // when the synthetic-event gate suppresses clicks (e.g. during
-  // two-handed resize).
-  const visualPinch = !!rightHand?.isPinching;
-  const cursorSize = visualPinch ? 28 : 22;
-  const cursorRing = visualPinch ? 3 : 2;
-
-  // Pinch-aware stroke widths: thicker bones when actively
-  // pinching, so the user gets a subtle "I see your gesture" hint.
   const rightStroke = rightHand?.isPinching ? 3.5 : 2.5;
   const leftStroke = leftHand?.isPinching ? 3.5 : 2.5;
 
   return (
     <>
-      {/*
-        Skeleton overlay — renders both hand meshes when available.
-        SVG sized to the viewport so coordinates can be used directly
-        without per-frame re-projection. ``pointer-events: none`` is
-        critical: the synthetic-event dispatcher relies on
-        ``elementFromPoint`` seeing widgets *under* the overlay, not
-        the overlay itself.
-      */}
-      <svg
-        aria-hidden
-        style={{
-          position: "fixed",
-          inset: 0,
-          width: "100vw",
-          height: "100vh",
-          pointerEvents: "none",
-          zIndex: 99998,
-        }}
-      >
-        <defs>
-          <filter id="hand-cursor-glow-right">
-            <feGaussianBlur stdDeviation="2.5" result="blur" />
-            <feMerge>
-              <feMergeNode in="blur" />
-              <feMergeNode in="SourceGraphic" />
-            </feMerge>
-          </filter>
-          <filter id="hand-cursor-glow-left">
-            <feGaussianBlur stdDeviation="2.5" result="blur" />
-            <feMerge>
-              <feMergeNode in="blur" />
-              <feMergeNode in="SourceGraphic" />
-            </feMerge>
-          </filter>
-        </defs>
-        {leftHand && leftHand.landmarks.length === 21 ? (
-          <HandSkeleton
-            landmarks={leftHand.landmarks}
-            stroke={GOLD_STROKE}
-            fill={GOLD_FILL}
-            pinching={leftHand.isPinching}
-            baseStroke={leftStroke}
-            filterId="hand-cursor-glow-left"
-          />
-        ) : null}
-        {rightHand && rightHand.landmarks.length === 21 ? (
-          <HandSkeleton
-            landmarks={rightHand.landmarks}
-            stroke={CYAN_STROKE}
-            fill={CYAN_FILL}
-            pinching={rightHand.isPinching}
-            baseStroke={rightStroke}
-            filterId="hand-cursor-glow-right"
-          />
-        ) : null}
-      </svg>
-
-      {/*
-        Cursor dot — the right-hand index-fingertip indicator. Even
-        with the full skeleton drawn, a dedicated dot helps the user
-        track exactly where their click/grab will land. Only the
-        right (cursor) hand gets one — the left hand is the modifier
-        / tool hand and isn't a pointer.
-      */}
-      {cursor ? (
-        <div
+      {!hideSkeleton ? (
+        <svg
           aria-hidden
+          data-testid="hand-skeleton-overlay"
           style={{
             position: "fixed",
-            left: cursor.x - cursorSize / 2,
-            top: cursor.y - cursorSize / 2,
-            width: cursorSize,
-            height: cursorSize,
-            borderRadius: "50%",
-            border: `${cursorRing}px solid ${CYAN_STROKE}`,
-            boxShadow: visualPinch
-              ? "0 0 18px 4px rgba(0, 229, 255, 0.55), 0 0 38px 12px rgba(255, 200, 60, 0.35)"
-              : "0 0 14px 3px rgba(0, 229, 255, 0.45)",
-            background: visualPinch
-              ? "rgba(255, 200, 60, 0.30)"
-              : "rgba(0, 229, 255, 0.10)",
-            // The cursor must NOT eat the events it dispatches —
-            // ``pointer-events: none`` ensures elementFromPoint sees
-            // the widget below, not the cursor itself.
+            inset: 0,
+            width: "100vw",
+            height: "100vh",
             pointerEvents: "none",
-            zIndex: 99999,
-            transition: "width 80ms ease, height 80ms ease",
+            zIndex: 99998,
           }}
-        />
+        >
+          <defs>
+            <filter id="hand-cursor-glow-right">
+              <feGaussianBlur stdDeviation="2.5" result="blur" />
+              <feMerge>
+                <feMergeNode in="blur" />
+                <feMergeNode in="SourceGraphic" />
+              </feMerge>
+            </filter>
+            <filter id="hand-cursor-glow-left">
+              <feGaussianBlur stdDeviation="2.5" result="blur" />
+              <feMerge>
+                <feMergeNode in="blur" />
+                <feMergeNode in="SourceGraphic" />
+              </feMerge>
+            </filter>
+          </defs>
+          {leftHand && leftHand.landmarks.length === 21 ? (
+            <HandSkeleton
+              landmarks={leftHand.landmarks}
+              stroke={GOLD_STROKE}
+              fill={GOLD_FILL}
+              pinching={leftHand.isPinching}
+              baseStroke={leftStroke}
+              filterId="hand-cursor-glow-left"
+            />
+          ) : null}
+          {rightHand && rightHand.landmarks.length === 21 ? (
+            <HandSkeleton
+              landmarks={rightHand.landmarks}
+              stroke={CYAN_STROKE}
+              fill={CYAN_FILL}
+              pinching={rightHand.isPinching}
+              baseStroke={rightStroke}
+              filterId="hand-cursor-glow-right"
+            />
+          ) : null}
+        </svg>
       ) : null}
+
+      {/* Both hands get a cursor dot now — they're equal cursors. The
+          dots are color-coded so the user can tell which hand is
+          which when projected onto a desk. */}
+      <CursorDot
+        hand={rightHand}
+        stroke={CYAN_STROKE}
+        rgbGlow="0, 229, 255"
+        testId="hand-cursor-right"
+      />
+      <CursorDot
+        hand={leftHand}
+        stroke={GOLD_STROKE}
+        rgbGlow="255, 200, 60"
+        testId="hand-cursor-left"
+      />
     </>
   );
+}
+
+function CursorDot({
+  hand,
+  stroke,
+  rgbGlow,
+  testId,
+}: {
+  hand: HandState | null;
+  stroke: string;
+  rgbGlow: string;
+  testId: string;
+}) {
+  const cursor = hand?.cursor ?? null;
+  if (!cursor) return null;
+  const pinching = !!hand?.isPinching;
+  const size = pinching ? 28 : 22;
+  const ring = pinching ? 3 : 2;
+  return (
+    <div
+      data-testid={testId}
+      aria-hidden
+      style={{
+        position: "fixed",
+        left: cursor.x - size / 2,
+        top: cursor.y - size / 2,
+        width: size,
+        height: size,
+        borderRadius: "50%",
+        border: `${ring}px solid ${stroke}`,
+        boxShadow: pinching
+          ? `0 0 18px 4px rgba(${rgbGlow}, 0.55), 0 0 38px 12px rgba(255, 240, 100, 0.35)`
+          : `0 0 14px 3px rgba(${rgbGlow}, 0.45)`,
+        background: pinching
+          ? "rgba(255, 240, 100, 0.30)"
+          : `rgba(${rgbGlow}, 0.10)`,
+        // Cursor must not intercept events it dispatches.
+        pointerEvents: "none",
+        zIndex: 99999,
+        transition: "width 80ms ease, height 80ms ease",
+      }}
+    />
+  );
+}
+
+/**
+ * Per-hand frame processor. Mutates ``state`` in place and dispatches
+ * synthetic pointer events.
+ *
+ * Behavior:
+ *   - Pinch start (raw false → true), other hand NOT pinching: dispatch
+ *     pointerdown on whatever's under the fingertip.
+ *   - While pinching: dispatch pointermove to the original downTarget
+ *     (manual pointer-capture emulation).
+ *   - Pinch end (raw true → false): dispatch pointerup + click on the
+ *     downTarget IF the cursor is still over it.
+ *   - Other hand starts pinching mid-gesture: dispatch pointerup
+ *     (no click) so any in-flight drag releases cleanly. The two-hand
+ *     resize handler in the widget takes over from here.
+ */
+function runHandFrame({
+  hand,
+  state,
+  pointerId,
+  otherPinching,
+}: {
+  hand: HandState | null;
+  state: HandPointerState;
+  pointerId: number;
+  otherPinching: boolean;
+}): void {
+  const cursor = hand?.cursor ?? null;
+  if (!cursor) {
+    // Hand left the frame — release any held pointer.
+    teardown(state, pointerId);
+    state.prevPinch = false;
+    state.lastPos = null;
+    return;
+  }
+
+  const { x, y } = cursor;
+  const last = state.lastPos;
+  const wasPinch = state.prevPinch;
+  const rawPinch = !!hand?.isPinching;
+  const wasSynthDownActive = state.synthDownActive;
+  const buttons = wasSynthDownActive ? 1 : 0;
+  const hover = elementAt(x, y);
+
+  // pointerdown — on raw pinch start, but ONLY if the other hand
+  // isn't already pinching (that's a resize gesture, not a click).
+  const justStarted = rawPinch && !wasPinch;
+  if (justStarted && !otherPinching && !wasSynthDownActive && hover) {
+    state.downTarget = hover;
+    state.synthDownActive = true;
+    hover.dispatchEvent(
+      new PointerEvent("pointerdown", buildPointerInit(x, y, 1, pointerId)),
+    );
+  }
+
+  // pointermove — route to the original downTarget while a synthetic
+  // pointerdown is held, so a fast drag that strays off the original
+  // widget still reaches it.
+  const moveTarget = state.synthDownActive
+    ? (state.downTarget ?? hover)
+    : hover;
+  if (last && (last.x !== x || last.y !== y) && moveTarget) {
+    moveTarget.dispatchEvent(
+      new PointerEvent(
+        "pointermove",
+        buildPointerInit(x, y, buttons, pointerId),
+      ),
+    );
+  }
+
+  // Release path:
+  //   - genuine release: rawPinch true → false → pointerup + click
+  //   - resize takeover: other hand started pinching → pointerup, no click
+  const justEnded = !rawPinch && wasPinch;
+  const shouldRelease =
+    wasSynthDownActive && (justEnded || otherPinching);
+  if (shouldRelease) {
+    const downTarget = state.downTarget;
+    if (downTarget) {
+      downTarget.dispatchEvent(
+        new PointerEvent("pointerup", buildPointerInit(x, y, 0, pointerId)),
+      );
+    }
+    const clickTarget = hover ?? downTarget;
+    if (justEnded && clickTarget && clickTarget === downTarget) {
+      clickTarget.dispatchEvent(
+        new MouseEvent("click", {
+          bubbles: true,
+          cancelable: true,
+          composed: true,
+          clientX: x,
+          clientY: y,
+          button: 0,
+          buttons: 0,
+          view: typeof window !== "undefined" ? window : undefined,
+        }),
+      );
+    }
+    state.synthDownActive = false;
+    state.downTarget = null;
+  }
+
+  state.prevPinch = rawPinch;
+  state.lastPos = { x, y };
+}
+
+/**
+ * Release any held synthetic pointer cleanly. Used on disable /
+ * hand-left-frame. Routes events to the captured downTarget so the
+ * widget that owns the gesture sees a matched up event.
+ */
+function teardown(state: HandPointerState, pointerId: number): void {
+  if (!state.synthDownActive) return;
+  const target = state.downTarget;
+  const last = state.lastPos;
+  if (!target || !last) return;
+  target.dispatchEvent(
+    new PointerEvent(
+      "pointerup",
+      buildPointerInit(last.x, last.y, 0, pointerId),
+    ),
+  );
+  target.dispatchEvent(
+    new PointerEvent(
+      "pointercancel",
+      buildPointerInit(last.x, last.y, 0, pointerId),
+    ),
+  );
+  state.synthDownActive = false;
+  state.downTarget = null;
 }

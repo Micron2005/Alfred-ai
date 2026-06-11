@@ -1,6 +1,19 @@
 export const API_BASE =
   process.env.NEXT_PUBLIC_API_BASE ?? "http://localhost:8000";
 
+/**
+ * Default fetch options shared by every API client call.
+ *
+ * ``credentials: "include"`` is essential — Alfred's password gate
+ * issues HTTP-only cookies and the browser will only send them on
+ * cross-origin requests when the call explicitly opts in. (When the
+ * gate is disabled the cookies just aren't there, so this is a
+ * harmless no-op.)
+ */
+export const FETCH_DEFAULTS: RequestInit = {
+  credentials: "include",
+};
+
 export type Mode = "standard" | "nightfall";
 
 export interface ChatImage {
@@ -97,6 +110,7 @@ export async function sendMessage(
   sketch: SketchSignal | null = null,
 ): Promise<ChatReply> {
   const resp = await fetch(`${API_BASE}/chat`, {
+    ...FETCH_DEFAULTS,
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -152,23 +166,49 @@ export async function readFileAsChatImage(file: File): Promise<ChatImage> {
 }
 
 export async function listConversations(): Promise<ConversationSummary[]> {
-  const resp = await fetch(`${API_BASE}/conversations`);
+  const resp = await fetch(`${API_BASE}/conversations`, FETCH_DEFAULTS);
   if (!resp.ok) throw new Error("Could not list conversations");
   const data = (await resp.json()) as { conversations: ConversationSummary[] };
   return data.conversations;
 }
 
 export async function getConversation(id: string): Promise<ConversationDetail> {
-  const resp = await fetch(`${API_BASE}/conversations/${id}`);
+  const resp = await fetch(`${API_BASE}/conversations/${id}`, FETCH_DEFAULTS);
   if (!resp.ok) throw new Error("Could not load conversation");
   return resp.json() as Promise<ConversationDetail>;
 }
 
 export async function deleteConversation(id: string): Promise<void> {
   const resp = await fetch(`${API_BASE}/conversations/${id}`, {
+    ...FETCH_DEFAULTS,
     method: "DELETE",
   });
   if (!resp.ok) throw new Error("Could not delete conversation");
+}
+
+/**
+ * Persist the conversation's mode column. Used by the frontend's
+ * "activate / deactivate nightfall protocol" intent handler — the
+ * canned acknowledgement path bypasses the chat handler, so without
+ * this the next ordinary message would re-read the conversation in
+ * its OLD mode and silently flip the persona back. Best-effort:
+ * surfaces failures via the returned promise but the caller can
+ * decide whether to abort the local mode change on a failure.
+ */
+export async function setConversationMode(
+  id: string,
+  mode: Mode,
+): Promise<void> {
+  const resp = await fetch(`${API_BASE}/conversations/${id}/mode`, {
+    ...FETCH_DEFAULTS,
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ mode }),
+  });
+  if (!resp.ok) {
+    const detail = await resp.text();
+    throw new Error(`Could not set conversation mode: ${resp.status} — ${detail}`);
+  }
 }
 
 // ─── Long-term memory archive (Phase 12b) ──────────────────────────────
@@ -201,13 +241,13 @@ export interface MemoryNoteList {
 export async function listMemoryNotes(query?: string): Promise<MemoryNoteList> {
   const url = new URL(`${API_BASE}/memory`);
   if (query && query.trim()) url.searchParams.set("q", query.trim());
-  const resp = await fetch(url.toString());
+  const resp = await fetch(url.toString(), FETCH_DEFAULTS);
   if (!resp.ok) throw new Error("Could not list memory notes");
   return resp.json() as Promise<MemoryNoteList>;
 }
 
 export async function getMemoryNote(id: string): Promise<MemoryNote> {
-  const resp = await fetch(`${API_BASE}/memory/${id}`);
+  const resp = await fetch(`${API_BASE}/memory/${id}`, FETCH_DEFAULTS);
   if (!resp.ok) throw new Error("Could not load memory note");
   return resp.json() as Promise<MemoryNote>;
 }
@@ -225,6 +265,7 @@ export async function updateMemoryNote(
   patch: MemoryNotePatch,
 ): Promise<MemoryNote> {
   const resp = await fetch(`${API_BASE}/memory/${id}`, {
+    ...FETCH_DEFAULTS,
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(patch),
@@ -234,7 +275,10 @@ export async function updateMemoryNote(
 }
 
 export async function deleteMemoryNote(id: string): Promise<void> {
-  const resp = await fetch(`${API_BASE}/memory/${id}`, { method: "DELETE" });
+  const resp = await fetch(`${API_BASE}/memory/${id}`, {
+    ...FETCH_DEFAULTS,
+    method: "DELETE",
+  });
   if (!resp.ok) throw new Error("Could not delete memory note");
 }
 
@@ -243,6 +287,7 @@ export async function summarizeConversationToMemory(
   title?: string,
 ): Promise<MemoryNote> {
   const resp = await fetch(`${API_BASE}/memory/summarize`, {
+    ...FETCH_DEFAULTS,
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ conversation_id: conversationId, title }),
@@ -266,6 +311,7 @@ export async function transcribeAudio(blob: Blob): Promise<string> {
   const ext = blob.type.includes("ogg") ? "ogg" : "webm";
   form.append("audio", blob, `clip.${ext}`);
   const resp = await fetch(`${API_BASE}/voice/stt`, {
+    ...FETCH_DEFAULTS,
     method: "POST",
     body: form,
   });
@@ -279,6 +325,7 @@ export async function transcribeAudio(blob: Blob): Promise<string> {
 
 export async function synthesizeSpeech(text: string): Promise<Blob> {
   const resp = await fetch(`${API_BASE}/voice/tts`, {
+    ...FETCH_DEFAULTS,
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ text }),

@@ -1,5 +1,6 @@
 import type { Metadata, Viewport } from "next";
 import "./globals.css";
+import { MediaPipeNoiseFilter } from "@/components/MediaPipeNoiseFilter";
 import { ServiceWorkerRegistrar } from "@/components/ServiceWorkerRegistrar";
 
 export const metadata: Metadata = {
@@ -45,6 +46,7 @@ export default function RootLayout({
   return (
     <html lang="en">
       <body>
+        <MediaPipeNoiseFilter />
         <ServiceWorkerRegistrar />
         {children}
       </body>

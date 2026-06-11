@@ -48,6 +48,11 @@ interface Props {
    *  pinned to the user's finger when the canvas has been shrunk
    *  to fit a narrower viewport (e.g. when the sidebar is open). */
   scale?: number;
+  /** Optional override z-index for the widget container. Default 1
+   *  (or 20 while dragging). The orb wrapper bumps this so its
+   *  click handler isn't blocked by the floating-Earth widget which
+   *  sits at z=8. */
+  zIndex?: number;
   children: React.ReactNode;
 }
 
@@ -70,6 +75,7 @@ export function HudWidget({
   onHide,
   hidden,
   scale = 1,
+  zIndex,
   children,
 }: Props) {
   const safeScale = scale > 0 ? scale : 1;
@@ -110,17 +116,36 @@ export function HudWidget({
     );
   }
 
-  // Non-custom mode — pure pass-through. Children render in their
-  // original flow position. This is the default for users who never
-  // toggle customize mode.
-  if (!customEnabled) {
-    return <div data-hud-widget={id}>{children}</div>;
-  }
-
   const widthVal: string | number =
     layout.w === "auto" ? "auto" : `${layout.w}px`;
   const heightVal: string | number =
     layout.h === "auto" ? "auto" : `${layout.h}px`;
+
+  // Read-only mode (customize off) — render at the saved position
+  // but without drag/resize/hide handles. Positions persist between
+  // customize on/off so widgets stay where the user put them.
+  if (!customEnabled) {
+    return (
+      <div
+        data-hud-widget={id}
+        style={{
+          position: "absolute",
+          left: layout.x,
+          top: layout.y,
+          width: widthVal,
+          height: heightVal,
+          boxSizing: "border-box",
+          // Apply ``zIndex`` even in read-only mode so orb (z=12)
+          // sits above floating-Earth (z=8) and stays clickable.
+          // Without this, the prop only affected custom-edit mode
+          // and the orb-vs-Earth click interception persisted.
+          zIndex: zIndex,
+        }}
+      >
+        {children}
+      </div>
+    );
+  }
 
   function commitDrag() {
     const s = dragRef.current;
@@ -290,7 +315,7 @@ export function HudWidget({
         cursor: isDragging ? "grabbing" : "grab",
         transform: isDragging ? "scale(1.02)" : "none",
         transition: isDragging ? "none" : "transform 120ms ease",
-        zIndex: isDragging ? 20 : 1,
+        zIndex: isDragging ? 20 : (zIndex ?? 1),
       }}
     >
       {children}

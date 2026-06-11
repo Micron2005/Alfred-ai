@@ -30,7 +30,17 @@ class Settings(BaseSettings):
 
     # ─── Local LLM (Ollama) ─────────────────────────────────────────────
     ollama_host: str = Field(default="http://host.docker.internal:11434")
-    local_model_chat: str = Field(default="llama3.1:8b-instruct-q4_K_M")
+    # Default chat model — Dolphin-flavoured Llama 3.1 8B. The Dolphin
+    # fine-tune is uncensored, which matches the user's stated
+    # preference: "no filter on what he can say or help with". The
+    # base Meta Llama 3.1 instruct refuses casual profanity, jokes
+    # with friends, and a long list of legal-but-edgy requests; the
+    # Dolphin tune does not. ~4.7 GB on disk; same hardware needs
+    # as the previous default. Pull once with:
+    #   ollama pull dolphin-llama3:8b-v2.9-q4_K_M
+    # Set this to ``""`` to disable local chat entirely (every text
+    # turn then routes to cloud Anthropic — useful on RAM-poor hosts).
+    local_model_chat: str = Field(default="dolphin-llama3:8b-v2.9-q4_K_M")
     local_model_fast: str = Field(default="phi3.5:3.8b-mini-instruct-q4_K_M")
     # Vision-capable Ollama model. Used when the user attaches an image
     # to a turn. Default is Meta's Llama 3.2-Vision 11B (~6.5 GB on
@@ -59,6 +69,35 @@ class Settings(BaseSettings):
     database_url: str = Field(
         default="postgresql+psycopg://alfred:wayne-manor@localhost:5432/alfred"
     )
+
+    # ─── Auth (single-user password gate) ───────────────────────────────
+    # bcrypt hash of the master password. When unset, Alfred runs with
+    # no auth (legacy behaviour, fine for a Tailscale-only deployment).
+    # When set, every /api/* endpoint except /api/health and /api/auth/*
+    # requires a valid JWT cookie. Generate the hash once on the host:
+    #     python -c "import bcrypt; print(bcrypt.hashpw(b'YOUR_PASSWORD',
+    #                bcrypt.gensalt()).decode())"
+    # then drop the result in .env as ALFRED_PASSWORD_HASH=$2b$...
+    alfred_password_hash: str = Field(default="")
+    # 64+ chars of random hex used to sign JWTs. Generate with:
+    #   python -c "import secrets; print(secrets.token_hex(32))"
+    # Default is a placeholder; you MUST change it before exposing
+    # Alfred outside localhost. The auth module refuses to start with
+    # the placeholder if alfred_password_hash is also set.
+    alfred_jwt_secret: str = Field(default="CHANGE-ME-INSECURE-PLACEHOLDER")
+    # Access token life. 60 min is comfortable for a single-user app
+    # where you don't want to keep re-logging in; bump down if you're
+    # paranoid.
+    alfred_jwt_access_ttl_minutes: int = Field(default=60)
+    # Refresh-token life — the cookie that quietly mints new access
+    # tokens without you re-entering a password. 30 days = "log in
+    # once a month".
+    alfred_jwt_refresh_ttl_days: int = Field(default=30)
+    # Brute-force lockout. After this many consecutive failed
+    # attempts from one client IP the login endpoint stops responding
+    # for ``alfred_login_lockout_minutes`` minutes.
+    alfred_login_max_failures: int = Field(default=5)
+    alfred_login_lockout_minutes: int = Field(default=15)
 
     # ─── Gmail (SMTP, app-password auth) ────────────────────────────────
     alfred_gmail_address: str = Field(default="")
@@ -104,6 +143,61 @@ class Settings(BaseSettings):
         default="http://127.0.0.1:8000/api/spotify/callback"
     )
 
+    # ─── Onshape (Design tab) ───────────────────────────────────────────
+    # Two keys from https://dev-portal.onshape.com — Access Key (acts
+    # as a public id) and Secret Key (signs each request via HMAC-SHA256).
+    # Both stay backend-side; the frontend only ever talks to our
+    # ``/api/design/*`` proxy. Leave blank to disable the Design tab's
+    # remote integration; the UI will then surface a "configure
+    # Onshape" hint instead of crashing.
+    alfred_onshape_access_key: str = Field(default="")
+    alfred_onshape_secret_key: str = Field(default="")
+    # Onshape Enterprise customers run a tenant on a custom subdomain
+    # (e.g. ``https://acme.onshape.com``). The vast majority of
+    # personal users hit ``cad.onshape.com`` though, so that's the
+    # default.
+    alfred_onshape_api_base: str = Field(default="https://cad.onshape.com")
+
+    # ─── Desktop integration ────────────────────────────────────────────
+    # Comma-separated absolute paths Alfred is allowed to read on the
+    # host machine. Empty disables the file-browser endpoints entirely.
+    # Examples:
+    #   ALFRED_ALLOWED_DIRS="~/Documents,~/Downloads,~/Projects/CAD"
+    # Tilde + env-var expansion happens server-side, so users can
+    # write the natural form they'd type in a shell.
+    alfred_allowed_dirs: str = Field(default="")
+
+    # ─── Valhalla routing (Stadia Maps hosted / self-hosted) ────────────
+    # Backend proxies the frontend's routing requests to Stadia (or a
+    # self-hosted ``gisops/valhalla`` Docker instance) so we sidestep
+    # the browser-origin restriction Stadia enforces on hosted keys —
+    # localhost can't be whitelisted as a "domain" on Stadia's
+    # property page, but server-to-server calls don't trip that check.
+    #
+    # ``stadia_api_key`` — paste the key from
+    # https://client.stadiamaps.com/dashboard/properties. Leave blank
+    # to disable the routing proxy entirely.
+    #
+    # ``valhalla_base_url`` — when set, overrides Stadia and proxies
+    # to a self-hosted Valhalla. Example for the gisops Docker image:
+    # ``http://valhalla:8002``. The trailing ``/valhalla/v1`` part is
+    # appended by the client only for Stadia; self-host expects the
+    # bare host.
+    stadia_api_key: str = Field(default="")
+    valhalla_base_url: str = Field(default="")
+
+    # ─── 3D printer (Klipper / Moonraker — Creality K1, K1 Max, etc.) ───
+    # Base URL of the printer's Moonraker HTTP API. K1 / K1 Max ship
+    # with this exposed on port 7125 of the printer's LAN IP. Leave
+    # blank to disable printer integration entirely (the frontend
+    # widget then folds into a "configure printer" hint instead).
+    # Example: ``http://192.168.1.42:7125``
+    alfred_printer_url: str = Field(default="")
+    # Optional API key, if the user has put Moonraker behind a
+    # reverse-proxy with a token. The K1 / K1 Max stock firmware
+    # doesn't enforce one; leave empty there.
+    alfred_printer_api_key: str = Field(default="")
+
     # ─── Long-term memory archive (Phase 12b) ───────────────────────────
     # Container-side directory where Alfred mirrors each memory note as
     # a Markdown file. Mounted from the host via docker-compose so the
@@ -140,6 +234,27 @@ class Settings(BaseSettings):
     def has_cloud(self) -> bool:
         """Whether a real Anthropic key has been configured."""
         return bool(self.anthropic_api_key and self.anthropic_api_key.strip())
+
+    @property
+    def has_auth(self) -> bool:
+        """Whether the password gate is enabled.
+
+        Auth is opt-in by ``ALFRED_PASSWORD_HASH`` being set. Backwards-
+        compatible with existing deployments that just relied on the
+        Tailscale-only network gate. We refuse to enable auth without
+        also rotating the JWT secret away from the placeholder — that
+        would be a footgun on the first deploy.
+        """
+        if not self.alfred_password_hash.strip():
+            return False
+        if self.alfred_jwt_secret == "CHANGE-ME-INSECURE-PLACEHOLDER":
+            raise RuntimeError(
+                "ALFRED_PASSWORD_HASH is set but ALFRED_JWT_SECRET is still "
+                "the placeholder. Generate a real secret with "
+                "`python -c 'import secrets; print(secrets.token_hex(32))'` "
+                "and set it in .env before starting Alfred."
+            )
+        return True
 
     @property
     def has_local_chat(self) -> bool:
@@ -205,6 +320,14 @@ class Settings(BaseSettings):
         return bool(
             self.alfred_spotify_client_id.strip()
             and self.alfred_spotify_client_secret.strip()
+        )
+
+    @property
+    def has_onshape(self) -> bool:
+        """Whether the Onshape access/secret pair is configured."""
+        return bool(
+            self.alfred_onshape_access_key.strip()
+            and self.alfred_onshape_secret_key.strip()
         )
 
 

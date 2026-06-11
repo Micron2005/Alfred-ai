@@ -1,0 +1,56 @@
+# Alfred AI — systemd unit for boot-time start.
+#
+# Drops a one-line "alfred starts when my PC boots" experience.
+# Copy this file to /etc/systemd/system/alfred.service (or run
+# scripts/install-systemd.sh which does it for you), then:
+#
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now alfred.service
+#
+# Check status:    sudo systemctl status alfred.service
+# Live logs:       sudo journalctl -u alfred.service -f
+# Stop:            sudo systemctl stop alfred.service
+# Disable on boot: sudo systemctl disable alfred.service
+#
+# The unit deliberately uses ``WorkingDirectory`` rather than
+# absolute paths in ExecStart so a single template file works
+# regardless of where the user cloned the repo (the install
+# script substitutes ``%REPO_ROOT%`` with the real path).
+
+[Unit]
+Description=Alfred AI (FastAPI + Next.js + Postgres via Docker Compose)
+Documentation=https://github.com/Micron2005/Alfred-ai
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=%REPO_ROOT%
+# Pull image updates before each start (skip with `Environment=ALFRED_NO_PULL=1`
+# in /etc/systemd/system/alfred.service.d/override.conf if you want
+# to avoid the pull lag on a metered connection).
+ExecStartPre=/usr/bin/env bash -c 'if [ -z "${ALFRED_NO_PULL:-}" ]; then docker compose pull --quiet || true; fi'
+ExecStart=/usr/bin/docker compose up --detach --build --remove-orphans
+ExecStop=/usr/bin/docker compose down
+# Run the smoke test after the stack comes up so failed boots are
+# visible in `systemctl status`. Failure here doesn't stop the unit
+# (the containers are still up; the user can investigate via
+# docker compose logs).
+ExecStartPost=/usr/bin/env bash -c 'sleep 8 && %REPO_ROOT%/scripts/smoke-test.sh --quiet || journalctl -t alfred-smoketest -p err <<< "Smoke test failed; run scripts/smoke-test.sh manually."'
+
+# Hardening — the docker daemon does the privilege work; this
+# unit just orchestrates compose, so we can run it as a normal
+# user once docker group membership is in place.
+User=%RUN_AS_USER%
+Group=%RUN_AS_USER%
+
+# Restart on failure but cap to avoid loops if Docker itself dies.
+Restart=on-failure
+RestartSec=20s
+StartLimitInterval=600s
+StartLimitBurst=3
+
+[Install]
+WantedBy=multi-user.target

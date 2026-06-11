@@ -96,7 +96,7 @@ export function startSilenceDetector(
     onSilence,
     onLevel,
     silenceThreshold = 0.015,
-    warmupMs = 500,
+    warmupMs = 900,
     trailingSilenceMs = 1500,
     noSpeechTimeoutMs = 10000,
     maxDurationMs = 30000,
