@@ -20,7 +20,12 @@
 
 import { useEffect, useRef } from "react";
 
-export type RadialMenuItem = "spotify" | "chat" | "workout" | "workshop";
+export type RadialMenuItem =
+  | "spotify"
+  | "chat"
+  | "workout"
+  | "workshop"
+  | "design";
 
 interface RadialMenuProps {
   open: boolean;
@@ -47,6 +52,12 @@ const ENTRIES: ReadonlyArray<MenuEntry> = [
     label: "CHAT",
     caption: "Conversation",
     testId: "radial-menu-chat",
+  },
+  {
+    id: "design",
+    label: "DESIGN",
+    caption: "Sketch Pad",
+    testId: "radial-menu-design",
   },
   {
     id: "workout",
@@ -343,6 +354,8 @@ function RadialItem({
           <ChatGlyph />
         ) : entry.id === "workshop" ? (
           <WorkshopGlyph />
+        ) : entry.id === "design" ? (
+          <DesignGlyph />
         ) : (
           <WorkoutGlyph />
         )}

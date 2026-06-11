@@ -73,6 +73,28 @@ NEXT STEP for user: Save to GitHub → branch alfred-complete, then
 locally `git checkout alfred-complete && git pull && docker compose
 up --build`.
 
+### Design tab takeover + radial module (2026-06-11, later)
+User: "i dont want the design tab to be there i want it [sketch pad]
+to take over the old one thats next to workout and chat. i also want
+it in the select module" (select module = RadialMenu, hint text
+"SELECT A MODULE").
+Implemented:
+- DESIGN tab now renders SketchPad (DesignView/CAD unwired from tabs;
+  CadStudio/DesignView/Design3DView components remain in repo unused).
+- SketchPad.tsx rewritten: layer <canvas> elements + undo history +
+  canvas ops moved to MODULE level (registered with sketchStore at
+  module load) so bitmaps/commands survive tab unmounts. Root layout
+  is now in-flow flex (no fixed overlay) under the TabBar.
+- ChatWindow: sketchOpen ↔ activeTab sync effects (open → design tab,
+  close → chat tab); DesignView import + designConversationId removed;
+  TAB_NOUNS gained design/sketch/drawing nouns for instant voice nav;
+  handleRadialSelect handles "design".
+- RadialMenu: added DESIGN — Sketch Pad entry (5 orbs now) using the
+  previously-unused DesignGlyph wireframe cube.
+- Verified via Playwright: tab opens pad, stroke pixel-count survives
+  tab round-trip exactly, CLOSE returns to chat, radial DESIGN module
+  opens the pad. tsc/eslint/next build clean.
+
 ### Phase A — Design Pad (DONE 2026-06-11, all tests pass)
 - `alfred-core/src/alfred_core/tools/sketch_marker.py` — [SKETCH_*]
   marker parser (OPEN/CLOSE/TOOL/COLOR/BRUSH/LAYER_ADD/LAYER_SELECT/

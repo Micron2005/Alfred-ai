@@ -31,7 +31,6 @@ import { useTwoHandSwipe } from "@/lib/useTwoHandSwipe";
 import { loadTab, neighbourTab, persistTab, type TabId } from "@/lib/tabs";
 import { TabBar } from "@/components/TabBar";
 import { HudFrame } from "@/components/HudFrame";
-import { DesignView } from "@/components/DesignView";
 import { HandCursor } from "@/components/HandCursor";
 import { ExpressionReadout } from "@/components/ExpressionReadout";
 import { PoseSkeleton } from "@/components/PoseSkeleton";
@@ -137,10 +136,11 @@ export type NavDestination =
 
 const TAB_NOUNS: ReadonlyArray<{ noun: RegExp; tab: TabId; label: string }> = [
   { noun: /workout|form\s*coach|exercise|fitness|gym/, tab: "workout", label: "the Workout tab" },
-  // Note: "design" intentionally NOT here — the Design tab placeholder
-  // has been superseded by the Onshape sub-view, which is matched
-  // separately via SUBVIEW_NOUNS below. Sending "design" through here
-  // would route to the empty design tab instead of opening Onshape.
+  // The Design tab now hosts the freehand sketch pad (the old CAD
+  // placeholder was replaced) — "open design" / "pull up the sketch
+  // pad" / "drawing board" all land there instantly. Onshape CAD
+  // guidance still goes through the LLM (no nav verb → no match).
+  { noun: /design|sketch(?:\s*pad)?|draw(?:ing)?\s*(?:pad|board|tab)/, tab: "design", label: "the Design pad" },
   { noun: /chat|messages?|conversation|inbox/, tab: "chat", label: "the Chat tab" },
   { noun: /hud|home|standby|main|dashboard|overview/, tab: "hud", label: "the HUD" },
 ];
@@ -774,11 +774,6 @@ export function ChatWindow() {
     problem: string;
     paths: string[];
   } | null>(null);
-  // Separate conversation thread for the design-tab chat overlay,
-  // so design back-and-forth doesn't pollute general chat.
-  const [designConversationId, setDesignConversationId] = useState<
-    string | null
-  >(null);
   // Default ``false`` (expanded) — the sidebar now hosts the active
   // conversation (CONVERSATION tab) so collapsing it by default
   // would hide the chat entirely. Users can collapse it manually
@@ -1034,14 +1029,36 @@ export function ChatWindow() {
   // ``lib/hudLayout.ts`` for the localStorage shape.
   const hud = useHudLayout();
 
-  // Design pad open state — mirrored from the sketch store so the
-  // header button and quick-tools item reflect Alfred-driven opens
-  // ("pull up the design tab") as well as manual toggles.
+  // Design pad ↔ DESIGN tab synchronisation. The sketch store's
+  // ``open`` flag is what Alfred's chat commands flip ("pull up the
+  // design tab" → SKETCH_OPEN) and what the chat request's sketch
+  // signal reads — the DESIGN tab is its on-screen home. Two small
+  // effects keep them in lock-step without render loops:
+  //   - tab becomes design   → store opens
+  //   - tab leaves design    → store closes
+  //   - store opens (Alfred) → switch to the design tab
+  //   - store closes (CLOSE button / Alfred) → back to chat
   const sketchOpen = useSyncExternalStore(
     sketchStore.subscribe,
     () => sketchStore.getSnapshot().open,
     () => false,
   );
+  useEffect(() => {
+    if (activeTab === "design") {
+      if (!sketchStore.getSnapshot().open) sketchStore.setOpen(true);
+    } else if (sketchStore.getSnapshot().open) {
+      sketchStore.setOpen(false);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTab]);
+  useEffect(() => {
+    if (sketchOpen && activeTabRef.current !== "design") {
+      setActiveTabPersisted("design");
+    } else if (!sketchOpen && activeTabRef.current === "design") {
+      setActiveTabPersisted("chat");
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sketchOpen]);
 
   // Quick-Tools radial menu. Triggered when the LEFT hand closes
   // QuickToolsMenu (left-fist activated) was removed at user
@@ -1216,6 +1233,8 @@ export function ChatWindow() {
       setActiveTabPersisted("chat");
     } else if (item === "workout") {
       setActiveTabPersisted("workout");
+    } else if (item === "design") {
+      setActiveTabPersisted("design");
     }
   }
 
@@ -2707,10 +2726,12 @@ export function ChatWindow() {
         </>
       ) : null}
       {activeTab === "design" ? (
-        <DesignView
-          conversationId={designConversationId}
-          onConversationCreated={setDesignConversationId}
-        />
+        // The DESIGN tab IS the freehand sketch pad (the old CAD
+        // placeholder view was replaced at user request). Layer
+        // bitmaps + undo history live at module level inside
+        // SketchPad.tsx, so unmounting on tab switch never loses
+        // the drawing.
+        <SketchPad />
       ) : activeTab === "workout" ? (
         <WorkoutTabView
           cameraOn={cameraOn}
@@ -3326,13 +3347,6 @@ export function ChatWindow() {
           leftHand={hand.left}
           hideSkeleton={hideHandSkeleton}
         />
-        {/*
-          Design pad overlay. Always mounted (it hides itself with
-          display:none when closed) so the per-layer canvas bitmaps
-          survive open/close cycles — unmounting would wipe the
-          user's sketch.
-        */}
-        <SketchPad />
         <PoseSkeleton
           enabled={pose.status === "ready"}
           pose={pose.pose}

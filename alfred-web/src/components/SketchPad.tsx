@@ -1,12 +1,6 @@
 "use client";
 
-import {
-  useCallback,
-  useEffect,
-  useRef,
-  useState,
-  useSyncExternalStore,
-} from "react";
+import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import {
   SKETCH_TOOLS,
   sketchStore,
@@ -16,7 +10,7 @@ import {
 } from "@/lib/sketchStore";
 
 /**
- * The DESIGN PAD — a JARVIS-style drafting table overlay.
+ * The DESIGN tab — a JARVIS-style drafting table (freehand sketch pad).
  *
  * Touch / stylus drawing surface with:
  *   - multiple layers (add / delete / rename / show-hide / opacity /
@@ -28,15 +22,16 @@ import {
  *   - undo / redo (per-stroke snapshots) and per-layer clear;
  *   - PNG export.
  *
- * The component stays MOUNTED at all times (hidden with display:none
- * when closed) so the canvas pixel data survives open/close cycles.
- * Alfred drives it remotely: chat replies carry ``sketch_commands``
- * that ChatWindow forwards to ``sketchStore.applyCommand``, and the
- * mounted pad registers imperative canvas ops (undo / redo / clear /
- * snapshot) on the store so those commands reach the bitmaps.
+ * Mount/unmount survival: this component renders INSIDE the DESIGN
+ * tab, so it unmounts whenever the user switches tabs. The layer
+ * bitmaps must NOT die with it — so the actual <canvas> elements
+ * live in a module-level map and are re-attached to the DOM on every
+ * mount (a detached canvas keeps its pixels). Undo history and the
+ * canvas ops Alfred's chat commands call (undo / redo / clear /
+ * snapshot) are module-level too, so they work even mid tab-switch.
  *
  * Canvas coordinates are a fixed logical 1600×1000 space, CSS-scaled
- * to fit the window — resizing the browser never resamples or clears
+ * to fit the tab — resizing the browser never resamples or clears
  * the artwork.
  */
 
@@ -114,10 +109,133 @@ const TOOL_CONFIG: Record<SketchTool, ToolConfig> = {
   },
 };
 
+// ─── Module-level canvas + history state (survives tab switches) ────
+
 interface HistoryEntry {
   layerId: string;
   dataUrl: string;
 }
+
+const layerCanvases = new Map<string, HTMLCanvasElement>();
+const history: { undo: HistoryEntry[]; redo: HistoryEntry[] } = {
+  undo: [],
+  redo: [],
+};
+
+function getLayerCanvas(layerId: string): HTMLCanvasElement {
+  let canvas = layerCanvases.get(layerId);
+  if (!canvas) {
+    canvas = document.createElement("canvas");
+    canvas.width = LOGICAL_W;
+    canvas.height = LOGICAL_H;
+    layerCanvases.set(layerId, canvas);
+  }
+  return canvas;
+}
+
+function captureLayer(layerId: string): HistoryEntry | null {
+  const canvas = layerCanvases.get(layerId);
+  if (!canvas) return null;
+  return { layerId, dataUrl: canvas.toDataURL("image/png") };
+}
+
+function restoreLayer(entry: HistoryEntry) {
+  const canvas = layerCanvases.get(entry.layerId);
+  if (!canvas) return;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return;
+  const img = new Image();
+  img.onload = () => {
+    ctx.clearRect(0, 0, LOGICAL_W, LOGICAL_H);
+    ctx.drawImage(img, 0, 0);
+  };
+  img.src = entry.dataUrl;
+}
+
+function pushUndo(layerId: string) {
+  const entry = captureLayer(layerId);
+  if (!entry) return;
+  history.undo.push(entry);
+  if (history.undo.length > UNDO_LIMIT) history.undo.shift();
+  history.redo = [];
+}
+
+function undoStroke() {
+  const entry = history.undo.pop();
+  if (!entry) return;
+  const current = captureLayer(entry.layerId);
+  if (current) history.redo.push(current);
+  restoreLayer(entry);
+}
+
+function redoStroke() {
+  const entry = history.redo.pop();
+  if (!entry) return;
+  const current = captureLayer(entry.layerId);
+  if (current) history.undo.push(current);
+  restoreLayer(entry);
+}
+
+function clearActiveLayer() {
+  const { activeLayerId } = sketchStore.getSnapshot();
+  const canvas = layerCanvases.get(activeLayerId);
+  if (!canvas) return;
+  pushUndo(activeLayerId);
+  canvas.getContext("2d")?.clearRect(0, 0, LOGICAL_W, LOGICAL_H);
+}
+
+/** Flatten visible layers (bottom → top) onto the pad background. */
+function flatten(targetWidth: number): HTMLCanvasElement {
+  const out = document.createElement("canvas");
+  const scale = targetWidth / LOGICAL_W;
+  out.width = targetWidth;
+  out.height = Math.round(LOGICAL_H * scale);
+  const ctx = out.getContext("2d");
+  if (!ctx) return out;
+  ctx.fillStyle = CANVAS_BG;
+  ctx.fillRect(0, 0, out.width, out.height);
+  const layers = sketchStore.getSnapshot().layers;
+  for (let i = layers.length - 1; i >= 0; i--) {
+    const layer = layers[i];
+    if (!layer.visible) continue;
+    const canvas = layerCanvases.get(layer.id);
+    if (!canvas) continue;
+    ctx.globalAlpha = layer.opacity;
+    ctx.drawImage(canvas, 0, 0, out.width, out.height);
+  }
+  ctx.globalAlpha = 1;
+  return out;
+}
+
+function captureSnapshot(): { data: string; mime_type: string } | null {
+  if (typeof document === "undefined") return null;
+  if (layerCanvases.size === 0) return null;
+  const flat = flatten(SNAPSHOT_W);
+  const dataUrl = flat.toDataURL("image/png");
+  const comma = dataUrl.indexOf(",");
+  if (comma === -1) return null;
+  return { data: dataUrl.slice(comma + 1), mime_type: "image/png" };
+}
+
+function exportPng() {
+  const flat = flatten(LOGICAL_W);
+  const link = document.createElement("a");
+  const stamp = new Date().toISOString().slice(0, 19).replace(/[T:]/g, "-");
+  link.download = `alfred-design-${stamp}.png`;
+  link.href = flat.toDataURL("image/png");
+  link.click();
+}
+
+// Register the canvas ops once at module load. Module-level (not in
+// a component effect) so Alfred's chat commands — "undo that",
+// "clear the layer" — and the send-time snapshot keep working even
+// while the DESIGN tab is unmounted.
+sketchStore.registerCanvasOps({
+  undo: undoStroke,
+  redo: redoStroke,
+  clearActiveLayer,
+  captureSnapshot,
+});
 
 function useSketchState(): SketchSnapshotState {
   return useSyncExternalStore(
@@ -129,17 +247,11 @@ function useSketchState(): SketchSnapshotState {
 
 export function SketchPad() {
   const state = useSketchState();
-  // Imperative closures (registered ops, pointer handlers) need the
-  // freshest state without re-registering — classic ref mirror.
+  // Pointer handlers need the freshest state without re-binding.
   const stateRef = useRef(state);
   stateRef.current = state;
 
   const stackRef = useRef<HTMLDivElement>(null);
-  const canvasesRef = useRef<Map<string, HTMLCanvasElement>>(new Map());
-  const historyRef = useRef<{ undo: HistoryEntry[]; redo: HistoryEntry[] }>({
-    undo: [],
-    redo: [],
-  });
   const drawingRef = useRef<{
     pointerId: number;
     x: number;
@@ -152,133 +264,39 @@ export function SketchPad() {
   const [editingLayerId, setEditingLayerId] = useState<string | null>(null);
   const [layerNameDraft, setLayerNameDraft] = useState("");
 
-  // Purge canvases + history entries for layers that no longer exist.
+  // Attach the persistent layer canvases to the DOM (bottom → top so
+  // the stack paints in order; the panel lists them top-first), apply
+  // per-layer visibility/opacity, and purge canvases + history for
+  // layers that no longer exist.
   useEffect(() => {
+    const container = stackRef.current;
+    if (!container) return;
+    const ordered: HTMLCanvasElement[] = [];
+    for (let i = state.layers.length - 1; i >= 0; i--) {
+      const layer = state.layers[i];
+      const canvas = getLayerCanvas(layer.id);
+      canvas.style.position = "absolute";
+      canvas.style.inset = "0";
+      canvas.style.width = "100%";
+      canvas.style.height = "100%";
+      canvas.style.pointerEvents = "none";
+      canvas.style.opacity = String(layer.opacity);
+      canvas.style.visibility = layer.visible ? "visible" : "hidden";
+      ordered.push(canvas);
+    }
+    container.replaceChildren(...ordered);
+
     const alive = new Set(state.layers.map((l) => l.id));
-    for (const id of Array.from(canvasesRef.current.keys())) {
-      if (!alive.has(id)) canvasesRef.current.delete(id);
+    for (const id of Array.from(layerCanvases.keys())) {
+      if (!alive.has(id)) layerCanvases.delete(id);
     }
-    historyRef.current.undo = historyRef.current.undo.filter((e) =>
-      alive.has(e.layerId),
-    );
-    historyRef.current.redo = historyRef.current.redo.filter((e) =>
-      alive.has(e.layerId),
-    );
+    history.undo = history.undo.filter((e) => alive.has(e.layerId));
+    history.redo = history.redo.filter((e) => alive.has(e.layerId));
   }, [state.layers]);
-
-  const captureLayer = useCallback((layerId: string): HistoryEntry | null => {
-    const canvas = canvasesRef.current.get(layerId);
-    if (!canvas) return null;
-    return { layerId, dataUrl: canvas.toDataURL("image/png") };
-  }, []);
-
-  const restoreLayer = useCallback((entry: HistoryEntry) => {
-    const canvas = canvasesRef.current.get(entry.layerId);
-    if (!canvas) return;
-    const ctx = canvas.getContext("2d");
-    if (!ctx) return;
-    const img = new Image();
-    img.onload = () => {
-      ctx.clearRect(0, 0, LOGICAL_W, LOGICAL_H);
-      ctx.drawImage(img, 0, 0);
-    };
-    img.src = entry.dataUrl;
-  }, []);
-
-  const pushUndo = useCallback(
-    (layerId: string) => {
-      const entry = captureLayer(layerId);
-      if (!entry) return;
-      historyRef.current.undo.push(entry);
-      if (historyRef.current.undo.length > UNDO_LIMIT) {
-        historyRef.current.undo.shift();
-      }
-      historyRef.current.redo = [];
-    },
-    [captureLayer],
-  );
-
-  const undo = useCallback(() => {
-    const entry = historyRef.current.undo.pop();
-    if (!entry) return;
-    const current = captureLayer(entry.layerId);
-    if (current) historyRef.current.redo.push(current);
-    restoreLayer(entry);
-  }, [captureLayer, restoreLayer]);
-
-  const redo = useCallback(() => {
-    const entry = historyRef.current.redo.pop();
-    if (!entry) return;
-    const current = captureLayer(entry.layerId);
-    if (current) historyRef.current.undo.push(current);
-    restoreLayer(entry);
-  }, [captureLayer, restoreLayer]);
-
-  const clearActiveLayer = useCallback(() => {
-    const { activeLayerId } = stateRef.current;
-    const canvas = canvasesRef.current.get(activeLayerId);
-    if (!canvas) return;
-    pushUndo(activeLayerId);
-    canvas.getContext("2d")?.clearRect(0, 0, LOGICAL_W, LOGICAL_H);
-  }, [pushUndo]);
-
-  /** Flatten visible layers (bottom → top) onto the pad background. */
-  const flatten = useCallback((targetWidth: number): HTMLCanvasElement => {
-    const out = document.createElement("canvas");
-    const scale = targetWidth / LOGICAL_W;
-    out.width = targetWidth;
-    out.height = Math.round(LOGICAL_H * scale);
-    const ctx = out.getContext("2d");
-    if (!ctx) return out;
-    ctx.fillStyle = CANVAS_BG;
-    ctx.fillRect(0, 0, out.width, out.height);
-    const layers = stateRef.current.layers;
-    for (let i = layers.length - 1; i >= 0; i--) {
-      const layer = layers[i];
-      if (!layer.visible) continue;
-      const canvas = canvasesRef.current.get(layer.id);
-      if (!canvas) continue;
-      ctx.globalAlpha = layer.opacity;
-      ctx.drawImage(canvas, 0, 0, out.width, out.height);
-    }
-    ctx.globalAlpha = 1;
-    return out;
-  }, []);
-
-  const captureSnapshot = useCallback(() => {
-    if (canvasesRef.current.size === 0) return null;
-    const flat = flatten(SNAPSHOT_W);
-    const dataUrl = flat.toDataURL("image/png");
-    const comma = dataUrl.indexOf(",");
-    if (comma === -1) return null;
-    return { data: dataUrl.slice(comma + 1), mime_type: "image/png" };
-  }, [flatten]);
-
-  const exportPng = useCallback(() => {
-    const flat = flatten(LOGICAL_W);
-    const link = document.createElement("a");
-    const stamp = new Date().toISOString().slice(0, 19).replace(/[T:]/g, "-");
-    link.download = `alfred-design-${stamp}.png`;
-    link.href = flat.toDataURL("image/png");
-    link.click();
-  }, [flatten]);
-
-  // Hand the imperative ops to the store so Alfred's chat commands
-  // (undo / redo / clear) and ChatWindow's send-time snapshot reach
-  // the actual bitmaps.
-  useEffect(() => {
-    sketchStore.registerCanvasOps({
-      undo,
-      redo,
-      clearActiveLayer,
-      captureSnapshot,
-    });
-    return () => sketchStore.registerCanvasOps(null);
-  }, [undo, redo, clearActiveLayer, captureSnapshot]);
 
   // ── Drawing ──────────────────────────────────────────────────────
 
-  const toLogical = useCallback((clientX: number, clientY: number) => {
+  function toLogical(clientX: number, clientY: number) {
     const el = stackRef.current;
     if (!el) return { x: 0, y: 0 };
     const rect = el.getBoundingClientRect();
@@ -286,117 +304,103 @@ export function SketchPad() {
       x: ((clientX - rect.left) / rect.width) * LOGICAL_W,
       y: ((clientY - rect.top) / rect.height) * LOGICAL_H,
     };
-  }, []);
+  }
 
-  const drawSegment = useCallback(
-    (
-      from: { x: number; y: number },
-      to: { x: number; y: number },
-      pressure: number,
-    ) => {
-      const { activeLayerId, tool, color, brushSize, layers } =
-        stateRef.current;
-      const layer = layers.find((l) => l.id === activeLayerId);
-      // Drawing on a hidden layer is invisible-ink confusion — skip.
-      if (!layer || !layer.visible) return;
-      const canvas = canvasesRef.current.get(activeLayerId);
-      const ctx = canvas?.getContext("2d");
-      if (!ctx) return;
-      const cfg = TOOL_CONFIG[tool];
-      ctx.save();
-      ctx.lineCap = "round";
-      ctx.lineJoin = "round";
-      if (tool === "eraser") {
-        ctx.globalCompositeOperation = "destination-out";
-        ctx.strokeStyle = "rgba(0,0,0,1)";
-      } else {
-        ctx.globalAlpha = cfg.alpha;
-        ctx.strokeStyle = color;
-      }
-      ctx.lineWidth = Math.max(
-        0.5,
-        brushSize *
-          cfg.widthScale *
-          (cfg.minPressure + pressure * cfg.pressureGain),
-      );
-      ctx.beginPath();
-      ctx.moveTo(from.x, from.y);
-      ctx.lineTo(to.x, to.y);
-      ctx.stroke();
-      ctx.restore();
-    },
-    [],
-  );
+  function drawSegment(
+    from: { x: number; y: number },
+    to: { x: number; y: number },
+    pressure: number,
+  ) {
+    const { activeLayerId, tool, color, brushSize, layers } = stateRef.current;
+    const layer = layers.find((l) => l.id === activeLayerId);
+    // Drawing on a hidden layer is invisible-ink confusion — skip.
+    if (!layer || !layer.visible) return;
+    const ctx = layerCanvases.get(activeLayerId)?.getContext("2d");
+    if (!ctx) return;
+    const cfg = TOOL_CONFIG[tool];
+    ctx.save();
+    ctx.lineCap = "round";
+    ctx.lineJoin = "round";
+    if (tool === "eraser") {
+      ctx.globalCompositeOperation = "destination-out";
+      ctx.strokeStyle = "rgba(0,0,0,1)";
+    } else {
+      ctx.globalAlpha = cfg.alpha;
+      ctx.strokeStyle = color;
+    }
+    ctx.lineWidth = Math.max(
+      0.5,
+      brushSize *
+        cfg.widthScale *
+        (cfg.minPressure + pressure * cfg.pressureGain),
+    );
+    ctx.beginPath();
+    ctx.moveTo(from.x, from.y);
+    ctx.lineTo(to.x, to.y);
+    ctx.stroke();
+    ctx.restore();
+  }
 
   /** 0 means "unsupported" on many touch screens — treat as mid. */
   const pressureOf = (raw: number) => (raw > 0 ? Math.min(1, raw) : 0.5);
 
-  const handlePointerDown = useCallback(
-    (e: React.PointerEvent<HTMLDivElement>) => {
-      // Single-pointer drawing — a second finger mid-stroke is a palm
-      // or an accidental touch, never a second brush.
-      if (drawingRef.current) return;
-      if (e.pointerType === "pen") lastPenTimeRef.current = performance.now();
-      // Palm rejection: ignore finger touches that arrive while the
-      // stylus has been active in the last 700 ms.
-      if (
-        e.pointerType === "touch" &&
-        performance.now() - lastPenTimeRef.current < 700
-      ) {
-        return;
-      }
-      const { activeLayerId } = stateRef.current;
-      pushUndo(activeLayerId);
-      e.currentTarget.setPointerCapture(e.pointerId);
-      const pt = toLogical(e.clientX, e.clientY);
-      const pressure = pressureOf(e.pressure);
-      drawingRef.current = { pointerId: e.pointerId, ...pt, pressure };
-      // A dot for taps.
-      drawSegment(pt, pt, pressure);
-    },
-    [pushUndo, toLogical, drawSegment],
-  );
+  function handlePointerDown(e: React.PointerEvent<HTMLDivElement>) {
+    // Single-pointer drawing — a second finger mid-stroke is a palm
+    // or an accidental touch, never a second brush.
+    if (drawingRef.current) return;
+    if (e.pointerType === "pen") lastPenTimeRef.current = performance.now();
+    // Palm rejection: ignore finger touches that arrive while the
+    // stylus has been active in the last 700 ms.
+    if (
+      e.pointerType === "touch" &&
+      performance.now() - lastPenTimeRef.current < 700
+    ) {
+      return;
+    }
+    const { activeLayerId } = stateRef.current;
+    pushUndo(activeLayerId);
+    e.currentTarget.setPointerCapture(e.pointerId);
+    const pt = toLogical(e.clientX, e.clientY);
+    const pressure = pressureOf(e.pressure);
+    drawingRef.current = { pointerId: e.pointerId, ...pt, pressure };
+    // A dot for taps.
+    drawSegment(pt, pt, pressure);
+  }
 
-  const handlePointerMove = useCallback(
-    (e: React.PointerEvent<HTMLDivElement>) => {
-      const drawing = drawingRef.current;
-      if (!drawing || drawing.pointerId !== e.pointerId) return;
-      if (e.pointerType === "pen") lastPenTimeRef.current = performance.now();
-      // Coalesced events give the full-resolution stylus path on
-      // 120 Hz+ digitisers instead of one point per frame.
-      const native = e.nativeEvent;
-      const events =
-        typeof native.getCoalescedEvents === "function"
-          ? native.getCoalescedEvents()
-          : [native];
-      for (const ev of events.length > 0 ? events : [native]) {
-        const pt = toLogical(ev.clientX, ev.clientY);
-        // Exponential smoothing keeps a jittery pressure sensor from
-        // producing lumpy strokes.
-        const pressure =
-          drawing.pressure * 0.65 + pressureOf(ev.pressure) * 0.35;
-        drawSegment({ x: drawing.x, y: drawing.y }, pt, pressure);
-        drawing.x = pt.x;
-        drawing.y = pt.y;
-        drawing.pressure = pressure;
-      }
-    },
-    [toLogical, drawSegment],
-  );
+  function handlePointerMove(e: React.PointerEvent<HTMLDivElement>) {
+    const drawing = drawingRef.current;
+    if (!drawing || drawing.pointerId !== e.pointerId) return;
+    if (e.pointerType === "pen") lastPenTimeRef.current = performance.now();
+    // Coalesced events give the full-resolution stylus path on
+    // 120 Hz+ digitisers instead of one point per frame.
+    const native = e.nativeEvent;
+    const events =
+      typeof native.getCoalescedEvents === "function"
+        ? native.getCoalescedEvents()
+        : [native];
+    for (const ev of events.length > 0 ? events : [native]) {
+      const pt = toLogical(ev.clientX, ev.clientY);
+      // Exponential smoothing keeps a jittery pressure sensor from
+      // producing lumpy strokes.
+      const pressure =
+        drawing.pressure * 0.65 + pressureOf(ev.pressure) * 0.35;
+      drawSegment({ x: drawing.x, y: drawing.y }, pt, pressure);
+      drawing.x = pt.x;
+      drawing.y = pt.y;
+      drawing.pressure = pressure;
+    }
+  }
 
-  const handlePointerEnd = useCallback(
-    (e: React.PointerEvent<HTMLDivElement>) => {
-      const drawing = drawingRef.current;
-      if (!drawing || drawing.pointerId !== e.pointerId) return;
-      drawingRef.current = null;
-      try {
-        e.currentTarget.releasePointerCapture(e.pointerId);
-      } catch {
-        /* already released */
-      }
-    },
-    [],
-  );
+  function handlePointerEnd(e: React.PointerEvent<HTMLDivElement>) {
+    const drawing = drawingRef.current;
+    if (!drawing || drawing.pointerId !== e.pointerId) return;
+    drawingRef.current = null;
+    try {
+      e.currentTarget.releasePointerCapture(e.pointerId);
+    } catch {
+      /* already released */
+    }
+  }
 
   // ── Layer rename helpers ─────────────────────────────────────────
 
@@ -420,13 +424,11 @@ export function SketchPad() {
     <div
       data-testid="sketch-pad"
       style={{
-        position: "fixed",
-        inset: 0,
-        zIndex: 9000,
-        display: state.open ? "flex" : "none",
+        flex: 1,
+        minHeight: 0,
+        display: "flex",
         flexDirection: "column",
-        background: "rgba(3, 6, 12, 0.96)",
-        backdropFilter: "blur(6px)",
+        background: "rgba(3, 6, 12, 0.85)",
       }}
     >
       {/* ── Top bar ─────────────────────────────────────────────── */}
@@ -435,7 +437,7 @@ export function SketchPad() {
           display: "flex",
           alignItems: "center",
           gap: 8,
-          padding: "10px 16px",
+          padding: "8px 16px",
           borderBottom: "1px solid var(--border)",
           flexWrap: "wrap",
         }}
@@ -462,7 +464,7 @@ export function SketchPad() {
           type="button"
           className="hud-button"
           data-testid="sketch-undo-btn"
-          onClick={undo}
+          onClick={undoStroke}
           title="Undo last stroke (Alfred: 'undo that')"
         >
           ↶ UNDO
@@ -471,7 +473,7 @@ export function SketchPad() {
           type="button"
           className="hud-button"
           data-testid="sketch-redo-btn"
-          onClick={redo}
+          onClick={redoStroke}
           title="Redo"
         >
           ↷ REDO
@@ -499,7 +501,7 @@ export function SketchPad() {
           className="hud-button"
           data-testid="sketch-close-btn"
           onClick={() => sketchStore.setOpen(false)}
-          title="Close the design pad (your sketch is kept)"
+          title="Back to chat (your sketch is kept)"
         >
           ✕ CLOSE
         </button>
@@ -563,9 +565,7 @@ export function SketchPad() {
             step={1}
             value={state.brushSize}
             data-testid="sketch-brush-slider"
-            onChange={(e) =>
-              sketchStore.setBrushSize(Number(e.target.value))
-            }
+            onChange={(e) => sketchStore.setBrushSize(Number(e.target.value))}
             style={{ width: "100%", accentColor: "var(--hud)" }}
           />
           {/* Live brush preview dot */}
@@ -640,7 +640,9 @@ export function SketchPad() {
           <input
             type="color"
             data-testid="sketch-color-picker"
-            value={/^#[0-9a-fA-F]{6}$/.test(state.color) ? state.color : "#6cd6ff"}
+            value={
+              /^#[0-9a-fA-F]{6}$/.test(state.color) ? state.color : "#6cd6ff"
+            }
             onChange={(e) => sketchStore.setColor(e.target.value)}
             title="Pick any colour"
             style={{
@@ -676,8 +678,7 @@ export function SketchPad() {
             onPointerCancel={handlePointerEnd}
             style={{
               position: "relative",
-              width: "100%",
-              maxWidth: `calc((100vh - 140px) * ${LOGICAL_W / LOGICAL_H})`,
+              width: `min(100%, calc((100vh - 260px) * ${LOGICAL_W / LOGICAL_H}))`,
               aspectRatio: `${LOGICAL_W} / ${LOGICAL_H}`,
               touchAction: "none",
               cursor: "crosshair",
@@ -693,29 +694,7 @@ export function SketchPad() {
               backgroundSize: "32px 32px",
               overflow: "hidden",
             }}
-          >
-            {/* Bottom layer first in the DOM so the stack paints in
-                order; the panel lists them top-first. */}
-            {[...state.layers].reverse().map((layer) => (
-              <canvas
-                key={layer.id}
-                ref={(el) => {
-                  if (el) canvasesRef.current.set(layer.id, el);
-                }}
-                width={LOGICAL_W}
-                height={LOGICAL_H}
-                style={{
-                  position: "absolute",
-                  inset: 0,
-                  width: "100%",
-                  height: "100%",
-                  opacity: layer.opacity,
-                  visibility: layer.visible ? "visible" : "hidden",
-                  pointerEvents: "none",
-                }}
-              />
-            ))}
-          </div>
+          />
         </main>
 
         {/* Layers panel */}

@@ -1,9 +1,17 @@
 # The Design Pad
 
-A built-in sketch pad ("design tab") in the Alfred web UI, made for a
-touchscreen monitor but fully usable with a mouse. Open it with the
-**✏ DESIGN** header button, the quick-tools radial menu (left fist),
-or just ask: *"Alfred, pull up the design tab."*
+A built-in sketch pad that **is the DESIGN tab** in the Alfred web UI
+(it replaced the old CAD placeholder view), made for a touchscreen
+monitor but fully usable with a mouse. Open it by:
+
+- clicking the **DESIGN** tab (next to HUD / CHAT / WORKOUT),
+- picking the **DESIGN — Sketch Pad** module in the radial menu
+  (click the orb, or say "open the menu"),
+- the **✏ DESIGN** button in the chat header,
+- or just asking: *"Alfred, pull up the design tab."*
+
+Switching tabs never loses your drawing — the layer bitmaps live
+outside the tab and are re-attached when you come back.
 
 ## Drawing
 
