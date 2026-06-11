@@ -55,7 +55,16 @@ from alfred_core.db.models import SpotifyAccount
 SPOTIFY_SCOPES = (
     "user-read-playback-state user-modify-playback-state "
     "user-read-currently-playing streaming "
-    "user-read-email user-read-private"
+    "user-read-email user-read-private "
+    # Library / playlist scopes — required for the Spotify3DView to
+    # browse the user's own playlists + saved tracks. The catalog
+    # /v1/search endpoint was deprecated for development-mode apps
+    # in November 2024 (returns a misleading 400 "Invalid limit"),
+    # so we search WITHIN the user's library instead — which needs
+    # these scopes. Existing users must DISCONNECT + RECONNECT once
+    # to re-mint their refresh token with the broader scope grant.
+    "playlist-read-private playlist-read-collaborative "
+    "user-library-read user-top-read user-read-recently-played"
 )
 
 _AUTH_BASE = "https://accounts.spotify.com"
@@ -376,6 +385,237 @@ class SpotifyClient:
             return None
         uri = items[0].get("uri")
         return str(uri) if uri else None
+
+    # ─── Library / playlist browsing for the 3D view ─────────────────
+    #
+    # These return lightweight dicts (not Pydantic models) so the
+    # FastAPI endpoint can pass them straight through without an
+    # extra serialization layer. Shapes are stable across Spotify
+    # API revisions for the fields we touch.
+
+    async def list_playlists(self, *, limit: int = 50, offset: int = 0) -> list[dict[str, Any]]:
+        """List the user's own + saved playlists.
+
+        Spotify caps ``limit`` at 50 per request. We expose pagination
+        via ``offset`` so the UI can lazy-load past 50 if the user has
+        a huge library. Each entry includes the playlist id, name,
+        track count, owner display name, and a 300-px cover image URL.
+        """
+        token = await self.get_access_token()
+        response = await self._http(
+            "GET",
+            f"{_API_BASE}/me/playlists",
+            headers=self._auth_headers(token),
+            params={"limit": min(50, max(1, limit)), "offset": max(0, offset)},
+        )
+        if response.status_code >= 400:
+            raise SpotifyError(
+                f"Spotify playlists returned HTTP {response.status_code}: "
+                f"{response.text[:200]}"
+            )
+        body: dict[str, Any] = response.json()
+        items: list[dict[str, Any]] = body.get("items") or []
+        out: list[dict[str, Any]] = []
+        for it in items:
+            if not isinstance(it, dict):
+                continue
+            images: list[dict[str, Any]] = it.get("images") or []
+            image_url = ""
+            if images:
+                # Spotify orders largest-first; pick the middle one
+                # (~300px) when available, else fall back to the
+                # smallest, else the first.
+                picked = images[1] if len(images) > 1 else images[0]
+                image_url = str(picked.get("url") or "")
+            tracks_meta: dict[str, Any] = it.get("tracks") or {}
+            owner: dict[str, Any] = it.get("owner") or {}
+            out.append(
+                {
+                    "id": str(it.get("id") or ""),
+                    "name": str(it.get("name") or ""),
+                    "uri": str(it.get("uri") or ""),
+                    "image_url": image_url,
+                    "track_count": int(tracks_meta.get("total") or 0),
+                    "owner": str(owner.get("display_name") or owner.get("id") or ""),
+                }
+            )
+        return out
+
+    async def list_playlist_tracks(
+        self,
+        playlist_id: str,
+        *,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        """List the tracks inside a playlist.
+
+        Filters out local files (Spotify lets users add local tracks
+        to playlists; their URIs start with ``spotify:local:`` and
+        can't be played via the Web API).
+        """
+        if not playlist_id:
+            raise SpotifyError("playlist_id is required.")
+        token = await self.get_access_token()
+        response = await self._http(
+            "GET",
+            f"{_API_BASE}/playlists/{playlist_id}/tracks",
+            headers=self._auth_headers(token),
+            params={
+                "limit": min(100, max(1, limit)),
+                "offset": max(0, offset),
+                # Slim the response so we don't ship 50 KB per page.
+                "fields": (
+                    "items(track(id,uri,name,duration_ms,is_local,"
+                    "artists(name),album(name,images)))"
+                ),
+            },
+        )
+        if response.status_code >= 400:
+            raise SpotifyError(
+                f"Spotify playlist tracks returned HTTP {response.status_code}: "
+                f"{response.text[:200]}"
+            )
+        body: dict[str, Any] = response.json()
+        items: list[dict[str, Any]] = body.get("items") or []
+        return [self._compact_track(it.get("track") or {}) for it in items if (it.get("track") or {}).get("uri")]
+
+    async def search_tracks(self, query: str, *, limit: int = 20) -> list[dict[str, Any]]:
+        """Search the user's OWN library for tracks matching the query.
+
+        Spotify deprecated the public ``/v1/search`` endpoint for
+        development-mode apps in November 2024 — calling it now
+        returns a misleading "400 Invalid limit" response regardless
+        of the limit value. Since most personal Alfred deployments
+        run in dev mode, we fall back to searching across the
+        endpoints that ARE still allowed for dev-mode apps:
+
+          - ``/me/tracks`` — user's saved (liked) tracks
+          - ``/me/top/tracks`` — user's most-played tracks
+          - ``/me/player/recently-played`` — recent listening history
+          - the user's own playlists' first 100 tracks each
+
+        Combined, deduped by URI, filtered by case-insensitive substring
+        match against title / artists / album, and sorted so the user
+        sees the closest matches first. Not a full catalog search but
+        practically what people want when they say "play that song" —
+        90% of the time it's something they already listen to.
+        """
+        if not query.strip():
+            return []
+        token = await self.get_access_token()
+        headers = self._auth_headers(token)
+        all_tracks: dict[str, dict[str, Any]] = {}  # uri → compact dict
+
+        async def merge_response(url: str, params: dict[str, Any] | None = None) -> None:
+            try:
+                resp = await self._http("GET", url, headers=headers, params=params)
+            except SpotifyError:
+                return  # endpoint individually blocked; continue with the others
+            if resp.status_code >= 400:
+                # Soft-fail per endpoint — one blocked endpoint
+                # shouldn't kill the whole search. We still log the
+                # status so it surfaces in alfred-core logs.
+                return
+            body: dict[str, Any] = resp.json()
+            items: list[dict[str, Any]] = body.get("items") or []
+            for it in items:
+                # ``/me/tracks`` / ``/me/player/recently-played`` wrap
+                # the track in ``{ track: ..., added_at: ... }``;
+                # ``/me/top/tracks`` is bare. Handle both.
+                tr = it.get("track") if isinstance(it.get("track"), dict) else it
+                compact = self._compact_track(tr or {})
+                if compact.get("uri"):
+                    all_tracks.setdefault(compact["uri"], compact)
+
+        await merge_response(f"{_API_BASE}/me/tracks", {"limit": 50})
+        await merge_response(f"{_API_BASE}/me/top/tracks", {"limit": 50, "time_range": "medium_term"})
+        await merge_response(f"{_API_BASE}/me/player/recently-played", {"limit": 50})
+
+        # Pull up to 5 user playlists' first 100 tracks each. Beyond
+        # that the latency starts to bite; the average user has 1-3
+        # playlists they actually use day-to-day so 5 is plenty.
+        try:
+            pl_resp = await self._http(
+                "GET",
+                f"{_API_BASE}/me/playlists",
+                headers=headers,
+                params={"limit": 5, "offset": 0},
+            )
+            if pl_resp.status_code < 400:
+                pl_items: list[dict[str, Any]] = pl_resp.json().get("items") or []
+                for pl in pl_items:
+                    pl_id = pl.get("id")
+                    if not pl_id:
+                        continue
+                    await merge_response(
+                        f"{_API_BASE}/playlists/{pl_id}/tracks",
+                        {
+                            "limit": 100,
+                            "offset": 0,
+                            "fields": (
+                                "items(track(id,uri,name,duration_ms,is_local,"
+                                "artists(name),album(name,images)))"
+                            ),
+                        },
+                    )
+        except SpotifyError:
+            pass
+
+        # Local case-insensitive substring filter. We score each
+        # match so the closest (title prefix → exact title match)
+        # land at the top.
+        needle = query.strip().lower()
+        scored: list[tuple[int, dict[str, Any]]] = []
+        for compact in all_tracks.values():
+            title = (compact.get("title") or "").lower()
+            artists = (compact.get("artists") or "").lower()
+            album = (compact.get("album") or "").lower()
+            score = 0
+            if title == needle:
+                score = 100
+            elif title.startswith(needle):
+                score = 80
+            elif needle in title:
+                score = 60
+            elif needle in artists:
+                score = 40
+            elif needle in album:
+                score = 20
+            if score > 0:
+                scored.append((score, compact))
+        scored.sort(key=lambda x: x[0], reverse=True)
+        return [c for _, c in scored[: min(50, max(1, limit))]]
+
+    @staticmethod
+    def _compact_track(item: dict[str, Any]) -> dict[str, Any]:
+        """Reduce a Spotify track object to the minimum the UI needs.
+
+        Local-file tracks (``is_local: true``) are still emitted but
+        with ``is_playable: false`` so the UI can grey them out — the
+        Web Playback SDK refuses to play them.
+        """
+        if not isinstance(item, dict):
+            return {}
+        artist_list: list[dict[str, Any]] = item.get("artists") or []
+        artists = ", ".join(str(a.get("name", "")) for a in artist_list if isinstance(a, dict))
+        album: dict[str, Any] = item.get("album") or {}
+        images: list[dict[str, Any]] = album.get("images") or []
+        image_url = ""
+        if images:
+            picked = images[-1] if len(images) >= 1 else images[0]
+            image_url = str(picked.get("url") or "")
+        is_local = bool(item.get("is_local"))
+        return {
+            "track_id": str(item.get("id") or ""),
+            "uri": str(item.get("uri") or ""),
+            "title": str(item.get("name") or ""),
+            "artists": artists,
+            "album": str(album.get("name") or ""),
+            "duration_ms": int(item.get("duration_ms") or 0),
+            "image_url": image_url,
+            "is_playable": not is_local,
+        }
 
     async def audio_analysis(self, track_id: str) -> dict[str, Any]:
         """Fetch beat/segment-level analysis for the visualizer.

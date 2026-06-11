@@ -454,3 +454,65 @@ async def audio_analysis(
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     await session.commit()
     return analysis
+
+
+# ─── Library / playlist browsing for the 3D view ─────────────────────
+
+
+@router.get("/playlists")
+async def list_playlists(
+    limit: int = Query(default=50, ge=1, le=50),
+    offset: int = Query(default=0, ge=0),
+    session: AsyncSession = Depends(get_session),
+    settings: Settings = Depends(get_settings),
+) -> dict[str, Any]:
+    """List the connected user's playlists for the Spotify3DView."""
+    try:
+        items = await _client(session, settings).list_playlists(
+            limit=limit, offset=offset
+        )
+    except SpotifyNotLinkedError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except (SpotifyUnconfiguredError, SpotifyError) as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    await session.commit()
+    return {"items": items}
+
+
+@router.get("/playlists/{playlist_id}/tracks")
+async def list_playlist_tracks(
+    playlist_id: str,
+    limit: int = Query(default=100, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+    session: AsyncSession = Depends(get_session),
+    settings: Settings = Depends(get_settings),
+) -> dict[str, Any]:
+    """List the tracks inside a playlist."""
+    try:
+        items = await _client(session, settings).list_playlist_tracks(
+            playlist_id, limit=limit, offset=offset
+        )
+    except SpotifyNotLinkedError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except (SpotifyUnconfiguredError, SpotifyError) as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    await session.commit()
+    return {"items": items}
+
+
+@router.get("/search")
+async def search_tracks(
+    q: str = Query(..., min_length=1, description="Free-form search query"),
+    limit: int = Query(default=20, ge=1, le=50),
+    session: AsyncSession = Depends(get_session),
+    settings: Settings = Depends(get_settings),
+) -> dict[str, Any]:
+    """Search Spotify's catalog (multi-result, used by the 3D view)."""
+    try:
+        items = await _client(session, settings).search_tracks(q, limit=limit)
+    except SpotifyNotLinkedError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except (SpotifyUnconfiguredError, SpotifyError) as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    await session.commit()
+    return {"items": items}

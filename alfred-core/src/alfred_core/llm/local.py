@@ -60,9 +60,27 @@ class OllamaBackend(LLMBackend):
                 # Sensible defaults for a chat assistant. Tunable later.
                 "temperature": 0.7,
                 "num_ctx": 8192,
+                # Hard cap on generated tokens so a small local model
+                # cannot loop forever on a tricky prompt and exhaust
+                # the request timeout. 1024 is plenty for a butler's
+                # reply (a normal turn lands at 80–300 tokens). The
+                # symptom this prevents is the 502 ReadTimeout the
+                # user hit on greetings ("hello") and Nightfall —
+                # both prompts triggered the 8B Llama into looping
+                # on the [REMEMBER:] / [GENERATE_IMAGE] markers.
+                "num_predict": 1024,
+                # Discourage exact-token repetition. Llama 3.1 8B in
+                # particular has a known tendency to lock into
+                # repeating phrases when given long multi-tool
+                # system prompts; a small penalty tames it without
+                # hurting normal prose.
+                "repeat_penalty": 1.15,
             },
         }
-        async with httpx.AsyncClient(timeout=httpx.Timeout(120.0)) as client:
+        # 90s is enough for any sane reply on a CPU; the cap exists
+        # because users with slow GPUs would otherwise wait the full
+        # ``httpx`` 5-min default before discovering Ollama is stuck.
+        async with httpx.AsyncClient(timeout=httpx.Timeout(90.0)) as client:
             resp = await client.post(f"{self._host}/api/chat", json=payload)
             resp.raise_for_status()
             data = resp.json()

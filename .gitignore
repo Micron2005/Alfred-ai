@@ -55,3 +55,6 @@ credentials.json
 *.pem
 *.key
 .credentials
+alfred-memory/
+*.tar.gz
+*.sql

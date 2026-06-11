@@ -302,6 +302,21 @@ input {
   }
 }
 
+/* Floating "stop talking" button — gentle red pulse so the user's
+   eye is drawn to it the moment Alfred starts speaking. */
+@keyframes stop-pulse {
+  0%, 100% {
+    box-shadow:
+      0 0 12px rgba(255, 80, 80, 0.45),
+      0 0 32px rgba(255, 80, 80, 0.25);
+  }
+  50% {
+    box-shadow:
+      0 0 18px rgba(255, 80, 80, 0.7),
+      0 0 48px rgba(255, 80, 80, 0.4);
+  }
+}
+
 /* Orb ring rotations + tick orbit — pure CSS so React doesn't re-render.
  *
  * The orb SVG uses ``viewBox="-100 -100 200 200"``, so (0,0) in the

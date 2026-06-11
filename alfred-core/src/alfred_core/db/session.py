@@ -37,6 +37,18 @@ async def init_db() -> None:
     async with _engine.begin() as conn:
         await conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
         await conn.run_sync(Base.metadata.create_all)
+        # Lightweight "additive" migrations for columns added after
+        # a user's first ``create_all`` run. Alembic would be
+        # cleaner, but with a single-user self-hosted app the
+        # overhead isn't worth it. Each statement is idempotent
+        # (``IF NOT EXISTS``) so it's safe to re-run on every boot.
+        await conn.execute(
+            text(
+                "ALTER TABLE face_enrollments "
+                "ADD COLUMN IF NOT EXISTS is_admin BOOLEAN "
+                "NOT NULL DEFAULT FALSE"
+            )
+        )
 
 
 async def get_session() -> AsyncIterator[AsyncSession]:

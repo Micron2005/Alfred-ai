@@ -37,7 +37,12 @@ export type HudWidgetId =
   | "weather-strip"
   | "orb"
   | "spotify"
-  | "camera";
+  | "camera"
+  | "workout-coach"
+  | "face-recognition"
+  | "earth-hologram"
+  | "system-status"
+  | "vitals";
 
 export interface WidgetLayout {
   /** Top-left X position (px) inside the main pane. */
@@ -61,12 +66,26 @@ export type HudLayoutState = Record<HudWidgetId, WidgetLayout>;
  *  the main pane so they don't overlap the orb (which sits centred
  *  by default). The user can drag them anywhere from there. */
 export const DEFAULT_LAYOUT: HudLayoutState = {
-  clock: { x: 24, y: 16, w: 280, h: "auto", visible: true },
-  "weather-current": { x: 320, y: 16, w: 320, h: "auto", visible: true },
-  "weather-strip": { x: 24, y: 240, w: 720, h: "auto", visible: true },
-  orb: { x: 220, y: 60, w: 360, h: 200, visible: true },
-  spotify: { x: 24, y: 320, w: 480, h: "auto", visible: true },
-  camera: { x: 660, y: 16, w: 240, h: 180, visible: true },
+  clock: { x: 24, y: 80, w: 280, h: "auto", visible: true },
+  "weather-current": { x: 880, y: 80, w: 260, h: "auto", visible: true },
+  "weather-strip": { x: 24, y: 720, w: 720, h: "auto", visible: true },
+  // Orb sits centred — title block & greeting overlay sit above it.
+  orb: { x: 480, y: 240, w: 320, h: 200, visible: true },
+  spotify: { x: 24, y: 540, w: 460, h: "auto", visible: true },
+  // Camera in the top-right corner so it's always visible without
+  // scrolling — was previously stranded near the bottom of the canvas
+  // where the user couldn't reach it.
+  camera: { x: 820, y: 240, w: 260, h: 180, visible: true },
+  "workout-coach": { x: 820, y: 460, w: 260, h: 220, visible: true },
+  "face-recognition": { x: 820, y: 700, w: 260, h: "auto", visible: true },
+  "earth-hologram": { x: 320, y: 460, w: 480, h: 320, visible: true },
+  "system-status": { x: 1160, y: 80, w: 200, h: "auto", visible: true },
+  // Vitals lands top-right by default, just under SystemStatus, so the
+  // user can see at a glance whether Alfred's own integrations are
+  // alive. Width=240 fits the longest "Local LLM" row + status pill
+  // without truncating; height stays auto so the panel grows /
+  // shrinks with the row count.
+  vitals: { x: 1160, y: 280, w: 240, h: "auto", visible: true },
 };
 
 const ALL_IDS: HudWidgetId[] = [
@@ -76,6 +95,11 @@ const ALL_IDS: HudWidgetId[] = [
   "orb",
   "spotify",
   "camera",
+  "workout-coach",
+  "face-recognition",
+  "earth-hologram",
+  "system-status",
+  "vitals",
 ];
 
 export const WIDGET_LABELS: Record<HudWidgetId, string> = {
@@ -85,6 +109,11 @@ export const WIDGET_LABELS: Record<HudWidgetId, string> = {
   orb: "Orb",
   spotify: "Spotify",
   camera: "Camera",
+  "workout-coach": "Form Coach",
+  "face-recognition": "Recognition",
+  "earth-hologram": "Earth",
+  "system-status": "System Status",
+  vitals: "Vitals",
 };
 
 function cloneDefault(): HudLayoutState {
