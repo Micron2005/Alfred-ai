@@ -49,3 +49,9 @@ Thumbs.db
 logs/
 *.log
 alfred-core/uv.lock
+.env.*
+*.env
+credentials.json
+*.pem
+*.key
+.credentials
