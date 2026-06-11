@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { ModeIndicator } from "@/components/ModeIndicator";
 import { Message } from "@/components/Message";
 import { Composer, type ComposerHandle } from "@/components/Composer";
@@ -12,6 +12,7 @@ import {
   type ChatMessageOut,
   type ConversationSummary,
   type Mode,
+  type SketchSignal,
   deleteConversation,
   getConversation,
   listConversations,
@@ -34,6 +35,8 @@ import {
   type HudWidgetId,
 } from "@/lib/hudLayout";
 import { orbStore } from "@/lib/orbState";
+import { sketchStore } from "@/lib/sketchStore";
+import { SketchPad } from "@/components/SketchPad";
 
 const ACTIVE_CONVO_KEY = "alfred.activeConversationId";
 const VOICE_OUT_KEY = "alfred.voiceOutEnabled";
@@ -126,6 +129,15 @@ export function ChatWindow() {
   // whether widget drag/resize/hide handles are shown. See
   // ``lib/hudLayout.ts`` for the localStorage shape.
   const hud = useHudLayout();
+
+  // Design pad open state — mirrored from the sketch store so the
+  // header button and quick-tools item reflect Alfred-driven opens
+  // ("pull up the design tab") as well as manual toggles.
+  const sketchOpen = useSyncExternalStore(
+    sketchStore.subscribe,
+    () => sketchStore.getSnapshot().open,
+    () => false,
+  );
 
   // Quick-Tools radial menu. Triggered when the LEFT hand closes
   // into a fist (Phase 12c.3). Items are activated by right-hand
@@ -341,6 +353,13 @@ export function ChatWindow() {
       label: "Keyboard",
       active: false,
       onActivate: () => composerRef.current?.focus(),
+    },
+    {
+      id: "design",
+      glyph: "✏",
+      label: "Design",
+      active: sketchOpen,
+      onActivate: () => sketchStore.setOpen(!sketchOpen),
     },
     {
       id: "hud",
@@ -598,12 +617,35 @@ export function ChatWindow() {
       cameraOn && camera.status === "ready"
         ? { faces_visible: camera.faceCount }
         : null;
+    // Snapshot the design pad at send time too — state + a flattened
+    // PNG, so Alfred can answer "what tool am I on?" from context and
+    // actually look at the sketch when he emits [SKETCH_ANALYZE].
+    const sk = sketchStore.getSnapshot();
+    const sketch: SketchSignal | null = sk.open
+      ? {
+          open: true,
+          tool: sk.tool,
+          color: sk.color,
+          brush_size: sk.brushSize,
+          layers: sk.layers.map((l) => ({
+            name: l.name,
+            visible: l.visible,
+            active: l.id === sk.activeLayerId,
+          })),
+          snapshot: sketchStore.captureSnapshot(),
+        }
+      : null;
     try {
-      const reply = await sendMessage(text, convoId, images, presence);
+      const reply = await sendMessage(text, convoId, images, presence, sketch);
       setConvoId(reply.conversation_id);
       localStorage.setItem(ACTIVE_CONVO_KEY, reply.conversation_id);
       setMode(reply.mode);
       setMessages((prev) => [...prev, reply.assistant]);
+      // Apply any design-pad commands Alfred returned ("open the pad",
+      // "switch to pen", "new layer", …) in marker order.
+      for (const cmd of reply.sketch_commands ?? []) {
+        sketchStore.applyCommand(cmd.action, cmd.value);
+      }
       await refreshList();
       if (voiceOut && reply.assistant.content.trim()) {
         void speak(reply.assistant.content);
@@ -912,6 +954,20 @@ export function ChatWindow() {
             <button
               type="button"
               className="hud-button"
+              data-testid="design-pad-toggle-btn"
+              onClick={() => sketchStore.setOpen(!sketchOpen)}
+              aria-pressed={sketchOpen}
+              title={
+                sketchOpen
+                  ? "Close the design pad (your sketch is kept)"
+                  : 'Open the design pad — or say "Alfred, pull up the design tab"'
+              }
+            >
+              {sketchOpen ? "✏ DESIGN · ON" : "✏ DESIGN"}
+            </button>
+            <button
+              type="button"
+              className="hud-button"
               onClick={() => setFullHudPersisted(!fullHud)}
               aria-pressed={fullHud}
               title={
@@ -1180,6 +1236,13 @@ export function ChatWindow() {
           rightHand={hand.right}
           leftHand={hand.left}
         />
+        {/*
+          Design pad overlay. Always mounted (it hides itself with
+          display:none when closed) so the per-layer canvas bitmaps
+          survive open/close cycles — unmounting would wipe the
+          user's sketch.
+        */}
+        <SketchPad />
         <QuickToolsMenu
           visible={quickTools.visible}
           anchor={quickTools.anchor}

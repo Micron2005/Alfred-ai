@@ -58,6 +58,11 @@ class ContextBundle:
     # this flag we'd tell the LLM it can play music when in fact the
     # account isn't linked yet.
     spotify_linked: bool = False
+    # Human-readable state of the design pad (sketch pad) when it is
+    # open in the browser: active tool, colour, brush size, layers.
+    # Empty string means the pad is closed (or the client didn't send
+    # a sketch signal at all).
+    sketch_summary: str = ""
 
 
 STANDARD_TEMPLATE = """\
@@ -312,6 +317,63 @@ and no image.
 """
 
 
+SKETCH_TOOL_PROMPT = """\
+
+DESIGN PAD — YOU CAN DRIVE HIS SKETCH PAD
+The web UI has a built-in sketch pad — he calls it the "design tab" or
+"design pad" — with multiple layers, pressure-sensitive pencil / pen /
+marker / eraser tools, and a full colour palette. You can open it and
+operate it for him by emitting markers, each on its own line:
+
+    [SKETCH_OPEN]                      open the design pad ("pull up the design tab")
+    [SKETCH_CLOSE]                     close it
+    [SKETCH_TOOL: pen]                 switch tool — pencil | pen | marker | eraser
+    [SKETCH_COLOR: #ff4d4d]            set ink colour (hex like #ff4d4d, or a simple CSS name like "red")
+    [SKETCH_BRUSH: 12]                 set brush size (1-64)
+    [SKETCH_LAYER_ADD: Shading]        add a new layer on top (name optional)
+    [SKETCH_LAYER_SELECT: Shading]     make an existing layer active (by name)
+    [SKETCH_UNDO]                      undo his last stroke
+    [SKETCH_REDO]
+    [SKETCH_CLEAR]                     clear the ACTIVE layer only
+
+The system executes each marker on his screen and replaces it with a
+short confirmation in his view. You may emit several markers in one
+reply when he asks for several things at once — "new layer with a red
+pen" → [SKETCH_LAYER_ADD] + [SKETCH_TOOL: pen] + [SKETCH_COLOR: red].
+
+Rules:
+- When the CURRENT CONTEXT block says the design pad is open, it also
+  lists his active tool, colour, brush size, and layers. Use that to
+  answer questions like "what tool am I using?" without guessing.
+- If the context does not mention the design pad, it is closed. Any
+  command other than OPEN/CLOSE will open it automatically, so don't
+  emit a separate [SKETCH_OPEN] alongside other commands.
+- Emit command markers in your final reply only — never invent results.
+  Don't claim you changed a tool, colour, or layer without emitting
+  the marker.
+- A short polite line beside the markers is fine \
+("The drafting table is yours, {address}.") but don't pad.
+"""
+
+
+SKETCH_ANALYZE_PROMPT = """\
+
+ANALYZING HIS SKETCH
+When he asks you to look at, analyze, critique, or comment on his
+sketch, emit this marker on its own line:
+
+    [SKETCH_ANALYZE]
+
+The system will hand you a snapshot image of the current design pad in
+a follow-up turn. Treat that image as what is actually on his screen
+and give a genuine response — what is drawn, composition, line quality,
+proportions, what to refine next. Be Alfred about it: honest, precise,
+encouraging where deserved. This only works when the design pad is
+open; if it isn't, the system will tell him so. Don't claim to have
+seen the sketch without emitting the marker.
+"""
+
+
 EMAIL_TOOL_PROMPT = """\
 
 EMAIL — YOU CAN SEND ON HIS BEHALF
@@ -350,7 +412,7 @@ reason, and offer to retry.
 WORLD_CONTEXT_TEMPLATE = """\
 
 CURRENT CONTEXT (refreshed each turn)
-{time_line}{weather_line}{presence_line}{facts_block}
+{time_line}{weather_line}{presence_line}{sketch_line}{facts_block}
 """
 
 
@@ -390,7 +452,15 @@ def _format_context(context: ContextBundle | None) -> str:
             f"- Through the laptop camera you can currently see {phrase}.\n"
         )
 
-    if not (time_line or weather_line or facts_block or presence_line):
+    sketch_line = ""
+    if context.sketch_summary:
+        sketch_line = (
+            f"- The design pad is OPEN on his screen. {context.sketch_summary}\n"
+        )
+
+    if not (
+        time_line or weather_line or facts_block or presence_line or sketch_line
+    ):
         return ""
 
     return WORLD_CONTEXT_TEMPLATE.format(
@@ -398,6 +468,7 @@ def _format_context(context: ContextBundle | None) -> str:
         weather_line=weather_line,
         facts_block=facts_block,
         presence_line=presence_line,
+        sketch_line=sketch_line,
     )
 
 
@@ -449,6 +520,16 @@ def build_persona(
     prompt = prompt + IMAGE_GEN_TOOL_PROMPT.format(
         address=settings.alfred_user_address,
     )
+
+    # The design pad ships with the web UI, so the control markers are
+    # always available. Analysing the sketch needs a vision backend —
+    # only dangle that capability when one is actually wired, otherwise
+    # Alfred would promise a critique he can't deliver.
+    prompt = prompt + SKETCH_TOOL_PROMPT.format(
+        address=settings.alfred_user_address,
+    )
+    if settings.has_vision:
+        prompt = prompt + SKETCH_ANALYZE_PROMPT
 
     # Spotify control is gated on both server-side configuration AND
     # the user having linked their account — without the OAuth grant

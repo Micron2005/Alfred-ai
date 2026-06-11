@@ -14,6 +14,7 @@ This is a hobby project for **Mukarram Mohammad Alam**, built to run on a home P
 - [x] Pluggable LLM backends: local (Ollama) + cloud (Anthropic Claude for coding)
 - [x] Postgres + pgvector for memory and feedback
 - [x] Docker Compose for one-command local run
+- [x] **Design pad** — touch/stylus sketch pad with layers, pressure-sensitive tools, and Alfred voice control ("pull up the design tab", "analyze my sketch") — see [docs/DESIGN_PAD.md](docs/DESIGN_PAD.md)
 - [ ] Smart-home control via Home Assistant (Phase 2)
 - [ ] Creality K1 Max printer control + CAD generation (Phase 3)
 - [ ] Voice in/out with Whisper + Piper (Phase 4)

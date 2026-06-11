@@ -37,6 +37,8 @@ export interface ChatReply {
   mode: Mode;
   mode_changed: boolean;
   assistant: ChatMessageOut;
+  /** Design-pad commands to apply, in order. Empty for normal turns. */
+  sketch_commands?: SketchCommand[];
 }
 
 export interface ConversationSummary {
@@ -61,11 +63,38 @@ export interface PresenceSignal {
   faces_visible: number;
 }
 
+// ─── Design pad (sketch pad) ────────────────────────────────────────────
+
+export interface SketchLayerSignal {
+  name: string;
+  visible: boolean;
+  active: boolean;
+}
+
+/** Live design-pad state snapshot, sent only while the pad is open. */
+export interface SketchSignal {
+  open: boolean;
+  tool: string;
+  color: string;
+  brush_size: number;
+  /** Top-first, matching the layers panel. */
+  layers: SketchLayerSignal[];
+  /** Flattened PNG of visible layers for [SKETCH_ANALYZE] turns. */
+  snapshot: ChatImage | null;
+}
+
+/** One design-pad command Alfred asked the UI to execute. */
+export interface SketchCommand {
+  action: string;
+  value: string;
+}
+
 export async function sendMessage(
   message: string,
   conversationId: string | null,
   images: ChatImage[] = [],
   presence: PresenceSignal | null = null,
+  sketch: SketchSignal | null = null,
 ): Promise<ChatReply> {
   const resp = await fetch(`${API_BASE}/chat`, {
     method: "POST",
@@ -79,6 +108,9 @@ export async function sendMessage(
       // serializer treats it as "no observation" rather than
       // "observation: nothing".
       ...(presence ? { presence } : {}),
+      // Same idea for the design pad: only send state while it's open
+      // so Alfred never speaks as if he can see a pad that isn't there.
+      ...(sketch ? { sketch } : {}),
     }),
   });
   if (!resp.ok) {
