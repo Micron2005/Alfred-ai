@@ -65,6 +65,25 @@ from alfred_core.tools.search_marker import (
     extract_invocations,
     strip_markers,
 )
+from alfred_core.tools.sketch_marker import (
+    MAX_BRUSH,
+    MIN_BRUSH,
+    VALID_TOOLS,
+    SketchAction,
+    SketchInvocation,
+)
+from alfred_core.tools.sketch_marker import (
+    confirmation_for as sketch_confirmation_for,
+)
+from alfred_core.tools.sketch_marker import (
+    extract_invocations as extract_sketch_invocations,
+)
+from alfred_core.tools.sketch_marker import (
+    replace_marker as replace_sketch_marker,
+)
+from alfred_core.tools.sketch_marker import (
+    strip_markers as strip_sketch_markers,
+)
 from alfred_core.tools.spotify import (
     SpotifyClient,
     SpotifyError,
@@ -113,11 +132,52 @@ class PresenceSignal(BaseModel):
     faces_visible: int
 
 
+class SketchLayerSignal(BaseModel):
+    """One layer of the design pad, as reported by the client."""
+
+    name: str
+    visible: bool = True
+    active: bool = False
+
+
+class SketchSignal(BaseModel):
+    """Live design-pad state snapshot taken at send-time.
+
+    Sent only while the user has the design pad open; otherwise the
+    field is omitted entirely so Alfred doesn't speak as if he can
+    see a sketch when there isn't one.
+    """
+
+    open: bool = False
+    tool: str = "pen"
+    color: str = "#6cd6ff"
+    brush_size: float = 6
+    # Top-first, matching the UI's layers panel.
+    layers: list[SketchLayerSignal] = []
+    # Flattened PNG of the visible layers, used when the model emits
+    # ``[SKETCH_ANALYZE]``. Optional — an empty pad sends one anyway
+    # (Alfred will simply observe that it's blank).
+    snapshot: ImagePayload | None = None
+
+
+class SketchCommandOut(BaseModel):
+    """One design-pad command for the frontend to execute.
+
+    ``action`` is a ``SketchAction`` value ("open", "tool",
+    "layer_add", …); ``value`` is its argument where applicable
+    (tool name, colour, layer name, brush size as a string).
+    """
+
+    action: str
+    value: str = ""
+
+
 class ChatRequest(BaseModel):
     message: str
     conversation_id: UUID | None = None
     images: list[ImagePayload] = []
     presence: PresenceSignal | None = None
+    sketch: SketchSignal | None = None
 
 
 class ImageOut(BaseModel):
@@ -161,6 +221,10 @@ class ChatReply(BaseModel):
     mode: Mode
     mode_changed: bool
     assistant: ChatMessageOut
+    # Design-pad commands parsed from the assistant's reply, in marker
+    # order. The frontend applies them to the canvas after rendering
+    # the message. Empty for ordinary turns.
+    sketch_commands: list[SketchCommandOut] = []
 
 
 async def _load_or_create(session: AsyncSession, cid: UUID | None) -> Conversation:
@@ -285,24 +349,40 @@ class _SearchLoopOutcome:
     # would otherwise be silently dropped because the chat handler
     # only strips the final reply.
     collected_facts: list[str]
+    # Whether a ``[SKETCH_ANALYZE]`` marker was honoured this round
+    # (the model was re-prompted with the pad snapshot). The chat
+    # handler uses this to decide how to replace any stray analyze
+    # marker left in the final reply.
+    sketch_analyzed: bool
+    # Non-analyze sketch invocations harvested from INTERMEDIATE
+    # replies (e.g. the model emitted [SKETCH_TOOL: pen] alongside
+    # [SKETCH_ANALYZE] in the same turn). Stripping them from the
+    # history would otherwise silently drop the command.
+    collected_sketch_invocations: list[SketchInvocation]
 
 
 async def _run_search_loop(
     msgs: list[ChatMessage],
     settings: Settings,
+    sketch_snapshot: ChatImage | None = None,
 ) -> _SearchLoopOutcome:
-    """Drive the LLM ↔ search-tool loop until we have a final reply.
+    """Drive the LLM ↔ tool loop until we have a final reply.
 
-    Returns the final visible reply (with ``[SEARCH:]`` markers
-    stripped), the backend/model that produced it, the deduplicated
-    list of results we consulted along the way (for the UI's
-    "sources" footer), and any ``[REMEMBER:]`` facts harvested from
-    intermediate replies.
+    Handles two re-prompt tools: ``[SEARCH:]`` (web results fed back
+    as a synthetic user turn) and ``[SKETCH_ANALYZE]`` (the design-pad
+    snapshot fed back as an image-bearing user turn, which the router
+    sends to the vision backend). Returns the final visible reply
+    (with ``[SEARCH:]`` markers stripped), the backend/model that
+    produced it, the deduplicated list of results we consulted along
+    the way (for the UI's "sources" footer), and any ``[REMEMBER:]``
+    facts harvested from intermediate replies.
     """
     collected_sources: list[SearchResult] = []
     collected_facts: list[str] = []
+    collected_sketch_invocations: list[SketchInvocation] = []
     seen_urls: set[str] = set()
     iteration = 0
+    sketch_analyzed = False
     final_text = ""
     final_backend: str | None = None
     final_model: str | None = None
@@ -314,8 +394,66 @@ async def _run_search_loop(
         final_model = reply.model
 
         invocations = extract_invocations(reply.content)
-        if not invocations or iteration >= _MAX_SEARCH_ITERATIONS:
+        sketch_invocations = extract_sketch_invocations(reply.content)
+        wants_sketch_analysis = (
+            sketch_snapshot is not None
+            and not sketch_analyzed
+            and any(
+                inv.action is SketchAction.ANALYZE
+                for inv in sketch_invocations
+            )
+        )
+        if (
+            not invocations and not wants_sketch_analysis
+        ) or iteration >= _MAX_SEARCH_ITERATIONS:
             break
+
+        # Strip [REMEMBER:], [SEARCH:], and [SKETCH_…] markers before
+        # feeding the intermediate reply back into the conversation.
+        # The remember-extraction protects facts that would otherwise
+        # be lost (the chat handler only strips the *final* reply);
+        # the marker strips keep the model from re-running the same
+        # tool when it sees its own past output. Non-analyze sketch
+        # commands are collected so they still reach the frontend
+        # even though their markers vanish from the final reply.
+        intermediate_clean, intermediate_facts = extract_and_strip(reply.content)
+        collected_facts.extend(intermediate_facts)
+        intermediate_clean = strip_markers(intermediate_clean)
+        intermediate_clean = strip_sketch_markers(intermediate_clean)
+        collected_sketch_invocations.extend(
+            inv
+            for inv in sketch_invocations
+            if inv.action is not SketchAction.ANALYZE
+        )
+
+        if wants_sketch_analysis:
+            # Re-prompt with the pad snapshot. The image on the
+            # synthetic user turn routes the follow-up completion to
+            # the vision backend automatically.
+            sketch_analyzed = True
+            msgs.append(
+                ChatMessage(
+                    role="assistant",
+                    content=intermediate_clean
+                    or "Let me have a look at the pad.",
+                )
+            )
+            assert sketch_snapshot is not None
+            msgs.append(
+                ChatMessage(
+                    role="user",
+                    content=(
+                        "[DESIGN PAD SNAPSHOT] This is the current state "
+                        "of the design pad on my screen. Look at it and "
+                        "answer my last request about the sketch — "
+                        "describe and critique what is actually drawn, "
+                        "not what you imagine."
+                    ),
+                    images=[sketch_snapshot],
+                )
+            )
+            iteration += 1
+            continue
 
         # Cap to one search per iteration even if the model emitted
         # several markers in the same turn — otherwise a model that
@@ -338,16 +476,6 @@ async def _run_search_loop(
             seen_urls.add(key)
             collected_sources.append(r)
 
-        # Strip both [REMEMBER:] and [SEARCH:] markers before feeding
-        # the intermediate reply back into the conversation. The
-        # remember-extraction protects facts that would otherwise be
-        # lost (the chat handler only strips the *final* reply); the
-        # search-marker strip keeps the model from re-running the
-        # same query when it sees its own past output.
-        intermediate_clean, intermediate_facts = extract_and_strip(reply.content)
-        collected_facts.extend(intermediate_facts)
-        intermediate_clean = strip_markers(intermediate_clean)
-
         # Append the model's (cleaned) tool-call turn so its own
         # conversation history makes sense to it on the follow-up,
         # then append the synthetic results as a user-role turn so
@@ -368,6 +496,8 @@ async def _run_search_loop(
         model=final_model,
         sources=collected_sources,
         collected_facts=collected_facts,
+        sketch_analyzed=sketch_analyzed,
+        collected_sketch_invocations=collected_sketch_invocations,
     )
 
 
@@ -408,10 +538,126 @@ def _synthetic_error_results(
     ]
 
 
+def _sketch_summary(sketch: SketchSignal | None) -> str:
+    """One-line description of the open design pad for the persona.
+
+    Empty string when the pad is closed (or no signal was sent) —
+    the persona then says nothing about it and Alfred treats the pad
+    as closed.
+    """
+    if sketch is None or not sketch.open:
+        return ""
+    layer_bits: list[str] = []
+    for layer in sketch.layers:
+        flags = []
+        if layer.active:
+            flags.append("active")
+        flags.append("visible" if layer.visible else "hidden")
+        layer_bits.append(f"\u201c{layer.name}\u201d ({', '.join(flags)})")
+    layers_part = "; ".join(layer_bits) if layer_bits else "none yet"
+    return (
+        f"Active tool: {sketch.tool}, colour {sketch.color}, "
+        f"brush size {sketch.brush_size:g}. "
+        f"Layers (top first): {layers_part}."
+    )
+
+
+def _process_sketch_markers(
+    reply: str,
+    *,
+    analyzed: bool,
+    carried_invocations: list[SketchInvocation],
+) -> tuple[str, list[SketchCommandOut]]:
+    """Turn ``[SKETCH_…]`` markers into frontend commands + confirmations.
+
+    Each actionable marker in the final reply is swapped for a short
+    ``_( ... )_`` confirmation and added to the command list the
+    frontend executes. Invalid arguments (unknown tool, unparsable
+    brush size) become polite refusals with no command. ``ANALYZE``
+    markers are special: if the loop already honoured one, any stray
+    copy is silently removed (the analysis IS the reply); if it
+    couldn't be honoured (pad closed / no snapshot), it becomes an
+    explanatory line instead.
+
+    ``carried_invocations`` are non-analyze commands harvested from
+    intermediate loop replies — they produce commands but no inline
+    confirmation (their markers are no longer in the visible text).
+    """
+    commands: list[SketchCommandOut] = []
+
+    def _to_command(inv: SketchInvocation) -> tuple[SketchCommandOut | None, str]:
+        """Validate one invocation → (command | None, replacement text)."""
+        if inv.action is SketchAction.TOOL:
+            tool = inv.value.strip().lower()
+            if tool not in VALID_TOOLS:
+                return None, (
+                    f"_(No tool called {inv.value!r} — I have pencil, "
+                    f"pen, marker, and eraser.)_"
+                )
+            normalised = SketchInvocation(
+                action=inv.action, value=tool, raw_match=inv.raw_match
+            )
+            return (
+                SketchCommandOut(action=inv.action.value, value=tool),
+                sketch_confirmation_for(normalised),
+            )
+        if inv.action is SketchAction.BRUSH:
+            try:
+                size = float(inv.value)
+            except ValueError:
+                return None, (
+                    f"_(I couldn't make sense of brush size "
+                    f"{inv.value!r}.)_"
+                )
+            clamped = max(MIN_BRUSH, min(MAX_BRUSH, size))
+            value = f"{clamped:g}"
+            normalised = SketchInvocation(
+                action=inv.action, value=value, raw_match=inv.raw_match
+            )
+            return (
+                SketchCommandOut(action=inv.action.value, value=value),
+                sketch_confirmation_for(normalised),
+            )
+        return (
+            SketchCommandOut(action=inv.action.value, value=inv.value),
+            sketch_confirmation_for(inv),
+        )
+
+    for inv in extract_sketch_invocations(reply):
+        if inv.action is SketchAction.ANALYZE:
+            replacement = (
+                ""
+                if analyzed
+                else (
+                    "_(I can't see the design pad right now — open it "
+                    "and put something on it first.)_"
+                )
+            )
+            reply = replace_sketch_marker(reply, inv, replacement)
+            continue
+        command, replacement = _to_command(inv)
+        if command is not None:
+            commands.append(command)
+        reply = replace_sketch_marker(reply, inv, replacement)
+
+    # Commands rescued from intermediate replies run FIRST — they were
+    # emitted before the final reply's markers chronologically.
+    carried_commands: list[SketchCommandOut] = []
+    for inv in carried_invocations:
+        if inv.action is SketchAction.ANALYZE:
+            continue
+        command, _replacement = _to_command(inv)
+        if command is not None:
+            carried_commands.append(command)
+
+    return reply.strip(), carried_commands + commands
+
+
 async def _build_context(
     settings: Settings,
     session: AsyncSession,
     presence: PresenceSignal | None = None,
+    sketch: SketchSignal | None = None,
 ) -> ContextBundle:
     try:
         tz = ZoneInfo(settings.alfred_timezone)
@@ -448,6 +694,7 @@ async def _build_context(
         known_facts=known_facts,
         faces_visible=presence.faces_visible if presence is not None else None,
         spotify_linked=spotify_linked,
+        sketch_summary=_sketch_summary(sketch),
     )
 
 
@@ -605,6 +852,17 @@ async def chat(req: ChatRequest, session: AsyncSession = Depends(get_session)) -
     except ImageValidationError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+    # Design-pad snapshot — validated through the same pipeline as user
+    # attachments, but a bad snapshot is treated as absent rather than
+    # failing the whole turn (the user's message still deserves a
+    # reply even if the canvas export glitched).
+    sketch_snapshot: ChatImage | None = None
+    if req.sketch is not None and req.sketch.snapshot is not None:
+        try:
+            sketch_snapshot = validate_images([req.sketch.snapshot])[0]
+        except ImageValidationError:
+            sketch_snapshot = None
+
     convo = await _load_or_create(session, req.conversation_id)
 
     # Per-conversation mode: use whatever mode this conversation was
@@ -621,7 +879,7 @@ async def chat(req: ChatRequest, session: AsyncSession = Depends(get_session)) -
         current_mode = wake.mode_change
         mode_changed = True
 
-    context = await _build_context(settings, session, req.presence)
+    context = await _build_context(settings, session, req.presence, req.sketch)
     persona = build_persona(current_mode, settings, context)
 
     history = await _history(session, convo.id)
@@ -706,7 +964,9 @@ async def chat(req: ChatRequest, session: AsyncSession = Depends(get_session)) -
         convo.title = _derive_title(user_text) if user_text else "New conversation"
 
     try:
-        outcome = await _run_search_loop(msgs, settings)
+        outcome = await _run_search_loop(
+            msgs, settings, sketch_snapshot=sketch_snapshot
+        )
     except VisionUnavailableError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except LLMUnavailableError as exc:
@@ -762,6 +1022,11 @@ async def chat(req: ChatRequest, session: AsyncSession = Depends(get_session)) -
     visible_reply, generated_images = await _process_image_requests(
         visible_reply
     )
+    visible_reply, sketch_commands = _process_sketch_markers(
+        visible_reply,
+        analyzed=outcome.sketch_analyzed,
+        carried_invocations=outcome.collected_sketch_invocations,
+    )
 
     # Persist sources + generated images in the assistant message
     # metadata so they survive a page reload — the chat history
@@ -805,6 +1070,7 @@ async def chat(req: ChatRequest, session: AsyncSession = Depends(get_session)) -
         conversation_id=convo.id,
         mode=current_mode,
         mode_changed=mode_changed,
+        sketch_commands=sketch_commands,
         assistant=ChatMessageOut(
             id=assistant_msg.id,
             role=assistant_msg.role,
