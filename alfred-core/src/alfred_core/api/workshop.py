@@ -315,7 +315,7 @@ def _git_run(
     """Wrapper around ``git`` that captures stdout/stderr as text and
     enforces a hard timeout. We use this everywhere instead of
     ad-hoc ``subprocess.run`` calls so failures surface consistently."""
-    return subprocess.run(  # noqa: S603 — we control all args
+    return subprocess.run(
         ["git", *args],
         cwd=cwd or _REPO_ROOT,
         input=input_text,
@@ -811,7 +811,7 @@ async def dry_run(req: DryRunRequest) -> DryRunResult:
             if not cmd:
                 continue
             try:
-                proc = subprocess.run(  # noqa: S603 — caller-controlled
+                proc = subprocess.run(
                     cmd,
                     cwd=work_root,
                     capture_output=True,
@@ -858,7 +858,7 @@ async def dry_run(req: DryRunRequest) -> DryRunResult:
         # refused. We never want a leaked worktree.
         try:
             _git_run("worktree", "remove", "--force", str(work_root))
-        except Exception:  # noqa: BLE001 — last-ditch cleanup
+        except Exception:
             pass
         if work_root.exists():
             shutil.rmtree(work_root, ignore_errors=True)

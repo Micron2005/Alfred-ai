@@ -182,6 +182,7 @@ def stub_router(monkeypatch: pytest.MonkeyPatch) -> _StubBackend:
             local=backend,
             cloud=None,
             local_vision=None,
+            local_fast=None,
             use_cloud_for_coding=False,
         )
 

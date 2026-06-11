@@ -26,7 +26,7 @@ import logging
 import os
 from collections import defaultdict
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import bcrypt
@@ -52,7 +52,7 @@ REFRESH_COOKIE = "alfred_refresh"
 class _AttemptState:
     failures: int = 0
     locked_until: datetime | None = None
-    last_attempt: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    last_attempt: datetime = field(default_factory=lambda: datetime.now(UTC))
 
 
 _attempts: dict[str, _AttemptState] = defaultdict(_AttemptState)
@@ -70,7 +70,7 @@ def _client_ip(request: Request) -> str:
 
 def _check_lockout(ip: str, settings: Settings) -> None:
     state = _attempts[ip]
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     if state.locked_until and state.locked_until > now:
         retry_in = int((state.locked_until - now).total_seconds())
         raise HTTPException(
@@ -88,7 +88,7 @@ def _check_lockout(ip: str, settings: Settings) -> None:
 def _record_failure(ip: str, settings: Settings) -> None:
     state = _attempts[ip]
     state.failures += 1
-    state.last_attempt = datetime.now(timezone.utc)
+    state.last_attempt = datetime.now(UTC)
     if state.failures >= settings.alfred_login_max_failures:
         state.locked_until = state.last_attempt + timedelta(
             minutes=settings.alfred_login_lockout_minutes
@@ -109,7 +109,7 @@ def _record_success(ip: str) -> None:
 
 
 def _now_utc() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def _create_access_token(settings: Settings) -> str:

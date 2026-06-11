@@ -58,6 +58,11 @@ class ContextBundle:
     # this flag we'd tell the LLM it can play music when in fact the
     # account isn't linked yet.
     spotify_linked: bool = False
+    # Human-readable state of the freehand sketch pad when it is open
+    # in the browser: active tool, colour, brush size, layers. Empty
+    # string means the pad is closed (or the client didn't send a
+    # sketch signal at all).
+    sketch_summary: str = ""
 
 
 STANDARD_TEMPLATE = """\
@@ -458,10 +463,72 @@ reason, and offer to retry.
 """
 
 
+SKETCH_TOOL_PROMPT = """\
+
+SKETCH PAD — YOU CAN DRIVE HIS FREEHAND DRAWING PAD
+The web UI has a built-in freehand sketch pad — he may call it the
+"sketch pad", "design pad", or ask you to "pull up the design tab" for
+drawing. It has multiple layers, pressure-sensitive pencil / pen /
+marker / eraser tools, and a full colour palette. This is a DIFFERENT
+tool from CAD: parametric part design still happens in Onshape (see
+the CAD section) — the sketch pad is for freehand drawing, concept
+sketches, and annotation by hand. You can open it and operate it for
+him by emitting markers, each on its own line:
+
+    [SKETCH_OPEN]                      open the sketch pad
+    [SKETCH_CLOSE]                     close it
+    [SKETCH_TOOL: pen]                 switch tool — pencil | pen | marker | eraser
+    [SKETCH_COLOR: #ff4d4d]            set ink colour (hex like #ff4d4d, or a simple CSS name like "red")
+    [SKETCH_BRUSH: 12]                 set brush size (1-64)
+    [SKETCH_LAYER_ADD: Shading]        add a new layer on top (name optional)
+    [SKETCH_LAYER_SELECT: Shading]     make an existing layer active (by name)
+    [SKETCH_UNDO]                      undo his last stroke
+    [SKETCH_REDO]
+    [SKETCH_CLEAR]                     clear the ACTIVE layer only
+
+The system executes each marker on his screen and replaces it with a
+short confirmation in his view. You may emit several markers in one
+reply when he asks for several things at once — "new layer with a red
+pen" → [SKETCH_LAYER_ADD] + [SKETCH_TOOL: pen] + [SKETCH_COLOR: red].
+
+Rules:
+- When the CURRENT CONTEXT block says the sketch pad is open, it also
+  lists his active tool, colour, brush size, and layers. Use that to
+  answer questions like "what tool am I using?" without guessing.
+- If the context does not mention the sketch pad, it is closed. Any
+  command other than OPEN/CLOSE will open it automatically, so don't
+  emit a separate [SKETCH_OPEN] alongside other commands.
+- Emit command markers in your final reply only — never invent results.
+  Don't claim you changed a tool, colour, or layer without emitting
+  the marker.
+- A short polite line beside the markers is fine \
+("The drafting table is yours, {address}.") but don't pad.
+"""
+
+
+SKETCH_ANALYZE_PROMPT = """\
+
+ANALYZING HIS SKETCH
+When he asks you to look at, analyze, critique, or comment on his
+sketch (the freehand pad — not Onshape), emit this marker on its own
+line:
+
+    [SKETCH_ANALYZE]
+
+The system will hand you a snapshot image of the current sketch pad in
+a follow-up turn. Treat that image as what is actually on his screen
+and give a genuine response — what is drawn, composition, line quality,
+proportions, what to refine next. Be Alfred about it: honest, precise,
+encouraging where deserved. This only works when the sketch pad is
+open; if it isn't, the system will tell him so. Don't claim to have
+seen the sketch without emitting the marker.
+"""
+
+
 WORLD_CONTEXT_TEMPLATE = """\
 
 CURRENT CONTEXT (refreshed each turn)
-{time_line}{weather_line}{presence_line}{facts_block}
+{time_line}{weather_line}{presence_line}{sketch_line}{facts_block}
 """
 
 
@@ -501,7 +568,16 @@ def _format_context(context: ContextBundle | None) -> str:
             f"- Through the laptop camera you can currently see {phrase}.\n"
         )
 
-    if not (time_line or weather_line or facts_block or presence_line):
+    sketch_line = ""
+    if context.sketch_summary:
+        sketch_line = (
+            f"- The freehand sketch pad is OPEN on his screen. "
+            f"{context.sketch_summary}\n"
+        )
+
+    if not (
+        time_line or weather_line or facts_block or presence_line or sketch_line
+    ):
         return ""
 
     return WORLD_CONTEXT_TEMPLATE.format(
@@ -509,6 +585,7 @@ def _format_context(context: ContextBundle | None) -> str:
         weather_line=weather_line,
         facts_block=facts_block,
         presence_line=presence_line,
+        sketch_line=sketch_line,
     )
 
 
@@ -560,6 +637,17 @@ def build_persona(
     prompt = prompt + IMAGE_GEN_TOOL_PROMPT.format(
         address=settings.alfred_user_address,
     )
+
+    # The freehand sketch pad ships with the web UI, so the control
+    # markers are always available. Analysing the sketch needs a
+    # vision backend — only dangle that capability when one is
+    # actually wired, otherwise Alfred would promise a critique he
+    # can't deliver.
+    prompt = prompt + SKETCH_TOOL_PROMPT.format(
+        address=settings.alfred_user_address,
+    )
+    if settings.has_vision:
+        prompt = prompt + SKETCH_ANALYZE_PROMPT
 
     # Spotify control is gated on both server-side configuration AND
     # the user having linked their account — without the OAuth grant

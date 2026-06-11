@@ -269,7 +269,7 @@ def test_persona_advertises_sketch_tool_and_context_line() -> None:
     persona = build_persona(Mode.STANDARD, settings, context)
     assert "[SKETCH_OPEN]" in persona.system_prompt
     assert "[SKETCH_LAYER_ADD" in persona.system_prompt
-    assert "The design pad is OPEN" in persona.system_prompt
+    assert "The freehand sketch pad is OPEN" in persona.system_prompt
     assert "Active tool: pen" in persona.system_prompt
 
 
@@ -278,7 +278,7 @@ def test_persona_omits_design_pad_context_when_closed() -> None:
     # Tool markers are still advertised (pad can always be opened)…
     assert "[SKETCH_OPEN]" in persona.system_prompt
     # …but no claim that it is currently open.
-    assert "The design pad is OPEN" not in persona.system_prompt
+    assert "sketch pad is OPEN" not in persona.system_prompt
 
 
 def test_persona_gates_analyze_on_vision() -> None:

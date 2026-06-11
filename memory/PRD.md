@@ -44,6 +44,35 @@ auto-detect (Window Management API, Chrome/Edge) + manual fallback
 route; 3D wireframe head (Three.js) lip-synced to TTS audio level,
 webcam face tracking so it looks at the user.
 
+### MAJOR DISCOVERY + MERGE (2026-06-11, after Phase A)
+The user's LOCAL Alfred was months ahead of GitHub — ~29k lines of
+uncommitted features: tabbed UI (hud/chat/workout/design via tabs.ts +
+TabBar), LoginGate/auth (password gate, brute-force lockout), mobile
+shell (useDeviceMode + MobileChat), streaming TTS, holographic earth
+(three.js/R3F + maplibre/leaflet/valhalla routing), CadStudio/Onshape
+(DESIGN tab = CAD; persona has DESIGN_ONSHAPE_PROMPT), workshop
+(self-fix), vitals, face recognition, workout coach (pose tracking),
+RadialMenu (replaced QuickToolsMenu — deleted), printer/moonraker,
+desktop tools, location tracking, Router gained local_fast backend.
+He committed it all and pushed to branch `alfred-complete`; the agent
+fetched + merged it into the workspace, then:
+- Resolved 3 leftover conflict regions in ChatWindow.tsx (kept both
+  import sets; kept HIS radial-menu code, dropped old quickToolsItems;
+  kept <SketchPad /> + his PoseSkeleton/ExpressionReadout renders).
+- Re-added sketch prompts to HIS persona.py (renamed user-facing term
+  to "freehand sketch pad" to avoid clashing with his Onshape CAD
+  "design tab"; context line now "The freehand sketch pad is OPEN").
+- Fixed his test_workshop.py Router(local_fast=None) arg; ruff --fix.
+- Verified: 312 backend tests pass, tsc clean, eslint clean (1
+  pre-existing warning), next build clean, Playwright smoke test of
+  sketch pad inside his full HUD passed (open/draw/layers/close).
+NOTE: his app uses npm --legacy-peer-deps (Dockerfile), package.json
+has three/R3F/leaflet/mapbox/maplibre. LoginGate auto-disables when
+ALFRED_PASSWORD_HASH unset or /auth/me unreachable.
+NEXT STEP for user: Save to GitHub → branch alfred-complete, then
+locally `git checkout alfred-complete && git pull && docker compose
+up --build`.
+
 ### Phase A — Design Pad (DONE 2026-06-11, all tests pass)
 - `alfred-core/src/alfred_core/tools/sketch_marker.py` — [SKETCH_*]
   marker parser (OPEN/CLOSE/TOOL/COLOR/BRUSH/LAYER_ADD/LAYER_SELECT/

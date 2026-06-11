@@ -53,10 +53,8 @@ import {
   type HudWidgetId,
 } from "@/lib/hudLayout";
 import { orbStore } from "@/lib/orbState";
-<<<<<<< Updated upstream
 import { sketchStore } from "@/lib/sketchStore";
 import { SketchPad } from "@/components/SketchPad";
-=======
 import {
   type StreamingTtsController,
   streamingSpeak,
@@ -90,7 +88,6 @@ import { WorkshopView } from "@/components/WorkshopView";
 import { VitalsPanel } from "@/components/VitalsPanel";
 import { HandsFreeOverlay } from "@/components/HandsFreeOverlay";
 import { fetchSelfFixHint } from "@/lib/workshopApi";
->>>>>>> Stashed changes
 
 const ACTIVE_CONVO_KEY = "alfred.activeConversationId";
 const VOICE_OUT_KEY = "alfred.voiceOutEnabled";
@@ -1192,58 +1189,6 @@ export function ChatWindow() {
     }
   }
 
-<<<<<<< Updated upstream
-  // Items rendered inside the QuickToolsMenu when the left fist
-  // is held. Each maps to an existing toolbar handler so behavior
-  // stays consistent with the on-screen buttons. ⌨ "Keyboard"
-  // simply focuses the composer text input — your physical
-  // keyboard takes over from there. A full air-pinch virtual
-  // keyboard is a follow-up phase if the gesture sticks.
-  const quickToolsItems = [
-    {
-      id: "voice",
-      glyph: "🔊",
-      label: "Voice",
-      active: voiceOut,
-      onActivate: () => setVoiceOutPersisted(!voiceOut),
-    },
-    {
-      id: "wake",
-      glyph: "🎙",
-      label: "Wake",
-      active: handsFree,
-      onActivate: () => setHandsFreePersisted(!handsFree),
-    },
-    {
-      id: "camera",
-      glyph: "📷",
-      label: "Camera",
-      active: cameraOn,
-      onActivate: () => setCameraPersisted(!cameraOn),
-    },
-    {
-      id: "keyboard",
-      glyph: "⌨",
-      label: "Keyboard",
-      active: false,
-      onActivate: () => composerRef.current?.focus(),
-    },
-    {
-      id: "design",
-      glyph: "✏",
-      label: "Design",
-      active: sketchOpen,
-      onActivate: () => sketchStore.setOpen(!sketchOpen),
-    },
-    {
-      id: "hud",
-      glyph: "🌗",
-      label: "HUD",
-      active: fullHud,
-      onActivate: () => setFullHudPersisted(!fullHud),
-    },
-  ];
-=======
   function setHideHandSkeletonPersisted(enabled: boolean) {
     setHideHandSkeleton(enabled);
     if (typeof window !== "undefined") {
@@ -1275,7 +1220,6 @@ export function ChatWindow() {
   }
 
   // QuickToolsMenu items removed — see comment near line 614.
->>>>>>> Stashed changes
 
   function toggleSidebar() {
     setSidebarCollapsed((prev) => {
@@ -3382,7 +3326,6 @@ export function ChatWindow() {
           leftHand={hand.left}
           hideSkeleton={hideHandSkeleton}
         />
-<<<<<<< Updated upstream
         {/*
           Design pad overlay. Always mounted (it hides itself with
           display:none when closed) so the per-layer canvas bitmaps
@@ -3390,12 +3333,6 @@ export function ChatWindow() {
           user's sketch.
         */}
         <SketchPad />
-        <QuickToolsMenu
-          visible={quickTools.visible}
-          anchor={quickTools.anchor}
-          items={quickToolsItems}
-          onActivated={quickTools.dismiss}
-=======
         <PoseSkeleton
           enabled={pose.status === "ready"}
           pose={pose.pose}
@@ -3406,7 +3343,6 @@ export function ChatWindow() {
         <ExpressionReadout
           enabled={face.status === "ready"}
           face={face.face}
->>>>>>> Stashed changes
         />
       </div>
         </div>
