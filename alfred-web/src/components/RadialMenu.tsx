@@ -25,7 +25,8 @@ export type RadialMenuItem =
   | "chat"
   | "workout"
   | "workshop"
-  | "design";
+  | "design"
+  | "face";
 
 interface RadialMenuProps {
   open: boolean;
@@ -70,6 +71,12 @@ const ENTRIES: ReadonlyArray<MenuEntry> = [
     label: "WORKSHOP",
     caption: "Self-Coding",
     testId: "radial-menu-workshop",
+  },
+  {
+    id: "face",
+    label: "FACE",
+    caption: "Wire Mesh Avatar",
+    testId: "radial-menu-face",
   },
 ];
 
@@ -356,6 +363,8 @@ function RadialItem({
           <WorkshopGlyph />
         ) : entry.id === "design" ? (
           <DesignGlyph />
+        ) : entry.id === "face" ? (
+          <FaceGlyph />
         ) : (
           <WorkoutGlyph />
         )}
@@ -401,6 +410,75 @@ function RadialItem({
         {entry.caption}
       </div>
     </button>
+  );
+}
+
+/** Face glyph — triangulated wire-mesh head, mirroring the avatar
+ *  the module launches on the desk touchscreen. */
+function FaceGlyph() {
+  return (
+    <div
+      style={{
+        position: "absolute",
+        inset: 0,
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        animation: "radial-spin-y 12000ms linear infinite",
+      }}
+    >
+      <svg
+        viewBox="0 0 100 100"
+        width={100}
+        height={100}
+        style={{ filter: "drop-shadow(0 0 8px var(--orb-glow))" }}
+        aria-hidden
+      >
+        {/* Head outline */}
+        <path
+          d="M50 12 C70 12 80 26 80 44 C80 62 68 84 50 88 C32 84 20 62 20 44 C20 26 30 12 50 12 Z"
+          fill="none"
+          stroke="var(--orb)"
+          strokeWidth={2.2}
+        />
+        {/* Mesh triangulation */}
+        {[
+          "50,12 35,30 65,30",
+          "20,44 35,30 38,48",
+          "80,44 65,30 62,48",
+          "35,30 65,30 50,42",
+          "35,30 38,48 50,42",
+          "65,30 62,48 50,42",
+          "38,48 50,58 62,48",
+          "26,64 38,48 42,70",
+          "74,64 62,48 58,70",
+          "42,70 50,58 58,70",
+          "42,70 50,88 58,70",
+        ].map((pts) => (
+          <polygon
+            key={pts}
+            points={pts}
+            fill="none"
+            stroke="var(--orb)"
+            strokeWidth={1.1}
+            opacity={0.55}
+          />
+        ))}
+        {/* Eyes */}
+        <circle cx={38} cy={40} r={2.6} fill="var(--orb)" />
+        <circle cx={62} cy={40} r={2.6} fill="var(--orb)" />
+        {/* Mouth */}
+        <line
+          x1={42}
+          y1={66}
+          x2={58}
+          y2={66}
+          stroke="var(--orb)"
+          strokeWidth={2.4}
+          strokeLinecap="round"
+        />
+      </svg>
+    </div>
   );
 }
 

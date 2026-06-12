@@ -84,6 +84,9 @@ import {
 import { RadialMenu, type RadialMenuItem } from "@/components/RadialMenu";
 import { Spotify3DView } from "@/components/Spotify3DView";
 import { WorkshopView } from "@/components/WorkshopView";
+import { FaceModeView } from "@/components/FaceModeView";
+import { startFaceBusPublisher } from "@/lib/faceBus";
+import { startFaceAutoLaunch } from "@/lib/faceScreen";
 import { VitalsPanel } from "@/components/VitalsPanel";
 import { HandsFreeOverlay } from "@/components/HandsFreeOverlay";
 import { fetchSelfFixHint } from "@/lib/workshopApi";
@@ -212,7 +215,7 @@ function detectTabIntent(raw: string): TabIntent | null {
  */
 function detectSubViewIntent(
   raw: string,
-): { view: "spotify" | "workshop"; label: string } | null {
+): { view: "spotify" | "workshop" | "face"; label: string } | null {
   const trimmed = raw.trim().toLowerCase().replace(/[.?!]+$/, "");
   if (!trimmed) return null;
   const stripped = trimmed.replace(/^(?:hey\s+|ok\s+)?alfred[,\s]+/, "").trim();
@@ -221,7 +224,7 @@ function detectSubViewIntent(
   if (!NAV_VERB.test(stripped)) return null;
   for (const { noun, view, label } of SUBVIEW_NOUNS) {
     const full = new RegExp(
-      `^(?:go(?:\\s+back)?|take\\s+me|switch|open|show\\s+me|navigate|jump|bring\\s+me|pull\\s+up|head\\s+(?:to|over)|move\\s+to)\\s+(?:to\\s+|over\\s+to\\s+|into\\s+|me\\s+to\\s+|on\\s+to\\s+|back\\s+to\\s+)?(?:the\\s+)?(?:${noun.source})(?:\\s+(?:tab|screen|view|page|section|module|app))?$`,
+      `^(?:go(?:\\s+back)?|take\\s+me|switch|open|show\\s+me|navigate|jump|bring\\s+me|pull\\s+up|head\\s+(?:to|over)|move\\s+to)\\s+(?:to\\s+|over\\s+to\\s+|into\\s+|me\\s+to\\s+|on\\s+to\\s+|back\\s+to\\s+)?(?:the\\s+|your\\s+)?(?:${noun.source})(?:\\s+(?:tab|screen|view|page|section|module|app))?$`,
       "i",
     );
     if (full.test(stripped)) return { view, label };
@@ -765,7 +768,9 @@ export function ChatWindow() {
   // viewport and dismiss back to the HUD via their own back
   // button.
   const [radialOpen, setRadialOpen] = useState(false);
-  const [subView, setSubView] = useState<"spotify" | "workshop" | null>(null);
+  const [subView, setSubView] = useState<
+    "spotify" | "workshop" | "face" | null
+  >(null);
   // Pre-populated state forwarded into the Workshop sub-view when the
   // user clicks "ASK ALFRED TO FIX" on a red vital. Cleared when the
   // sub-view unmounts so a normal radial-menu open of Workshop
@@ -1229,6 +1234,8 @@ export function ChatWindow() {
       setSubView("spotify");
     } else if (item === "workshop") {
       setSubView("workshop");
+    } else if (item === "face") {
+      setSubView("face");
     } else if (item === "chat") {
       setActiveTabPersisted("chat");
     } else if (item === "workout") {
@@ -1318,6 +1325,13 @@ export function ChatWindow() {
     orbStore.setHold("thinking", busy);
     return () => orbStore.setHold("thinking", false);
   }, [busy]);
+
+  // Face module plumbing — broadcast orb mode + TTS amplitude to the
+  // detached /face window (wire-mesh avatar lip-sync), and arm the
+  // multi-monitor auto-launch watcher so plugging in the desk
+  // touchscreen pops the avatar onto it automatically.
+  useEffect(() => startFaceBusPublisher(), []);
+  useEffect(() => startFaceAutoLaunch(), []);
 
   // Operations log feed for the JARVIS HUD bottom-left panel.
   // We push events whenever a meaningful state transition happens —
@@ -2684,6 +2698,9 @@ export function ChatWindow() {
           initialProblem={workshopSeed?.problem ?? ""}
           initialPaths={workshopSeed?.paths ?? []}
         />
+      ) : null}
+      {subView === "face" ? (
+        <FaceModeView onBack={() => setSubView(null)} />
       ) : null}
       <TabBar active={activeTab} onChange={setActiveTabPersisted} />
       <HudFrame enabled={activeTab === "hud"} />
