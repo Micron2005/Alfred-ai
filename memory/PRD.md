@@ -233,6 +233,45 @@ secondary/tertiary video output (separate window).
   see which display is touch-capable → resolution is the
   discriminator. Direct nav to /face on any device also works.
 
+### Windows native deployment — no Docker Desktop (2026-06-12)
+User: can't install Docker Desktop on main PC ("no Windows license"),
+wants Alfred running straight off the desktop, auto-starting at boot,
+no browser/localhost:3000. Chrome; HUD + face at startup; WSL2
+already installed; local Ollama on Windows.
+Solution shipped (validated: bash -n, pwsh Parser, config round-trip;
+NOT runnable in pod — user must execute on his PC):
+- `scripts/windows/install-wsl-engine.sh` — idempotent, run inside
+  WSL: enables systemd (wsl.conf, may need `wsl --shutdown` + rerun),
+  installs docker-ce via get.docker.com + docker group (rerun after
+  relogin), installs alfred-ollama-bridge.service (socat relay WSL
+  :11434 → Windows Ollama; auto-handles NAT mode [target=default gw]
+  vs mirrored mode [target=127.0.0.1, bind=172.17.0.1]; skips if
+  11434 already bound), then runs existing install-systemd.sh.
+  KEY: compose already has extra_hosts host.docker.internal:
+  host-gateway, so .env OLLAMA_HOST stays UNCHANGED.
+- `scripts/windows/Enable-OllamaForWSL.ps1` (admin, once): sets user
+  env OLLAMA_HOST=0.0.0.0:11434 + firewall rule for 11434 restricted
+  to private ranges; user must restart Ollama tray app.
+- `scripts/windows/Launch-Alfred.ps1` — boot launcher: spawns hidden
+  `wsl --exec sleep infinity` (keep-alive; WSL idles out otherwise),
+  waits ≤600 s for HTTP 200 on :3000, opens Chrome
+  `--app=http://localhost:3000 --start-maximized` (app window = no
+  address bar; URL never visible), optional second `--app=/face
+  --window-position=X,Y --start-fullscreen` (faceDirect). Reads
+  config.json beside it. NOTE: face window must share the Chrome
+  profile (NO --user-data-dir) or BroadcastChannel lip-sync breaks.
+- `scripts/windows/Install-AlfredAutostart.ps1` — copies launcher +
+  generated config.json to %LOCALAPPDATA%\AlfredAI (Startup shortcut
+  can't point at \\wsl$ — not mounted at logon), creates Startup +
+  Desktop shortcuts (powershell -WindowStyle Hidden), flags:
+  -Distro -FaceDirect -FacePosition "1920,0" -NoFaceFullscreen
+  -Uninstall.
+- `docs/SETUP_WINDOWS_NO_DOCKER_DESKTOP.md` — full guide (face boot
+  routes A: in-app auto-launch w/ permission+popup grant, B:
+  -FaceDirect positioned window; troubleshooting; ALFRED_NO_PULL=1
+  override for slow boots). README links it.
+- USER VERIFICATION PENDING: must run steps 1-4 of the doc on his PC.
+
 ## Backlog / roadmap
 - P1: Face polish candidates (user feedback pending): Alfred
   announcing "monitor connected", brow/expression states tied to
