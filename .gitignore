@@ -30,6 +30,11 @@ yarn-error.log*
 .pnpm-debug.log*
 *.tsbuildinfo
 
+# alfred-desktop: build/ holds committed app icons (NOT artifacts);
+# the electron-builder output goes to dist/ which stays ignored.
+!alfred-desktop/build/
+!alfred-desktop/build/**
+
 # DB / local data
 postgres-data/
 ollama-data/

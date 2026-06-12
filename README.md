@@ -59,8 +59,8 @@ See [docs/SELF_HOSTING.md](docs/SELF_HOSTING.md) for the full
 self-hosting guide — covers x86 desktops, WSL2, and the Raspberry
 Pi 5 path — and [docs/SETUP_WINDOWS_WSL.md](docs/SETUP_WINDOWS_WSL.md)
 for the detailed Windows step-by-step. Running Windows **without
-Docker Desktop** and want Alfred to start at boot in its own app
-window? See
+Docker Desktop** and want Alfred installed as a real desktop app
+(`Alfred.exe`, boots with the PC, face on the touchscreen)? See
 [docs/SETUP_WINDOWS_NO_DOCKER_DESKTOP.md](docs/SETUP_WINDOWS_NO_DOCKER_DESKTOP.md).
 
 ## The persona

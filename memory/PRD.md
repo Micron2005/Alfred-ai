@@ -233,7 +233,13 @@ secondary/tertiary video output (separate window).
   see which display is touch-capable → resolution is the
   discriminator. Direct nav to /face on any device also works.
 
-### Windows native deployment — no Docker Desktop (2026-06-12)
+### Windows deployment v1 — Chrome app window (2026-06-12, SUPERSEDED)
+User rejected the Chrome `--app` window approach ("i dont want a
+chrome app to open… i want it to run like its own app").
+Launch-Alfred.ps1 + Install-AlfredAutostart.ps1 were DELETED. Still
+in use from this phase: install-wsl-engine.sh (docker-ce in WSL +
+systemd + ollama socat bridge) and Enable-OllamaForWSL.ps1 — see
+next entry for details that survive:
 User: can't install Docker Desktop on main PC ("no Windows license"),
 wants Alfred running straight off the desktop, auto-starting at boot,
 no browser/localhost:3000. Chrome; HUD + face at startup; WSL2
@@ -271,6 +277,51 @@ NOT runnable in pod — user must execute on his PC):
   -FaceDirect positioned window; troubleshooting; ALFRED_NO_PULL=1
   override for slow boots). README links it.
 - USER VERIFICATION PENDING: must run steps 1-4 of the doc on his PC.
+
+### Windows deployment v2 — native Electron app (2026-06-12, current)
+`alfred-desktop/` — a real Alfred.exe (Electron 42.4.0 +
+electron-builder 26.15.3, NSIS one-click installer). No browser, no
+visible URLs. Smoke-tested LIVE in the pod (xvfb + --no-sandbox
+against the dev server: splash → "stack ready — opening HUD" →
+1 display → correctly no face window; config.json materialised).
+- `main.js` (single file, logs as [alfred-desktop]):
+  - boots WSL via hidden `wsl --exec sleep infinity` (= keep-alive;
+    platform-guarded so dev on Linux skips it)
+  - splash.html polls config.appUrl (default http://localhost:3000,
+    600 s timeout — first boot builds images), then HUD
+    BrowserWindow maximized; close = hide-to-tray; quit via tray
+  - FACE: screen.getAllDisplays(), prefers secondary display with
+    touchSupport==='available' (native per-display touch detection
+    — better than any browser), optional faceResolution pin
+    (physical px = size×scaleFactor, orientation-agnostic); opens
+    /face frameless+fullscreen; display-added/removed listeners
+    (800 ms debounce) auto open/close (only windows IT opened —
+    faceAutoOpened flag); tray toggle for manual control
+  - both windows share defaultSession → BroadcastChannel lip-sync
+    bus works as in a browser
+  - setPermissionRequestHandler auto-grants media/fullscreen/
+    window-management → camera + FACE panel work with zero prompts
+  - setWindowOpenHandler: same-origin → child window, external →
+    shell.openExternal
+  - tray: Show HUD / Open-Close Face / Start with Windows checkbox
+    (app.setLoginItemSettings, only when isPackaged) / Open Config
+    File / Quit; single-instance lock focuses HUD
+  - config at %APPDATA%/Alfred/config.json: appUrl, distro,
+    bootWsl, face auto|off, faceResolution, openAtLogin,
+    startupTimeoutSec
+- build/icon.ico+png generated from alfred-web icon-512.png
+  (Pillow). GOTCHA: root .gitignore globally ignores build/ + dist/
+  — added !alfred-desktop/build/** negations so icons commit;
+  electron-builder dist/ stays ignored.
+- electron 42 requires Node >= 22 to npm-install (pod has 20 →
+  --ignore-engines for local test; user installs Node LTS on
+  Windows). Build flow: copy folder to Windows-local path (npm vs
+  \\wsl$ UNC), npm install, npm run dist, run "Alfred Setup
+  1.0.0.exe".
+- docs/SETUP_WINDOWS_NO_DOCKER_DESKTOP.md rewritten around the app;
+  alfred-desktop/README.md added; root README link updated.
+- USER VERIFICATION PENDING: run doc steps 1-3 on his PC (WSL
+  engine script → Ollama script → build+install Alfred.exe).
 
 ## Backlog / roadmap
 - P1: Face polish candidates (user feedback pending): Alfred

@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Alfred</title>
+<style>
+  html, body {
+    margin: 0;
+    height: 100%;
+    background: #060912;
+    color: #6cd6ff;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    overflow: hidden;
+    user-select: none;
+    -webkit-user-select: none;
+  }
+  .wrap {
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 22px;
+    background-image:
+      linear-gradient(rgba(108,214,255,0.05) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(108,214,255,0.05) 1px, transparent 1px);
+    background-size: 40px 40px;
+  }
+  .ring {
+    width: 64px;
+    height: 64px;
+    border-radius: 50%;
+    border: 2px solid rgba(108,214,255,0.18);
+    border-top-color: #6cd6ff;
+    box-shadow: 0 0 22px rgba(108,214,255,0.45);
+    animation: spin 900ms linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .name {
+    font-size: 20px;
+    letter-spacing: 14px;
+    margin-left: 14px; /* visually centers the letterspaced text */
+    text-shadow: 0 0 16px rgba(108,214,255,0.45);
+  }
+  #status {
+    font-size: 10px;
+    letter-spacing: 3px;
+    color: #8a96ad;
+    text-align: center;
+    max-width: 400px;
+    line-height: 1.8;
+  }
+  .corner {
+    position: fixed;
+    width: 22px;
+    height: 22px;
+    border-color: rgba(214,168,90,0.4);
+    border-style: solid;
+    border-width: 0;
+  }
+  .tl { top: 10px; left: 10px; border-top-width: 1px; border-left-width: 1px; }
+  .tr { top: 10px; right: 10px; border-top-width: 1px; border-right-width: 1px; }
+  .bl { bottom: 10px; left: 10px; border-bottom-width: 1px; border-left-width: 1px; }
+  .br { bottom: 10px; right: 10px; border-bottom-width: 1px; border-right-width: 1px; }
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="ring"></div>
+    <div class="name">ALFRED</div>
+    <div id="status">STARTING SYSTEMS…</div>
+  </div>
+  <div class="corner tl"></div>
+  <div class="corner tr"></div>
+  <div class="corner bl"></div>
+  <div class="corner br"></div>
+</body>
+</html>
