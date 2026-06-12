@@ -161,11 +161,21 @@ To pin it to a specific monitor, tray → **Open Config File** and set:
   is older than 22; re-run `./scripts/windows/build-desktop-app.sh`
   (it installs Node 22) or `sudo apt-get install -y nodejs` after
   `curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -`.
-- **Chat says the model is unreachable** — check the bridge chain:
-  `curl http://localhost:11434/api/tags` inside WSL. If that fails:
-  is Ollama running on Windows? Did you restart it after
-  `Enable-OllamaForWSL.ps1`? `journalctl -u alfred-ollama-bridge -f`
-  shows the relay's view.
+- **Chat says the model is unreachable / "Local LLM not running"** —
+  run the hop-by-hop diagnostic and follow its verdict (paste its
+  output if you need help):
+
+  ```bash
+  ./scripts/windows/diagnose-ollama.sh
+  ```
+
+  It checks: Ollama alive on Windows → `OLLAMA_HOST` env →
+  WSL→Windows reachability → the socat bridge → WSL `:11434` → the
+  view from inside the `alfred-core` container. The two most common
+  causes: Ollama wasn't fully restarted after
+  `setup-ollama-from-wsl.sh` (quit from the tray, not just the
+  window), or the bridge was never installed because an earlier
+  `install-wsl-engine.sh` run aborted.
 - **`docker: permission denied`** — you skipped the fresh-login step;
   run `newgrp docker` or open a new terminal.
 - **Face opened on the wrong monitor** — set `faceResolution` in the

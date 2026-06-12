@@ -373,6 +373,17 @@ User ran the scripts on his PC; two failures, both fixed:
    + electron win-x64 download + packaging all succeeded.
 3. setup-ollama-from-wsl.sh ran without visible error (UAC path) —
    user has NOT yet confirmed `curl localhost:11434/api/tags`.
+4. User then reported "local llm is not running" (HUD vital, from
+   api/vitals.py _check_ollama → GET ${OLLAMA_HOST}/api/tags inside
+   the container). Built scripts/windows/diagnose-ollama.sh —
+   hop-by-hop chain test (Windows Ollama loopback via powershell.exe
+   → OLLAMA_HOST user env → WSL→gateway direct → bridge service →
+   WSL :11434 → docker compose exec alfred-core curl
+   host.docker.internal) with ordered fix verdicts. Validated in pod
+   (all hops fail gracefully, no crashes). Most likely root causes
+   for user: bridge never installed (earlier installer aborts) and/or
+   Ollama not restarted after env change. AWAITING USER'S DIAGNOSTIC
+   OUTPUT.
 
 ## Backlog / roadmap
 - P1: Face polish candidates (user feedback pending): Alfred
