@@ -175,15 +175,68 @@ GOTCHA learned this session: parallel search_replace edits to the SAME
 file can race and silently drop edits — apply same-file edits
 sequentially and verify with grep afterwards.
 
+### Phase B — Wire-mesh talking face (DONE 2026-06-12, 9/9 e2e pass)
+User choices: abstract 3D wireframe head; mouth syncs to TTS
+amplitude; gaze via webcam face tracking; auto-trigger on a
+user-specified resolution + manual radial toggle; face lives on a
+secondary/tertiary video output (separate window).
+- `alfred-web/public/models/canonical_face_model.obj` — MediaPipe
+  canonical face mesh (468 verts IN LANDMARK ORDER, 898 tris). That
+  ordering is the whole trick: lip/chin/eyelid landmark indices
+  address real vertices, so the mouth/blinks animate without a rig.
+- `components/WireframeFace.tsx` — plain Three.js (no R3F). Custom
+  OBJ parse (OBJLoader would de-index and break the landmark
+  mapping). One shared position BufferAttribute drives LineSegments
+  (unique edges) + Points + faint additive fill. Per-frame: jaw-open
+  weights (below-mouth falloff × frontness; extra inner-lower-lip
+  weight), blink weights (radial falloff around eye centers),
+  gaze yaw/pitch lerp (webcam target or idle drift), glowing iris
+  rings that lead the gaze, HUD arc rings (4× spin when thinking),
+  particle shell, mode palette (cyan idle/speaking, gold thinking).
+- `lib/faceBus.ts` — BroadcastChannel "alfred-face-bus". HUD
+  publishes {type:'state',mode,level,t} at 30 Hz when orb non-idle,
+  1 Hz heartbeat idle; replies to {type:'hello'}. setInterval not
+  rAF (rAF freezes in background tabs). TTS amplitude came FREE:
+  ChatWindow already pushes analyser RMS into orbStore; publisher
+  just samples the store.
+- `lib/faceScreen.ts` — Window Management API. localStorage
+  'alfred.faceScreen' {autoLaunch, resolution ('any'|'WxH',
+  orientation-agnostic match)}. scanScreens() (permission prompt
+  needs user gesture), matchFaceScreen (secondary screens only),
+  openFaceWindow popup positioned on target screen,
+  startFaceAutoLaunch(): screenschange listener auto-opens/closes
+  (only closes windows IT opened); FACE_CONFIG_EVENT re-arms after
+  permission grant/config change without reload.
+- `app/face/page.tsx` + `components/FaceWindow.tsx` — /face route
+  (ssr:false). Subscribes bus (link stale >4 s → STANDBY; level
+  stale >400 ms → 0), runs useFaceTracking with OWN camera stream,
+  gaze = mirrored bbox center → [-1,1] (mirror view means "where
+  your image is" == your direction, so head looks AT you). Tap
+  anywhere = fullscreen toggle; CAM ON/OFF button; HUD LINKED /
+  GAZE LOCK indicators; corner brackets.
+- `components/FaceModeView.tsx` — radial FACE module panel (subview
+  pattern like Spotify/Workshop): launch/close + window status,
+  SCAN DISPLAYS + screen list w/ PRIMARY/INTERNAL/FACE TARGET
+  badges, auto-launch toggle, resolution input (garbage → 'any').
+- RadialMenu: FACE entry + triangulated FaceGlyph. ChatWindow:
+  subView 'face', voice nav ("pull up your face" — subview regex
+  gained your\s+ and face/wire-mesh/avatar nouns),
+  startFaceBusPublisher + startFaceAutoLaunch effects.
+- Tests: testing agent 9/9 PASS (render, lip-sync via injected bus
+  msgs + 4s decay, cam toggle, radial entry, panel, popup launch/
+  close, persistence, validation, tab/subview regressions). tsc/
+  eslint/next build clean; 316 backend tests pass (backend
+  untouched).
+- USER SETUP (his PC): allow pop-ups for the Alfred origin in
+  Chrome; FACE panel → SCAN DISPLAYS (grants window-management
+  permission) → set resolution → arm auto-launch. Browsers can't
+  see which display is touch-capable → resolution is the
+  discriminator. Direct nav to /face on any device also works.
+
 ## Backlog / roadmap
-- P0 (next): Phase B — wire-mesh talking face for the touchscreen:
-  - Three.js wireframe head component, lip-sync from orbStore TTS
-    level, idle micro-motion; "looks at" user via existing camera
-    face-tracking (MediaPipe) gaze offset.
-  - Monitor detection: Window Management API (getScreenDetails +
-    screenschange) to auto-open/move a companion fullscreen window
-    on the new screen; manual /face route fallback; Alfred announces
-    "monitor connected".
+- P1: Face polish candidates (user feedback pending): Alfred
+  announcing "monitor connected", brow/expression states tied to
+  persona mood, mouth viseme shaping (vs amplitude-only jaw).
 - P1: sketch persistence (save/load named sketches, maybe Postgres or
   memory archive), Alfred drawing ON the pad (generated overlays).
 - Earlier project phases still open: Home Assistant (P2), Creality K1
