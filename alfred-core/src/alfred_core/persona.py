@@ -479,9 +479,13 @@ him by emitting markers, each on its own line:
     [SKETCH_CLOSE]                     close it
     [SKETCH_TOOL: pen]                 switch tool — pencil | pen | marker | eraser
     [SKETCH_COLOR: #ff4d4d]            set ink colour (hex like #ff4d4d, or a simple CSS name like "red")
-    [SKETCH_BRUSH: 12]                 set brush size (1-64)
+    [SKETCH_BRUSH: 12]                 set the active tool's brush size (1-64)
+    [SKETCH_OPACITY: 60]               set the active tool's opacity, percent (1-100)
     [SKETCH_LAYER_ADD: Shading]        add a new layer on top (name optional)
     [SKETCH_LAYER_SELECT: Shading]     make an existing layer active (by name)
+    [SKETCH_LAYER_MERGE]               merge the active layer into the one below (or name a layer)
+    [SKETCH_LAYER_LOCK: Base]          lock a layer against edits (name optional = active layer)
+    [SKETCH_LAYER_UNLOCK: Base]        unlock it
     [SKETCH_UNDO]                      undo his last stroke
     [SKETCH_REDO]
     [SKETCH_CLEAR]                     clear the ACTIVE layer only
@@ -498,6 +502,8 @@ Rules:
 - If the context does not mention the sketch pad, it is closed. Any
   command other than OPEN/CLOSE will open it automatically, so don't
   emit a separate [SKETCH_OPEN] alongside other commands.
+- Layers flagged "locked" in the context can't be drawn on, cleared,
+  or merged — emit [SKETCH_LAYER_UNLOCK] first if he wants to edit one.
 - Emit command markers in your final reply only — never invent results.
   Don't claim you changed a tool, colour, or layer without emitting
   the marker.

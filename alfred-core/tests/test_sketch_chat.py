@@ -234,6 +234,34 @@ def test_brush_size_is_clamped_and_bad_values_refused() -> None:
     assert "couldn't make sense of brush size" in out
 
 
+def test_opacity_is_clamped_and_bad_values_refused() -> None:
+    out, commands = _process_sketch_markers(
+        "[SKETCH_OPACITY: 150]\n[SKETCH_OPACITY: 0]\n[SKETCH_OPACITY: foggy]",
+        analyzed=False,
+        carried_invocations=[],
+    )
+    assert [(c.action, c.value) for c in commands] == [
+        ("opacity", "100"),
+        ("opacity", "1"),
+    ]
+    assert "couldn't make sense of opacity" in out
+
+
+def test_merge_and_lock_become_commands() -> None:
+    out, commands = _process_sketch_markers(
+        "[SKETCH_LAYER_MERGE]\n[SKETCH_LAYER_LOCK: Base]\n[SKETCH_LAYER_UNLOCK: Base]",
+        analyzed=False,
+        carried_invocations=[],
+    )
+    assert [(c.action, c.value) for c in commands] == [
+        ("layer_merge", ""),
+        ("layer_lock", "Base"),
+        ("layer_unlock", "Base"),
+    ]
+    assert "[SKETCH_" not in out
+    assert "Merged the layer down" in out
+
+
 # ─── Context summary + persona prompt ───────────────────────────────────
 
 
@@ -243,17 +271,19 @@ def test_sketch_summary_renders_state() -> None:
         tool="pencil",
         color="#ff4d4d",
         brush_size=12,
+        opacity=72,
         layers=[
             SketchLayerSignal(name="Shading", visible=True, active=True),
-            SketchLayerSignal(name="Base", visible=False, active=False),
+            SketchLayerSignal(name="Base", visible=False, locked=True),
         ],
     )
     summary = _sketch_summary(sketch)
     assert "Active tool: pencil" in summary
     assert "#ff4d4d" in summary
     assert "brush size 12" in summary
+    assert "opacity 72%" in summary
     assert "\u201cShading\u201d (active, visible)" in summary
-    assert "\u201cBase\u201d (hidden)" in summary
+    assert "\u201cBase\u201d (hidden, locked)" in summary
 
 
 def test_sketch_summary_empty_when_closed_or_absent() -> None:

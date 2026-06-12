@@ -60,6 +60,36 @@ def test_undo_redo_clear_analyze() -> None:
     ]
 
 
+def test_opacity_marker() -> None:
+    invs = extract_invocations("[SKETCH_OPACITY: 60]")
+    assert len(invs) == 1
+    assert invs[0].action is SketchAction.OPACITY
+    assert invs[0].value == "60"
+
+
+def test_layer_merge_lock_unlock() -> None:
+    reply = (
+        "[SKETCH_LAYER_MERGE]\n"
+        "[SKETCH_LAYER_MERGE: Shading]\n"
+        "[SKETCH_LAYER_LOCK: Base]\n"
+        "[SKETCH_LAYER_UNLOCK]"
+    )
+    invs = extract_invocations(reply)
+    assert [i.action for i in invs] == [
+        SketchAction.LAYER_MERGE,
+        SketchAction.LAYER_MERGE,
+        SketchAction.LAYER_LOCK,
+        SketchAction.LAYER_UNLOCK,
+    ]
+    assert invs[0].value == ""
+    assert invs[1].value == "Shading"
+    assert invs[2].value == "Base"
+    assert confirmation_for(invs[0]) == "_(Merged the layer down.)_"
+    assert "Shading" in confirmation_for(invs[1])
+    assert confirmation_for(invs[2]) == "_(Layer \u201cBase\u201d locked.)_"
+    assert confirmation_for(invs[3]) == "_(Layer unlocked.)_"
+
+
 def test_case_insensitive() -> None:
     invs = extract_invocations("[sketch_tool: Marker]")
     assert len(invs) == 1

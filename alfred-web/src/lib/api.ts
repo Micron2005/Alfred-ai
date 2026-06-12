@@ -82,6 +82,7 @@ export interface SketchLayerSignal {
   name: string;
   visible: boolean;
   active: boolean;
+  locked: boolean;
 }
 
 /** Live design-pad state snapshot, sent only while the pad is open. */
@@ -90,6 +91,8 @@ export interface SketchSignal {
   tool: string;
   color: string;
   brush_size: number;
+  /** Active tool's opacity, percent (1-100). */
+  opacity: number;
   /** Top-first, matching the layers panel. */
   layers: SketchLayerSignal[];
   /** Flattened PNG of visible layers for [SKETCH_ANALYZE] turns. */

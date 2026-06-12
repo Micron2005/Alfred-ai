@@ -67,7 +67,9 @@ from alfred_core.tools.search_marker import (
 )
 from alfred_core.tools.sketch_marker import (
     MAX_BRUSH,
+    MAX_OPACITY,
     MIN_BRUSH,
+    MIN_OPACITY,
     VALID_TOOLS,
     SketchAction,
     SketchInvocation,
@@ -138,6 +140,7 @@ class SketchLayerSignal(BaseModel):
     name: str
     visible: bool = True
     active: bool = False
+    locked: bool = False
 
 
 class SketchSignal(BaseModel):
@@ -150,8 +153,10 @@ class SketchSignal(BaseModel):
 
     open: bool = False
     tool: str = "pen"
-    color: str = "#6cd6ff"
+    color: str = "#16181d"
     brush_size: float = 6
+    # Active tool's opacity, percent (1-100).
+    opacity: float = 100
     # Top-first, matching the UI's layers panel.
     layers: list[SketchLayerSignal] = []
     # Flattened PNG of the visible layers, used when the model emits
@@ -553,11 +558,13 @@ def _sketch_summary(sketch: SketchSignal | None) -> str:
         if layer.active:
             flags.append("active")
         flags.append("visible" if layer.visible else "hidden")
+        if layer.locked:
+            flags.append("locked")
         layer_bits.append(f"\u201c{layer.name}\u201d ({', '.join(flags)})")
     layers_part = "; ".join(layer_bits) if layer_bits else "none yet"
     return (
         f"Active tool: {sketch.tool}, colour {sketch.color}, "
-        f"brush size {sketch.brush_size:g}. "
+        f"brush size {sketch.brush_size:g}, opacity {sketch.opacity:g}%. "
         f"Layers (top first): {layers_part}."
     )
 
@@ -610,6 +617,23 @@ def _process_sketch_markers(
                     f"{inv.value!r}.)_"
                 )
             clamped = max(MIN_BRUSH, min(MAX_BRUSH, size))
+            value = f"{clamped:g}"
+            normalised = SketchInvocation(
+                action=inv.action, value=value, raw_match=inv.raw_match
+            )
+            return (
+                SketchCommandOut(action=inv.action.value, value=value),
+                sketch_confirmation_for(normalised),
+            )
+        if inv.action is SketchAction.OPACITY:
+            try:
+                pct = float(inv.value)
+            except ValueError:
+                return None, (
+                    f"_(I couldn't make sense of opacity "
+                    f"{inv.value!r}.)_"
+                )
+            clamped = max(MIN_OPACITY, min(MAX_OPACITY, pct))
             value = f"{clamped:g}"
             normalised = SketchInvocation(
                 action=inv.action, value=value, raw_match=inv.raw_match

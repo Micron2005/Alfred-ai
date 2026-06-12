@@ -14,8 +14,12 @@ once the chat handler strips it):
     [SKETCH_TOOL: pen]                 pencil | pen | marker | eraser
     [SKETCH_COLOR: #ff4d4d]            hex or a simple CSS colour name
     [SKETCH_BRUSH: 12]                 brush size, 1-64
+    [SKETCH_OPACITY: 60]               tool opacity, 1-100 (percent)
     [SKETCH_LAYER_ADD: Shading]        add a layer (name optional)
     [SKETCH_LAYER_SELECT: Shading]     make a layer active (by name)
+    [SKETCH_LAYER_MERGE]               merge a layer into the one below
+    [SKETCH_LAYER_LOCK: Base]          lock a layer (name optional)
+    [SKETCH_LAYER_UNLOCK: Base]        unlock it
     [SKETCH_UNDO]
     [SKETCH_REDO]
     [SKETCH_CLEAR]                     clear the ACTIVE layer only
@@ -38,7 +42,8 @@ from enum import StrEnum
 # drift apart silently.
 _MARKER_RE = re.compile(
     r"\[SKETCH_"
-    r"(OPEN|CLOSE|TOOL|COLOR|BRUSH|LAYER_ADD|LAYER_SELECT|UNDO|REDO|CLEAR|ANALYZE)"
+    r"(OPEN|CLOSE|TOOL|COLOR|BRUSH|OPACITY|LAYER_ADD|LAYER_SELECT"
+    r"|LAYER_MERGE|LAYER_LOCK|LAYER_UNLOCK|UNDO|REDO|CLEAR|ANALYZE)"
     r"(?:\s*:\s*([^\]]*))?\]",
     re.IGNORECASE,
 )
@@ -51,6 +56,10 @@ VALID_TOOLS: frozenset[str] = frozenset({"pencil", "pen", "marker", "eraser"})
 MIN_BRUSH = 1
 MAX_BRUSH = 64
 
+# Tool opacity bounds (percent), mirrored in the frontend slider.
+MIN_OPACITY = 1
+MAX_OPACITY = 100
+
 
 class SketchAction(StrEnum):
     """All actions the LLM can request via a sketch marker."""
@@ -60,8 +69,12 @@ class SketchAction(StrEnum):
     TOOL = "tool"
     COLOR = "color"
     BRUSH = "brush"
+    OPACITY = "opacity"
     LAYER_ADD = "layer_add"
     LAYER_SELECT = "layer_select"
+    LAYER_MERGE = "layer_merge"
+    LAYER_LOCK = "layer_lock"
+    LAYER_UNLOCK = "layer_unlock"
     UNDO = "undo"
     REDO = "redo"
     CLEAR = "clear"
@@ -129,12 +142,26 @@ def confirmation_for(invocation: SketchInvocation) -> str:
         return f"_(Colour set to {value}.)_"
     if action is SketchAction.BRUSH:
         return f"_(Brush size set to {value}.)_"
+    if action is SketchAction.OPACITY:
+        return f"_(Opacity set to {value}%.)_"
     if action is SketchAction.LAYER_ADD:
         if value:
             return f"_(Added layer \u201c{value}\u201d.)_"
         return "_(Added a new layer.)_"
     if action is SketchAction.LAYER_SELECT:
         return f"_(Layer \u201c{value}\u201d selected.)_"
+    if action is SketchAction.LAYER_MERGE:
+        if value:
+            return f"_(Merged \u201c{value}\u201d down.)_"
+        return "_(Merged the layer down.)_"
+    if action is SketchAction.LAYER_LOCK:
+        if value:
+            return f"_(Layer \u201c{value}\u201d locked.)_"
+        return "_(Layer locked.)_"
+    if action is SketchAction.LAYER_UNLOCK:
+        if value:
+            return f"_(Layer \u201c{value}\u201d unlocked.)_"
+        return "_(Layer unlocked.)_"
     if action is SketchAction.UNDO:
         return "_(Undone.)_"
     if action is SketchAction.REDO:

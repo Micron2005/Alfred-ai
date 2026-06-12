@@ -32,13 +32,30 @@ export interface SketchLayer {
   visible: boolean;
   /** 0..1 — applied via CSS on the layer canvas and during flatten. */
   opacity: number;
+  /** Locked layers can't be drawn on, cleared, merged, or deleted. */
+  locked: boolean;
 }
+
+/** Per-tool brush settings — each tool remembers its own, Procreate-style. */
+export interface ToolSettings {
+  size: number;
+  /** Ink opacity 0..1 (the tool's own translucency, not the layer's). */
+  opacity: number;
+}
+
+export const DEFAULT_TOOL_SETTINGS: Record<SketchTool, ToolSettings> = {
+  pencil: { size: 5, opacity: 0.72 },
+  pen: { size: 6, opacity: 1 },
+  marker: { size: 16, opacity: 0.32 },
+  eraser: { size: 20, opacity: 1 },
+};
 
 export interface SketchSnapshotState {
   open: boolean;
   tool: SketchTool;
   color: string;
-  brushSize: number;
+  /** Per-tool size + opacity; the active tool's entry is what draws. */
+  toolSettings: Record<SketchTool, ToolSettings>;
   /** Index 0 = TOP of the stack (matches the layers panel ordering). */
   layers: SketchLayer[];
   activeLayerId: string;
@@ -51,6 +68,8 @@ export interface SketchCanvasOps {
   undo(): void;
   redo(): void;
   clearActiveLayer(): void;
+  /** Composite a layer's pixels into the layer below and remove it. */
+  mergeDown(layerId: string): void;
   /**
    * Flattened PNG of the visible layers (downscaled for the vision
    * model), base64 without the ``data:`` prefix. Null when no canvas
@@ -92,12 +111,18 @@ class SketchStore {
       name: "Layer 1",
       visible: true,
       opacity: 1,
+      locked: false,
     };
     this.state = {
       open: false,
       tool: "pen",
       color: "#16181d",
-      brushSize: 6,
+      toolSettings: {
+        pencil: { ...DEFAULT_TOOL_SETTINGS.pencil },
+        pen: { ...DEFAULT_TOOL_SETTINGS.pen },
+        marker: { ...DEFAULT_TOOL_SETTINGS.marker },
+        eraser: { ...DEFAULT_TOOL_SETTINGS.eraser },
+      },
       layers: [first],
       activeLayerId: first.id,
       version: 0,
@@ -141,10 +166,29 @@ class SketchStore {
     this.commit({ color });
   }
 
+  /** Patch the ACTIVE tool's settings (each tool keeps its own). */
+  private updateActiveTool(patch: Partial<ToolSettings>) {
+    const tool = this.state.tool;
+    this.commit({
+      toolSettings: {
+        ...this.state.toolSettings,
+        [tool]: { ...this.state.toolSettings[tool], ...patch },
+      },
+    });
+  }
+
   setBrushSize(size: number) {
     if (!Number.isFinite(size)) return;
-    this.commit({
-      brushSize: Math.max(MIN_BRUSH, Math.min(MAX_BRUSH, size)),
+    this.updateActiveTool({
+      size: Math.max(MIN_BRUSH, Math.min(MAX_BRUSH, size)),
+    });
+  }
+
+  /** Tool opacity, 0..1. */
+  setBrushOpacity(opacity: number) {
+    if (!Number.isFinite(opacity)) return;
+    this.updateActiveTool({
+      opacity: Math.max(0.01, Math.min(1, opacity)),
     });
   }
 
@@ -164,6 +208,7 @@ class SketchStore {
       name: unique,
       visible: true,
       opacity: 1,
+      locked: false,
     };
     this.commit({
       layers: [layer, ...this.state.layers],
@@ -175,6 +220,8 @@ class SketchStore {
     if (this.state.layers.length <= 1) return;
     const idx = this.state.layers.findIndex((l) => l.id === id);
     if (idx === -1) return;
+    // Locked layers are protected from deletion — unlock first.
+    if (this.state.layers[idx].locked) return;
     const layers = this.state.layers.filter((l) => l.id !== id);
     let activeLayerId = this.state.activeLayerId;
     if (activeLayerId === id) {
@@ -189,22 +236,28 @@ class SketchStore {
   }
 
   /**
-   * Select a layer the way Alfred refers to it: exact name first
-   * (case-insensitive), then prefix/substring, then a 1-based index
-   * counted from the top of the layers panel ("layer 2").
+   * Find a layer the way Alfred refers to it: exact name first
+   * (case-insensitive), then substring, then a 1-based index counted
+   * from the top of the layers panel ("layer 2").
    */
-  selectLayerByName(query: string) {
+  findLayerByName(query: string): string | null {
     const q = query.trim().toLowerCase();
-    if (!q) return;
+    if (!q) return null;
     const layers = this.state.layers;
     const exact = layers.find((l) => l.name.toLowerCase() === q);
-    if (exact) return this.selectLayer(exact.id);
+    if (exact) return exact.id;
     const partial = layers.find((l) => l.name.toLowerCase().includes(q));
-    if (partial) return this.selectLayer(partial.id);
+    if (partial) return partial.id;
     const num = Number.parseInt(q.replace(/^layer\s+/i, ""), 10);
     if (Number.isFinite(num) && num >= 1 && num <= layers.length) {
-      this.selectLayer(layers[num - 1].id);
+      return layers[num - 1].id;
     }
+    return null;
+  }
+
+  selectLayerByName(query: string) {
+    const id = this.findLayerByName(query);
+    if (id) this.selectLayer(id);
   }
 
   toggleLayerVisible(id: string) {
@@ -222,6 +275,19 @@ class SketchStore {
         l.id === id ? { ...l, opacity: clamped } : l,
       ),
     });
+  }
+
+  setLayerLocked(id: string, locked: boolean) {
+    this.commit({
+      layers: this.state.layers.map((l) =>
+        l.id === id ? { ...l, locked } : l,
+      ),
+    });
+  }
+
+  toggleLayerLock(id: string) {
+    const layer = this.state.layers.find((l) => l.id === id);
+    if (layer) this.setLayerLocked(id, !layer.locked);
   }
 
   renameLayer(id: string, name: string) {
@@ -267,12 +333,33 @@ class SketchStore {
         if (Number.isFinite(size)) this.setBrushSize(size);
         return;
       }
+      case "opacity": {
+        // Alfred speaks percent (1-100); the store keeps 0..1.
+        const pct = Number.parseFloat(value);
+        if (Number.isFinite(pct)) this.setBrushOpacity(pct / 100);
+        return;
+      }
       case "layer_add":
         this.addLayer(value || undefined);
         return;
       case "layer_select":
         this.selectLayerByName(value);
         return;
+      case "layer_merge": {
+        const id = value
+          ? this.findLayerByName(value)
+          : this.state.activeLayerId;
+        if (id) this.canvasOps?.mergeDown(id);
+        return;
+      }
+      case "layer_lock":
+      case "layer_unlock": {
+        const id = value
+          ? this.findLayerByName(value)
+          : this.state.activeLayerId;
+        if (id) this.setLayerLocked(id, action === "layer_lock");
+        return;
+      }
       case "undo":
         this.canvasOps?.undo();
         return;

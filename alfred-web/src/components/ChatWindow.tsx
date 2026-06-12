@@ -2408,16 +2408,19 @@ export function ChatWindow() {
     // PNG, so Alfred can answer "what tool am I on?" from context and
     // actually look at the sketch when he emits [SKETCH_ANALYZE].
     const sk = sketchStore.getSnapshot();
+    const skTool = sk.toolSettings[sk.tool];
     const sketch: SketchSignal | null = sk.open
       ? {
           open: true,
           tool: sk.tool,
           color: sk.color,
-          brush_size: sk.brushSize,
+          brush_size: skTool.size,
+          opacity: Math.round(skTool.opacity * 100),
           layers: sk.layers.map((l) => ({
             name: l.name,
             visible: l.visible,
             active: l.id === sk.activeLayerId,
+            locked: l.locked,
           })),
           snapshot: sketchStore.captureSnapshot(),
         }

@@ -70,42 +70,35 @@ const SWATCHES = [
 interface ToolConfig {
   glyph: string;
   label: string;
-  /** Stroke alpha (ink translucency). */
-  alpha: number;
-  /** Multiplier on the user's brush size. */
-  widthScale: number;
   /** Width factor at zero pressure… */
   minPressure: number;
   /** …plus this much × pressure on top. */
   pressureGain: number;
 }
 
+// Size and opacity now live in the store (per-tool, user-adjustable,
+// Procreate-style) — this config only keeps each tool's glyph and
+// pressure character.
 const TOOL_CONFIG: Record<SketchTool, ToolConfig> = {
-  // Pencil: translucent, strongly pressure-driven — light touch gives
-  // a faint thin line, pressing hard nearly doubles the width.
+  // Pencil: strongly pressure-driven — light touch gives a faint
+  // thin line, pressing hard nearly doubles the width.
   pencil: {
     glyph: "✏",
     label: "Pencil",
-    alpha: 0.72,
-    widthScale: 1,
     minPressure: 0.25,
     pressureGain: 1.3,
   },
-  // Pen: opaque ink, moderate pressure response.
+  // Pen: moderate pressure response.
   pen: {
     glyph: "🖊",
     label: "Pen",
-    alpha: 1,
-    widthScale: 1,
     minPressure: 0.45,
     pressureGain: 0.9,
   },
-  // Marker: wide translucent chisel — overlapping strokes build up.
+  // Marker: wide chisel, mild pressure response.
   marker: {
     glyph: "🖍",
     label: "Marker",
-    alpha: 0.32,
-    widthScale: 2.4,
     minPressure: 0.75,
     pressureGain: 0.4,
   },
@@ -113,8 +106,6 @@ const TOOL_CONFIG: Record<SketchTool, ToolConfig> = {
   eraser: {
     glyph: "⌫",
     label: "Eraser",
-    alpha: 1,
-    widthScale: 2.6,
     minPressure: 0.8,
     pressureGain: 0.4,
   },
@@ -142,6 +133,34 @@ function getLayerCanvas(layerId: string): HTMLCanvasElement {
     layerCanvases.set(layerId, canvas);
   }
   return canvas;
+}
+
+// In-progress stroke buffer. Translucent tools draw each segment at
+// FULL alpha in here (so overlapping segment joints don't stack and
+// darken), and the whole stroke is composited onto the layer ONCE at
+// the tool's opacity when the pointer lifts — the same trick
+// Procreate uses. While stroking, this canvas sits in the DOM right
+// above the active layer with CSS opacity as the live preview.
+let strokeBufferEl: HTMLCanvasElement | null = null;
+
+function getStrokeBuffer(): HTMLCanvasElement {
+  if (!strokeBufferEl) {
+    strokeBufferEl = document.createElement("canvas");
+    strokeBufferEl.width = LOGICAL_W;
+    strokeBufferEl.height = LOGICAL_H;
+    strokeBufferEl.style.position = "absolute";
+    strokeBufferEl.style.inset = "0";
+    strokeBufferEl.style.width = "100%";
+    strokeBufferEl.style.height = "100%";
+    strokeBufferEl.style.pointerEvents = "none";
+  }
+  return strokeBufferEl;
+}
+
+function detachStrokeBuffer() {
+  if (!strokeBufferEl) return;
+  strokeBufferEl.getContext("2d")?.clearRect(0, 0, LOGICAL_W, LOGICAL_H);
+  strokeBufferEl.remove();
 }
 
 function captureLayer(layerId: string): HistoryEntry | null {
@@ -191,11 +210,40 @@ function redoStroke() {
 }
 
 function clearActiveLayer() {
-  const { activeLayerId } = sketchStore.getSnapshot();
+  const { activeLayerId, layers } = sketchStore.getSnapshot();
+  const layer = layers.find((l) => l.id === activeLayerId);
+  if (!layer || layer.locked) return;
   const canvas = layerCanvases.get(activeLayerId);
   if (!canvas) return;
   pushUndo(activeLayerId);
   canvas.getContext("2d")?.clearRect(0, 0, LOGICAL_W, LOGICAL_H);
+}
+
+/**
+ * Merge a layer's pixels into the layer directly below it (with the
+ * upper layer's opacity baked in), then remove the upper layer —
+ * Procreate's "merge down". Refused when either layer is locked.
+ * The lower layer's pre-merge pixels go on the undo stack.
+ */
+function mergeDownLayer(layerId: string) {
+  const { layers } = sketchStore.getSnapshot();
+  const idx = layers.findIndex((l) => l.id === layerId);
+  if (idx === -1 || idx >= layers.length - 1) return;
+  const upper = layers[idx];
+  const lower = layers[idx + 1];
+  if (upper.locked || lower.locked) return;
+  const upperCanvas = layerCanvases.get(upper.id);
+  const lowerCtx = getLayerCanvas(lower.id).getContext("2d");
+  if (!lowerCtx) return;
+  pushUndo(lower.id);
+  if (upperCanvas) {
+    lowerCtx.save();
+    lowerCtx.globalAlpha = upper.opacity;
+    lowerCtx.drawImage(upperCanvas, 0, 0);
+    lowerCtx.restore();
+  }
+  sketchStore.removeLayer(upper.id);
+  sketchStore.selectLayer(lower.id);
 }
 
 /** Flatten visible layers (bottom → top) onto the white paper. */
@@ -280,6 +328,7 @@ sketchStore.registerCanvasOps({
   undo: undoStroke,
   redo: redoStroke,
   clearActiveLayer,
+  mergeDown: mergeDownLayer,
   captureSnapshot,
 });
 
@@ -342,6 +391,20 @@ export function SketchPad() {
     x: number;
     y: number;
     pressure: number;
+    /** The layer this stroke targets (frozen at stroke start). */
+    layerId: string;
+    /**
+     * True for draw tools: segments go into the stroke buffer at
+     * full alpha and composite onto the layer once on pointer-up.
+     * The eraser draws directly (destination-out can't be buffered).
+     */
+    buffered: boolean;
+    /**
+     * True when the active layer is locked/hidden: the pointer is
+     * tracked (so the hold-eyedropper still works) but paints
+     * nothing and pushed no undo entry.
+     */
+    inert: boolean;
   } | null>(null);
   // Timestamp of the last stylus event — used to reject palm touches
   // that land while (or just after) the pen is on the glass.
@@ -494,28 +557,40 @@ export function SketchPad() {
     to: { x: number; y: number },
     pressure: number,
   ) {
-    const { activeLayerId, tool, color, brushSize, layers } = stateRef.current;
-    const layer = layers.find((l) => l.id === activeLayerId);
-    // Drawing on a hidden layer is invisible-ink confusion — skip.
-    if (!layer || !layer.visible) return;
-    const ctx = layerCanvases.get(activeLayerId)?.getContext("2d");
-    if (!ctx) return;
+    const drawing = drawingRef.current;
+    const { tool, color, toolSettings, layers } = stateRef.current;
+    const layerId = drawing?.layerId ?? stateRef.current.activeLayerId;
+    const layer = layers.find((l) => l.id === layerId);
+    // Hidden = invisible-ink confusion; locked = protected. Skip both.
+    if (!layer || !layer.visible || layer.locked) return;
     const cfg = TOOL_CONFIG[tool];
+    const settings = toolSettings[tool];
+    const buffered = drawing?.buffered ?? false;
+    const ctx = buffered
+      ? getStrokeBuffer().getContext("2d")
+      : layerCanvases.get(layerId)?.getContext("2d");
+    if (!ctx) return;
     ctx.save();
     ctx.lineCap = "round";
     ctx.lineJoin = "round";
-    if (tool === "eraser") {
+    if (buffered) {
+      // Full alpha into the buffer — the tool's opacity is applied
+      // ONCE when the finished stroke composites onto the layer, so
+      // overlapping segment joints never stack and darken.
+      ctx.globalAlpha = 1;
+      ctx.strokeStyle = color;
+    } else if (tool === "eraser") {
       ctx.globalCompositeOperation = "destination-out";
       ctx.strokeStyle = "rgba(0,0,0,1)";
+      // Partial opacity on the eraser = soft, gradual erasing.
+      ctx.globalAlpha = settings.opacity;
     } else {
-      ctx.globalAlpha = cfg.alpha;
+      ctx.globalAlpha = settings.opacity;
       ctx.strokeStyle = color;
     }
     ctx.lineWidth = Math.max(
       0.5,
-      brushSize *
-        cfg.widthScale *
-        (cfg.minPressure + pressure * cfg.pressureGain),
+      settings.size * (cfg.minPressure + pressure * cfg.pressureGain),
     );
     ctx.beginPath();
     ctx.moveTo(from.x, from.y);
@@ -548,11 +623,26 @@ export function SketchPad() {
    */
   function cancelActiveStroke(onDone?: () => void) {
     clearHoldTimer();
-    if (!drawingRef.current) {
+    const drawing = drawingRef.current;
+    if (!drawing) {
       onDone?.();
       return;
     }
     drawingRef.current = null;
+    // Inert "strokes" (locked/hidden layer) never pushed an undo
+    // entry and painted nothing — nothing to roll back.
+    if (drawing.inert) {
+      onDone?.();
+      return;
+    }
+    if (drawing.buffered) {
+      // The layer was never touched — the partial stroke only lives
+      // in the buffer. Toss the buffer and the pre-stroke snapshot.
+      detachStrokeBuffer();
+      history.undo.pop();
+      onDone?.();
+      return;
+    }
     const entry = history.undo.pop();
     if (entry) restoreLayer(entry, onDone);
     else onDone?.();
@@ -682,13 +772,45 @@ export function SketchPad() {
     ) {
       return;
     }
-    const { activeLayerId } = stateRef.current;
-    pushUndo(activeLayerId);
+    const { activeLayerId, layers, tool, toolSettings } = stateRef.current;
+    const activeLayer = layers.find((l) => l.id === activeLayerId);
+    // Locked or hidden layer: track the pointer (the hold-eyedropper
+    // must still work) but don't paint or burn an undo slot.
+    const inert = !activeLayer || !activeLayer.visible || activeLayer.locked;
+    const buffered = !inert && tool !== "eraser";
+    if (!inert) {
+      pushUndo(activeLayerId);
+      if (buffered) {
+        // Stage the stroke buffer in the DOM directly above the
+        // active layer's canvas, previewing at the tool's opacity.
+        const buffer = getStrokeBuffer();
+        buffer.getContext("2d")?.clearRect(0, 0, LOGICAL_W, LOGICAL_H);
+        buffer.style.opacity = String(toolSettings[tool].opacity);
+        const container = stackRef.current;
+        const activeCanvas = layerCanvases.get(activeLayerId);
+        if (
+          container &&
+          activeCanvas &&
+          activeCanvas.parentElement === container
+        ) {
+          container.insertBefore(buffer, activeCanvas.nextSibling);
+        } else if (container) {
+          container.appendChild(buffer);
+        }
+      }
+    }
     const pt = toLogical(e.clientX, e.clientY);
     const pressure = pressureOf(e.pressure);
-    drawingRef.current = { pointerId: e.pointerId, ...pt, pressure };
+    drawingRef.current = {
+      pointerId: e.pointerId,
+      ...pt,
+      pressure,
+      layerId: activeLayerId,
+      buffered,
+      inert,
+    };
     // A dot for taps.
-    drawSegment(pt, pt, pressure);
+    if (!inert) drawSegment(pt, pt, pressure);
     // Arm the touch-&-hold eyedropper: if this pointer stays nearly
     // still for ~half a second, the stroke dot is cancelled and a
     // colour-sampling loupe appears instead (Procreate behaviour).
@@ -766,6 +888,7 @@ export function SketchPad() {
       if (travelled > 8) clearHoldTimer();
     }
     if (e.pointerType === "pen") lastPenTimeRef.current = performance.now();
+    if (drawing.inert) return;
     // Coalesced events give the full-resolution stylus path on
     // 120 Hz+ digitisers instead of one point per frame.
     const native = e.nativeEvent;
@@ -822,6 +945,19 @@ export function SketchPad() {
     if (drawing && drawing.pointerId === e.pointerId) {
       clearHoldTimer();
       drawingRef.current = null;
+      // Finished buffered stroke: composite it onto the layer ONCE
+      // at the tool's opacity, then clear the preview buffer.
+      if (drawing.buffered && strokeBufferEl) {
+        const { tool, toolSettings } = stateRef.current;
+        const ctx = layerCanvases.get(drawing.layerId)?.getContext("2d");
+        if (ctx) {
+          ctx.save();
+          ctx.globalAlpha = toolSettings[tool].opacity;
+          ctx.drawImage(strokeBufferEl, 0, 0);
+          ctx.restore();
+        }
+        detachStrokeBuffer();
+      }
     }
   }
 
@@ -842,6 +978,7 @@ export function SketchPad() {
   // ── Render ───────────────────────────────────────────────────────
 
   const cfg = TOOL_CONFIG[state.tool];
+  const toolSet = state.toolSettings[state.tool];
 
   return (
     <div
@@ -880,7 +1017,8 @@ export function SketchPad() {
           className="mono"
           style={{ fontSize: 10, color: "var(--muted)", letterSpacing: 1 }}
         >
-          {cfg.label.toUpperCase()} · {state.brushSize}px
+          {cfg.label.toUpperCase()} · {toolSet.size}px ·{" "}
+          {Math.round(toolSet.opacity * 100)}%
         </span>
         <span style={{ flex: 1 }} />
         <button
@@ -969,7 +1107,7 @@ export function SketchPad() {
             }}
           />
 
-          {/* Brush size */}
+          {/* Brush size — per tool, like Procreate */}
           <label
             className="mono"
             style={{
@@ -979,16 +1117,40 @@ export function SketchPad() {
               textAlign: "center",
             }}
           >
-            SIZE {state.brushSize}
+            SIZE {toolSet.size}
           </label>
           <input
             type="range"
             min={1}
             max={64}
             step={1}
-            value={state.brushSize}
+            value={toolSet.size}
             data-testid="sketch-brush-slider"
             onChange={(e) => sketchStore.setBrushSize(Number(e.target.value))}
+            style={{ width: "100%", accentColor: "var(--hud)" }}
+          />
+          {/* Tool opacity — also per tool */}
+          <label
+            className="mono"
+            style={{
+              fontSize: 9,
+              letterSpacing: 1.5,
+              color: "var(--muted)",
+              textAlign: "center",
+            }}
+          >
+            OPACITY {Math.round(toolSet.opacity * 100)}%
+          </label>
+          <input
+            type="range"
+            min={1}
+            max={100}
+            step={1}
+            value={Math.round(toolSet.opacity * 100)}
+            data-testid="sketch-tool-opacity-slider"
+            onChange={(e) =>
+              sketchStore.setBrushOpacity(Number(e.target.value) / 100)
+            }
             style={{ width: "100%", accentColor: "var(--hud)" }}
           />
           {/* Live brush preview dot on a paper-white chip */}
@@ -1005,14 +1167,14 @@ export function SketchPad() {
           >
             <div
               style={{
-                width: Math.min(36, Math.max(3, state.brushSize)),
-                height: Math.min(36, Math.max(3, state.brushSize)),
+                width: Math.min(36, Math.max(3, toolSet.size)),
+                height: Math.min(36, Math.max(3, toolSet.size)),
                 borderRadius: "50%",
                 background:
                   state.tool === "eraser" ? "transparent" : state.color,
                 border:
                   state.tool === "eraser" ? "1px dashed #8a96ad" : "none",
-                opacity: TOOL_CONFIG[state.tool].alpha,
+                opacity: toolSet.opacity,
               }}
             />
           </div>
@@ -1337,6 +1499,30 @@ export function SketchPad() {
                   )}
                   <button
                     type="button"
+                    data-testid="sketch-layer-lock-btn"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      sketchStore.toggleLayerLock(layer.id);
+                    }}
+                    title={
+                      layer.locked
+                        ? "Unlock layer"
+                        : "Lock layer (protects it from drawing & deletion)"
+                    }
+                    style={{
+                      background: "none",
+                      border: "none",
+                      cursor: "pointer",
+                      fontSize: 12,
+                      padding: 0,
+                      opacity: layer.locked ? 1 : 0.35,
+                      color: layer.locked ? "var(--hud)" : "var(--fg)",
+                    }}
+                  >
+                    {layer.locked ? "🔒" : "🔓"}
+                  </button>
+                  <button
+                    type="button"
                     data-testid="sketch-layer-up-btn"
                     onClick={(e) => {
                       e.stopPropagation();
@@ -1393,15 +1579,20 @@ export function SketchPad() {
                         sketchStore.removeLayer(layer.id);
                       }
                     }}
-                    disabled={state.layers.length <= 1}
-                    title="Delete layer"
+                    disabled={state.layers.length <= 1 || layer.locked}
+                    title={
+                      layer.locked ? "Unlock the layer first" : "Delete layer"
+                    }
                     style={{
                       background: "none",
                       border: "none",
                       cursor:
-                        state.layers.length <= 1 ? "default" : "pointer",
+                        state.layers.length <= 1 || layer.locked
+                          ? "default"
+                          : "pointer",
                       color: "var(--danger)",
-                      opacity: state.layers.length <= 1 ? 0.3 : 0.85,
+                      opacity:
+                        state.layers.length <= 1 || layer.locked ? 0.3 : 0.85,
                       fontSize: 12,
                       padding: 0,
                     }}
@@ -1409,7 +1600,7 @@ export function SketchPad() {
                     ✕
                   </button>
                 </div>
-                {/* Per-layer opacity */}
+                {/* Per-layer opacity + merge down */}
                 <div
                   style={{ display: "flex", alignItems: "center", gap: 6 }}
                   onClick={(e) => e.stopPropagation()}
@@ -1442,6 +1633,47 @@ export function SketchPad() {
                       height: 12,
                     }}
                   />
+                  <button
+                    type="button"
+                    data-testid="sketch-layer-merge-btn"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      mergeDownLayer(layer.id);
+                    }}
+                    disabled={
+                      idx === state.layers.length - 1 ||
+                      layer.locked ||
+                      state.layers[idx + 1]?.locked
+                    }
+                    title={
+                      idx === state.layers.length - 1
+                        ? "No layer below to merge into"
+                        : layer.locked || state.layers[idx + 1]?.locked
+                          ? "Unlock both layers first"
+                          : "Merge down into the layer below"
+                    }
+                    style={{
+                      background: "none",
+                      border: "none",
+                      cursor:
+                        idx === state.layers.length - 1 ||
+                        layer.locked ||
+                        state.layers[idx + 1]?.locked
+                          ? "default"
+                          : "pointer",
+                      color: "var(--muted)",
+                      opacity:
+                        idx === state.layers.length - 1 ||
+                        layer.locked ||
+                        state.layers[idx + 1]?.locked
+                          ? 0.3
+                          : 1,
+                      fontSize: 13,
+                      padding: 0,
+                    }}
+                  >
+                    ⤵
+                  </button>
                 </div>
               </div>
             );

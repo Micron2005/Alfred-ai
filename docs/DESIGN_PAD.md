@@ -31,16 +31,17 @@ outside the tab and are re-attached when you come back.
 
 ## Drawing
 
-- **Tools**: pencil (translucent, strongly pressure-driven), pen
-  (opaque ink), marker (wide, builds up with overlapping strokes),
-  eraser. Pressure comes from the Pointer Events API — a stylus or
-  pressure-capable touchscreen modulates stroke width; mouse and
-  finger fall back to a constant mid pressure.
-- **Colours**: ten HUD-themed swatches plus a free colour picker.
-- **Brush size**: 1–64 px slider with a live preview dot.
+- **Tools**: pencil, pen, marker, eraser — each remembers its **own
+  size and opacity** (Procreate-style). The SIZE and OPACITY sliders
+  in the tool rail edit the active tool; translucent strokes render
+  uniformly (no dark joints) because each stroke composites onto the
+  layer once, at the tool's opacity.
+- **Colours**: ten swatches tuned for white paper plus a free colour
+  picker, and the touch-&-hold eyedropper.
 - **Layers**: add, delete, rename (double-click the name), reorder
-  (▲/▼), show/hide (👁), per-layer opacity. New layers go on top and
-  become active. Strokes land on the active layer only.
+  (▲/▼), show/hide (👁), per-layer opacity, **lock (🔒)** — locked
+  layers can't be drawn on, cleared, merged, or deleted — and
+  **merge down (⤵)** to combine a layer into the one below.
 - **Undo / redo**: per-stroke, up to 30 steps. Clearing a layer is
   undoable too.
 - **Export**: ⤓ EXPORT downloads the flattened sketch as a PNG.
