@@ -55,12 +55,25 @@ if [[ "$MODE" == "mirrored" ]]; then TARGET="127.0.0.1"; else
     TARGET="$(ip route show default | awk '{print $3; exit}')"
 fi
 echo "      networking mode: $MODE — Windows host target: $TARGET"
+HOP3_OK=0
 if curl -s --max-time 3 "http://$TARGET:11434/api/tags" >/dev/null 2>&1; then
     echo -e "  $PASS http://$TARGET:11434 reachable from WSL"
+    HOP3_OK=1
 else
     echo -e "  $FAIL can't reach http://$TARGET:11434 from WSL"
-    if [[ "$WIN_STATUS" == "200" && "$WIN_ENV" == *"0.0.0.0"* ]]; then
-        verdicts+=("Ollama runs and the env var is set, but it's still bound to 127.0.0.1 — it was NOT restarted after the change. Fully QUIT Ollama from the system tray (right-click → Quit), make sure no old 'ollama serve' console is open, then start Ollama again. If it still fails, the firewall rule may be missing: re-run ./scripts/windows/setup-ollama-from-wsl.sh.")
+    # Disambiguate: what is Windows :11434 actually bound to?
+    BIND="$(timeout 10 powershell.exe -NoProfile -Command \
+        "(Get-NetTCPConnection -LocalPort 11434 -State Listen -ErrorAction SilentlyContinue | Select-Object -ExpandProperty LocalAddress | Sort-Object -Unique) -join ','" \
+        2>/dev/null | tr -d '\r' | tail -1)"
+    echo "      Windows :11434 listening on: ${BIND:-<unknown>}"
+    if [[ "$BIND" == *"0.0.0.0"* || "$BIND" == *"::"* ]]; then
+        RULE_ON="$(timeout 10 powershell.exe -NoProfile -Command \
+            "(Get-NetFirewallRule -DisplayName 'Ollama (Alfred WSL bridge)' -ErrorAction SilentlyContinue).Enabled" \
+            2>/dev/null | tr -d '\r' | tail -1)"
+        echo "      firewall rule 'Ollama (Alfred WSL bridge)' enabled: ${RULE_ON:-NOT FOUND}"
+        verdicts+=("Ollama listens on all interfaces but WSL still can't reach it — firewall. Re-run ./scripts/windows/setup-ollama-from-wsl.sh (approve UAC). If it persists, look for third-party antivirus/firewall software blocking port 11434.")
+    else
+        verdicts+=("Ollama is still bound to 127.0.0.1 — it did NOT pick up OLLAMA_HOST. Fully QUIT Ollama on Windows (right-click the tray icon → Quit Ollama), close any old 'ollama serve' console windows, start Ollama again, then re-run this diagnostic.")
     fi
 fi
 
@@ -82,6 +95,8 @@ echo ""
 echo -e "$INFO [5/6] WSL-local :11434 answers"
 if curl -s --max-time 3 http://localhost:11434/api/tags >/dev/null 2>&1; then
     echo -e "  $PASS localhost:11434 answers inside WSL"
+elif [[ "$HOP3_OK" == "0" ]]; then
+    echo -e "  $FAIL localhost:11434 dead inside WSL (expected — downstream of hop 3)"
 else
     echo -e "  $FAIL localhost:11434 dead inside WSL"
 fi

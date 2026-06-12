@@ -380,10 +380,17 @@ User ran the scripts on his PC; two failures, both fixed:
    → OLLAMA_HOST user env → WSL→gateway direct → bridge service →
    WSL :11434 → docker compose exec alfred-core curl
    host.docker.internal) with ordered fix verdicts. Validated in pod
-   (all hops fail gracefully, no crashes). Most likely root causes
-   for user: bridge never installed (earlier installer aborts) and/or
-   Ollama not restarted after env change. AWAITING USER'S DIAGNOSTIC
-   OUTPUT.
+   (all hops fail gracefully, no crashes).
+5. USER'S DIAGNOSTIC RESULTS: hop1 PASS (Ollama up on Windows
+   loopback), hop2 PASS (OLLAMA_HOST=0.0.0.0:11434 set), hop3 FAIL
+   (WSL → 172.20.160.1:11434 unreachable), hop4 PASS (bridge active
+   — so the engine installer rerun worked), hop5 FAIL (downstream).
+   ⇒ Root cause: Ollama still bound to 127.0.0.1 = NOT fully
+   restarted after env change (or firewall). Upgraded diagnose hop3
+   to disambiguate automatically via Get-NetTCPConnection (shows
+   actual bind address) + Get-NetFirewallRule check; hop5 now labels
+   downstream failures. Told user: tray → Quit Ollama → relaunch →
+   re-run diagnostic. AWAITING RESULT.
 
 ## Backlog / roadmap
 - P1: Face polish candidates (user feedback pending): Alfred
