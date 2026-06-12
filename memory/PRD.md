@@ -95,6 +95,28 @@ Implemented:
   tab round-trip exactly, CLOSE returns to chat, radial DESIGN module
   opens the pad. tsc/eslint/next build clean.
 
+### Procreate-style pad rework (2026-06-12)
+User: "no grid, the pad itself is white, zoom in/out and move it
+around like Apple's Procreate, and remove the DESIGN button next to
+the CAM button."
+Implemented in SketchPad.tsx (+ sketchStore default color #16181d):
+- White paper (#ffffff), grid removed; flatten/export/analyze fill
+  white. New swatch palette tuned for white paper (ink black first).
+- Zoom/pan: viewRef {scale,tx,ty} applied as CSS transform (origin
+  0 0) on the canvas stack; toLogical uses getBoundingClientRect so
+  strokes stay aligned at any zoom. Two-finger pinch = zoom+pan
+  (anchored at gesture midpoint), wheel zoom at cursor (ctrl+wheel =
+  trackpad pinch), middle-mouse drag pan, −/%/+ controls bottom-right
+  (% resets view). Zoom clamps 0.3x–12x of fit.
+- Procreate gestures: two-finger TAP undo, three-finger TAP redo;
+  second finger mid-stroke cancels the stroke (pops the undo entry
+  just pushed); leftover finger after pinch can't draw until all lift.
+- Removed design-pad-toggle-btn from chat header (HUD toggle btn got
+  testid hud-toggle-btn). Tab/radial/voice remain the entry points.
+- Verified via Playwright: button gone, white bg + no grid, wheel
+  zoom 100→197%, +/reset buttons, stroke lands at correct logical
+  coords after zoom round-trip. tsc/eslint/build clean.
+
 ### Phase A — Design Pad (DONE 2026-06-11, all tests pass)
 - `alfred-core/src/alfred_core/tools/sketch_marker.py` — [SKETCH_*]
   marker parser (OPEN/CLOSE/TOOL/COLOR/BRUSH/LAYER_ADD/LAYER_SELECT/

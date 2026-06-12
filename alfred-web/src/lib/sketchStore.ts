@@ -96,7 +96,7 @@ class SketchStore {
     this.state = {
       open: false,
       tool: "pen",
-      color: "#6cd6ff",
+      color: "#16181d",
       brushSize: 6,
       layers: [first],
       activeLayerId: first.id,

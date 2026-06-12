@@ -10,17 +10,25 @@ import {
 } from "@/lib/sketchStore";
 
 /**
- * The DESIGN tab — a JARVIS-style drafting table (freehand sketch pad).
+ * The DESIGN tab — a Procreate-style freehand sketch pad.
  *
- * Touch / stylus drawing surface with:
+ * Drawing surface:
+ *   - white paper canvas (no grid), fixed logical 1600×1000 space;
  *   - multiple layers (add / delete / rename / show-hide / opacity /
  *     reorder / select), each its own stacked <canvas>;
  *   - pressure-sensitive pencil, pen, marker, and eraser (Pointer
  *     Events ``pressure``, so a real stylus modulates width — mouse
  *     and finger fall back to a constant mid pressure);
- *   - colour swatches + a free colour picker + brush size;
- *   - undo / redo (per-stroke snapshots) and per-layer clear;
- *   - PNG export.
+ *   - undo / redo and per-layer clear, PNG export.
+ *
+ * Procreate-style navigation:
+ *   - two-finger pinch → zoom + pan the paper simultaneously;
+ *   - two-finger TAP → undo, three-finger TAP → redo;
+ *   - a second finger landing mid-stroke CANCELS that stroke (palm
+ *     and gesture safety, like Procreate);
+ *   - mouse: scroll wheel zooms at the cursor (trackpad pinch works
+ *     via ctrl+wheel), middle-button drag pans;
+ *   - − / % / + controls bottom-right; tapping the % resets the view.
  *
  * Mount/unmount survival: this component renders INSIDE the DESIGN
  * tab, so it unmounts whenever the user switches tabs. The layer
@@ -29,10 +37,6 @@ import {
  * mount (a detached canvas keeps its pixels). Undo history and the
  * canvas ops Alfred's chat commands call (undo / redo / clear /
  * snapshot) are module-level too, so they work even mid tab-switch.
- *
- * Canvas coordinates are a fixed logical 1600×1000 space, CSS-scaled
- * to fit the tab — resizing the browser never resamples or clears
- * the artwork.
  */
 
 const LOGICAL_W = 1600;
@@ -40,20 +44,23 @@ const LOGICAL_H = 1000;
 /** Vision-model snapshot width — keeps the analyze payload small. */
 const SNAPSHOT_W = 1024;
 const UNDO_LIMIT = 30;
-/** Drafting-table surface — flattened into snapshots and exports. */
-const CANVAS_BG = "#0a1424";
+/** The paper — flattened into snapshots and exports. */
+const CANVAS_BG = "#ffffff";
+/** Zoom limits relative to the fitted base size. */
+const MIN_ZOOM = 0.3;
+const MAX_ZOOM = 12;
 
 const SWATCHES = [
-  "#6cd6ff", // HUD cyan
-  "#e6ecf5", // chalk white
-  "#d6a85a", // wayne gold
-  "#ff5757", // red
-  "#ff9d4d", // orange
-  "#7dff9b", // green
-  "#4d79ff", // blue
-  "#c08bff", // violet
-  "#ff6cd6", // pink
-  "#8a96ad", // graphite
+  "#16181d", // ink black
+  "#5b6472", // graphite
+  "#b3833a", // gold
+  "#e03c3c", // red
+  "#e8842c", // orange
+  "#1f9d55", // green
+  "#2563eb", // blue
+  "#7c3aed", // violet
+  "#e44fb7", // pink
+  "#1f9ec9", // cyan
 ];
 
 interface ToolConfig {
@@ -184,7 +191,7 @@ function clearActiveLayer() {
   canvas.getContext("2d")?.clearRect(0, 0, LOGICAL_W, LOGICAL_H);
 }
 
-/** Flatten visible layers (bottom → top) onto the pad background. */
+/** Flatten visible layers (bottom → top) onto the white paper. */
 function flatten(targetWidth: number): HTMLCanvasElement {
   const out = document.createElement("canvas");
   const scale = targetWidth / LOGICAL_W;
@@ -245,12 +252,44 @@ function useSketchState(): SketchSnapshotState {
   );
 }
 
+// ─── View (zoom / pan) types ─────────────────────────────────────────
+
+interface ViewState {
+  scale: number;
+  tx: number;
+  ty: number;
+}
+
+interface PointerInfo {
+  x: number;
+  y: number;
+}
+
+type Gesture =
+  | {
+      mode: "pinch";
+      dist0: number;
+      mid0: { x: number; y: number };
+      rect0: DOMRect;
+      view0: ViewState;
+      t0: number;
+      moved: boolean;
+      maxPointers: number;
+    }
+  | {
+      mode: "pan";
+      pointerId: number;
+      start: { x: number; y: number };
+      view0: ViewState;
+    };
+
 export function SketchPad() {
   const state = useSketchState();
   // Pointer handlers need the freshest state without re-binding.
   const stateRef = useRef(state);
   stateRef.current = state;
 
+  const viewportRef = useRef<HTMLElement>(null);
   const stackRef = useRef<HTMLDivElement>(null);
   const drawingRef = useRef<{
     pointerId: number;
@@ -261,6 +300,15 @@ export function SketchPad() {
   // Timestamp of the last stylus event — used to reject palm touches
   // that land while (or just after) the pen is on the glass.
   const lastPenTimeRef = useRef(0);
+  // All live pointers on the viewport, by id (client coords).
+  const pointersRef = useRef<Map<number, PointerInfo>>(new Map());
+  // Active two-finger pinch or middle-mouse pan, if any.
+  const gestureRef = useRef<Gesture | null>(null);
+  // After a pinch ends, a leftover finger must NOT start drawing
+  // (classic Procreate behaviour) — suppressed until all fingers lift.
+  const suppressDrawRef = useRef(false);
+  const viewRef = useRef<ViewState>({ scale: 1, tx: 0, ty: 0 });
+  const [zoomPct, setZoomPct] = useState(100);
   const [editingLayerId, setEditingLayerId] = useState<string | null>(null);
   const [layerNameDraft, setLayerNameDraft] = useState("");
 
@@ -294,11 +342,72 @@ export function SketchPad() {
     history.redo = history.redo.filter((e) => alive.has(e.layerId));
   }, [state.layers]);
 
+  // ── View (zoom / pan) ────────────────────────────────────────────
+
+  function applyView(next: ViewState) {
+    viewRef.current = next;
+    const stack = stackRef.current;
+    if (stack) {
+      stack.style.transform = `translate(${next.tx}px, ${next.ty}px) scale(${next.scale})`;
+    }
+    setZoomPct(Math.round(next.scale * 100));
+  }
+
+  function resetView() {
+    applyView({ scale: 1, tx: 0, ty: 0 });
+  }
+
+  /** Zoom by ``factor`` keeping the client point (mx, my) fixed. */
+  function zoomAt(mx: number, my: number, factor: number) {
+    const stack = stackRef.current;
+    if (!stack) return;
+    const view = viewRef.current;
+    const next = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, view.scale * factor));
+    if (next === view.scale) return;
+    const rect = stack.getBoundingClientRect();
+    const ratio = next / view.scale;
+    applyView({
+      scale: next,
+      tx: view.tx + (mx - rect.left) * (1 - ratio),
+      ty: view.ty + (my - rect.top) * (1 - ratio),
+    });
+  }
+
+  function zoomAtCenter(factor: number) {
+    const viewport = viewportRef.current;
+    if (!viewport) return;
+    const rect = viewport.getBoundingClientRect();
+    zoomAt(rect.left + rect.width / 2, rect.top + rect.height / 2, factor);
+  }
+
+  // Wheel zoom needs a NATIVE non-passive listener — React's
+  // synthetic onWheel can't preventDefault page scrolling reliably.
+  useEffect(() => {
+    const viewport = viewportRef.current;
+    if (!viewport) return;
+    const onWheel = (e: WheelEvent) => {
+      e.preventDefault();
+      // Trackpad pinch arrives as ctrl+wheel with fine deltas;
+      // a mouse wheel zooms in comfortable 12% steps.
+      const factor = e.ctrlKey
+        ? Math.exp(-e.deltaY * 0.01)
+        : e.deltaY < 0
+          ? 1.12
+          : 1 / 1.12;
+      zoomAt(e.clientX, e.clientY, factor);
+    };
+    viewport.addEventListener("wheel", onWheel, { passive: false });
+    return () => viewport.removeEventListener("wheel", onWheel);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   // ── Drawing ──────────────────────────────────────────────────────
 
   function toLogical(clientX: number, clientY: number) {
     const el = stackRef.current;
     if (!el) return { x: 0, y: 0 };
+    // getBoundingClientRect already accounts for the zoom/pan
+    // transform, so stroke coordinates stay correct at any zoom.
     const rect = el.getBoundingClientRect();
     return {
       x: ((clientX - rect.left) / rect.width) * LOGICAL_W,
@@ -344,11 +453,103 @@ export function SketchPad() {
   /** 0 means "unsupported" on many touch screens — treat as mid. */
   const pressureOf = (raw: number) => (raw > 0 ? Math.min(1, raw) : 0.5);
 
-  function handlePointerDown(e: React.PointerEvent<HTMLDivElement>) {
-    // Single-pointer drawing — a second finger mid-stroke is a palm
-    // or an accidental touch, never a second brush.
-    if (drawingRef.current) return;
+  /**
+   * A second finger landed mid-stroke: erase the partial stroke
+   * (its pre-stroke snapshot is the newest undo entry), exactly
+   * like Procreate treats a stray mark before a pinch.
+   */
+  function cancelActiveStroke() {
+    if (!drawingRef.current) return;
+    drawingRef.current = null;
+    const entry = history.undo.pop();
+    if (entry) restoreLayer(entry);
+  }
+
+  function beginPinch() {
+    const pts = Array.from(pointersRef.current.values());
+    const stack = stackRef.current;
+    if (pts.length < 2 || !stack) return;
+    const [a, b] = pts;
+    gestureRef.current = {
+      mode: "pinch",
+      dist0: Math.max(1, Math.hypot(b.x - a.x, b.y - a.y)),
+      mid0: { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 },
+      rect0: stack.getBoundingClientRect(),
+      view0: { ...viewRef.current },
+      t0: performance.now(),
+      moved: false,
+      maxPointers: pointersRef.current.size,
+    };
+  }
+
+  function pinchMove() {
+    const gesture = gestureRef.current;
+    if (!gesture || gesture.mode !== "pinch") return;
+    const pts = Array.from(pointersRef.current.values());
+    if (pts.length < 2) return;
+    const [a, b] = pts;
+    const dist = Math.max(1, Math.hypot(b.x - a.x, b.y - a.y));
+    const mid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+    if (
+      Math.abs(dist / gesture.dist0 - 1) > 0.04 ||
+      Math.hypot(mid.x - gesture.mid0.x, mid.y - gesture.mid0.y) > 10
+    ) {
+      gesture.moved = true;
+    }
+    const scale = Math.min(
+      MAX_ZOOM,
+      Math.max(MIN_ZOOM, gesture.view0.scale * (dist / gesture.dist0)),
+    );
+    const ratio = scale / gesture.view0.scale;
+    // Keep the gesture's original midpoint anchored to the same spot
+    // on the paper while it zooms and slides.
+    const newLeft =
+      mid.x - (gesture.mid0.x - gesture.rect0.left) * ratio;
+    const newTop = mid.y - (gesture.mid0.y - gesture.rect0.top) * ratio;
+    applyView({
+      scale,
+      tx: gesture.view0.tx + (newLeft - gesture.rect0.left),
+      ty: gesture.view0.ty + (newTop - gesture.rect0.top),
+    });
+  }
+
+  function handlePointerDown(e: React.PointerEvent<HTMLElement>) {
     if (e.pointerType === "pen") lastPenTimeRef.current = performance.now();
+    pointersRef.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    e.currentTarget.setPointerCapture(e.pointerId);
+
+    // Second touch → stop drawing, start pinch navigation.
+    if (pointersRef.current.size === 2) {
+      cancelActiveStroke();
+      suppressDrawRef.current = true;
+      beginPinch();
+      return;
+    }
+    if (pointersRef.current.size > 2) {
+      // Third finger joins: remember it for the three-finger-tap redo.
+      const gesture = gestureRef.current;
+      if (gesture?.mode === "pinch") {
+        gesture.maxPointers = Math.max(
+          gesture.maxPointers,
+          pointersRef.current.size,
+        );
+      }
+      return;
+    }
+
+    // Single pointer from here on.
+    if (suppressDrawRef.current) return;
+    if (e.pointerType === "mouse" && e.button === 1) {
+      // Middle-mouse drag pans the paper.
+      e.preventDefault();
+      gestureRef.current = {
+        mode: "pan",
+        pointerId: e.pointerId,
+        start: { x: e.clientX, y: e.clientY },
+        view0: { ...viewRef.current },
+      };
+      return;
+    }
     // Palm rejection: ignore finger touches that arrive while the
     // stylus has been active in the last 700 ms.
     if (
@@ -359,7 +560,6 @@ export function SketchPad() {
     }
     const { activeLayerId } = stateRef.current;
     pushUndo(activeLayerId);
-    e.currentTarget.setPointerCapture(e.pointerId);
     const pt = toLogical(e.clientX, e.clientY);
     const pressure = pressureOf(e.pressure);
     drawingRef.current = { pointerId: e.pointerId, ...pt, pressure };
@@ -367,7 +567,26 @@ export function SketchPad() {
     drawSegment(pt, pt, pressure);
   }
 
-  function handlePointerMove(e: React.PointerEvent<HTMLDivElement>) {
+  function handlePointerMove(e: React.PointerEvent<HTMLElement>) {
+    const tracked = pointersRef.current.get(e.pointerId);
+    if (tracked) {
+      tracked.x = e.clientX;
+      tracked.y = e.clientY;
+    }
+    const gesture = gestureRef.current;
+    if (gesture?.mode === "pinch") {
+      pinchMove();
+      return;
+    }
+    if (gesture?.mode === "pan" && gesture.pointerId === e.pointerId) {
+      applyView({
+        scale: gesture.view0.scale,
+        tx: gesture.view0.tx + (e.clientX - gesture.start.x),
+        ty: gesture.view0.ty + (e.clientY - gesture.start.y),
+      });
+      return;
+    }
+
     const drawing = drawingRef.current;
     if (!drawing || drawing.pointerId !== e.pointerId) return;
     if (e.pointerType === "pen") lastPenTimeRef.current = performance.now();
@@ -391,14 +610,32 @@ export function SketchPad() {
     }
   }
 
-  function handlePointerEnd(e: React.PointerEvent<HTMLDivElement>) {
-    const drawing = drawingRef.current;
-    if (!drawing || drawing.pointerId !== e.pointerId) return;
-    drawingRef.current = null;
+  function handlePointerEnd(e: React.PointerEvent<HTMLElement>) {
+    pointersRef.current.delete(e.pointerId);
     try {
       e.currentTarget.releasePointerCapture(e.pointerId);
     } catch {
       /* already released */
+    }
+
+    const gesture = gestureRef.current;
+    if (gesture?.mode === "pinch" && pointersRef.current.size < 2) {
+      gestureRef.current = null;
+      // Quick still touch = Procreate tap shortcuts:
+      // two fingers → undo, three fingers → redo.
+      if (!gesture.moved && performance.now() - gesture.t0 < 300) {
+        if (gesture.maxPointers >= 3) redoStroke();
+        else undoStroke();
+      }
+    } else if (gesture?.mode === "pan" && gesture.pointerId === e.pointerId) {
+      gestureRef.current = null;
+    }
+
+    if (pointersRef.current.size === 0) suppressDrawRef.current = false;
+
+    const drawing = drawingRef.current;
+    if (drawing && drawing.pointerId === e.pointerId) {
+      drawingRef.current = null;
     }
   }
 
@@ -465,7 +702,7 @@ export function SketchPad() {
           className="hud-button"
           data-testid="sketch-undo-btn"
           onClick={undoStroke}
-          title="Undo last stroke (Alfred: 'undo that')"
+          title="Undo — or two-finger tap the canvas"
         >
           ↶ UNDO
         </button>
@@ -474,7 +711,7 @@ export function SketchPad() {
           className="hud-button"
           data-testid="sketch-redo-btn"
           onClick={redoStroke}
-          title="Redo"
+          title="Redo — or three-finger tap the canvas"
         >
           ↷ REDO
         </button>
@@ -568,13 +805,16 @@ export function SketchPad() {
             onChange={(e) => sketchStore.setBrushSize(Number(e.target.value))}
             style={{ width: "100%", accentColor: "var(--hud)" }}
           />
-          {/* Live brush preview dot */}
+          {/* Live brush preview dot on a paper-white chip */}
           <div
             style={{
               display: "flex",
               justifyContent: "center",
               alignItems: "center",
-              height: 40,
+              height: 44,
+              background: CANVAS_BG,
+              borderRadius: 4,
+              border: "1px solid var(--border)",
             }}
           >
             <div
@@ -585,9 +825,7 @@ export function SketchPad() {
                 background:
                   state.tool === "eraser" ? "transparent" : state.color,
                 border:
-                  state.tool === "eraser"
-                    ? "1px dashed var(--muted)"
-                    : "none",
+                  state.tool === "eraser" ? "1px dashed #8a96ad" : "none",
                 opacity: TOOL_CONFIG[state.tool].alpha,
               }}
             />
@@ -641,7 +879,7 @@ export function SketchPad() {
             type="color"
             data-testid="sketch-color-picker"
             value={
-              /^#[0-9a-fA-F]{6}$/.test(state.color) ? state.color : "#6cd6ff"
+              /^#[0-9a-fA-F]{6}$/.test(state.color) ? state.color : "#16181d"
             }
             onChange={(e) => sketchStore.setColor(e.target.value)}
             title="Pick any colour"
@@ -657,44 +895,85 @@ export function SketchPad() {
           />
         </aside>
 
-        {/* Canvas area */}
+        {/* Canvas viewport — pinch/wheel zoom + pan happens here */}
         <main
+          ref={viewportRef}
+          data-testid="sketch-viewport"
+          onPointerDown={handlePointerDown}
+          onPointerMove={handlePointerMove}
+          onPointerUp={handlePointerEnd}
+          onPointerCancel={handlePointerEnd}
           style={{
             flex: 1,
+            position: "relative",
             display: "flex",
             alignItems: "center",
             justifyContent: "center",
             padding: 16,
             minWidth: 0,
             overflow: "hidden",
+            touchAction: "none",
           }}
         >
           <div
             ref={stackRef}
             data-testid="sketch-canvas-stack"
-            onPointerDown={handlePointerDown}
-            onPointerMove={handlePointerMove}
-            onPointerUp={handlePointerEnd}
-            onPointerCancel={handlePointerEnd}
             style={{
               position: "relative",
               width: `min(100%, calc((100vh - 260px) * ${LOGICAL_W / LOGICAL_H}))`,
               aspectRatio: `${LOGICAL_W} / ${LOGICAL_H}`,
-              touchAction: "none",
+              transformOrigin: "0 0",
+              willChange: "transform",
               cursor: "crosshair",
-              border: "1px solid var(--border)",
-              borderRadius: 4,
-              boxShadow: "var(--shadow), inset 0 0 60px rgba(0,0,0,0.4)",
+              borderRadius: 2,
+              // White paper, floating over the dark desk.
               background: CANVAS_BG,
-              // Blueprint grid — drawn by CSS so it never pollutes the
-              // exported/analyzed bitmap (flatten() fills plain BG).
-              backgroundImage:
-                "linear-gradient(rgba(108,214,255,0.06) 1px, transparent 1px)," +
-                "linear-gradient(90deg, rgba(108,214,255,0.06) 1px, transparent 1px)",
-              backgroundSize: "32px 32px",
+              boxShadow:
+                "0 8px 40px rgba(0, 0, 0, 0.55), 0 2px 10px rgba(0, 0, 0, 0.4)",
               overflow: "hidden",
             }}
           />
+
+          {/* Zoom controls */}
+          <div
+            style={{
+              position: "absolute",
+              right: 14,
+              bottom: 14,
+              display: "flex",
+              gap: 6,
+              zIndex: 2,
+            }}
+          >
+            <button
+              type="button"
+              className="hud-button"
+              data-testid="sketch-zoom-out-btn"
+              onClick={() => zoomAtCenter(1 / 1.25)}
+              title="Zoom out (pinch or scroll wheel works too)"
+            >
+              −
+            </button>
+            <button
+              type="button"
+              className="hud-button"
+              data-testid="sketch-zoom-reset-btn"
+              onClick={resetView}
+              title="Reset zoom & position"
+              style={{ minWidth: 58 }}
+            >
+              {zoomPct}%
+            </button>
+            <button
+              type="button"
+              className="hud-button"
+              data-testid="sketch-zoom-in-btn"
+              onClick={() => zoomAtCenter(1.25)}
+              title="Zoom in (pinch or scroll wheel works too)"
+            >
+              +
+            </button>
+          </div>
         </main>
 
         {/* Layers panel */}
@@ -950,9 +1229,10 @@ export function SketchPad() {
               lineHeight: 1.5,
             }}
           >
-            Ask Alfred: &ldquo;analyze my sketch&rdquo;, &ldquo;new layer
-            called shading&rdquo;, &ldquo;switch to the red pen&rdquo;,
-            &ldquo;undo that&rdquo;.
+            Pinch to zoom &amp; move the paper. Two-finger tap = undo,
+            three-finger tap = redo. Ask Alfred: &ldquo;analyze my
+            sketch&rdquo;, &ldquo;new layer called shading&rdquo;,
+            &ldquo;switch to the red pen&rdquo;.
           </p>
         </aside>
       </div>

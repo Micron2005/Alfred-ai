@@ -1,17 +1,28 @@
 # The Design Pad
 
-A built-in sketch pad that **is the DESIGN tab** in the Alfred web UI
-(it replaced the old CAD placeholder view), made for a touchscreen
-monitor but fully usable with a mouse. Open it by:
+A built-in Procreate-style sketch pad that **is the DESIGN tab** in
+the Alfred web UI (it replaced the old CAD placeholder view), made
+for a touchscreen monitor but fully usable with a mouse. Open it by:
 
 - clicking the **DESIGN** tab (next to HUD / CHAT / WORKOUT),
 - picking the **DESIGN — Sketch Pad** module in the radial menu
   (click the orb, or say "open the menu"),
-- the **✏ DESIGN** button in the chat header,
 - or just asking: *"Alfred, pull up the design tab."*
 
 Switching tabs never loses your drawing — the layer bitmaps live
 outside the tab and are re-attached when you come back.
+
+## Navigation (Procreate-style)
+
+- **White paper**, no grid, floating over the dark desk.
+- **Two-finger pinch** → zoom and move the paper at the same time.
+- **Two-finger tap** → undo · **three-finger tap** → redo.
+- A second finger landing mid-stroke **cancels that stroke** (palm
+  safety).
+- Mouse: **scroll wheel** zooms at the cursor (trackpad pinch works
+  too), **middle-button drag** pans.
+- **− / % / +** controls bottom-right; tap the **%** to reset the
+  view to fit.
 
 ## Drawing
 

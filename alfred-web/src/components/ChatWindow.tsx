@@ -3033,20 +3033,7 @@ export function ChatWindow() {
             <button
               type="button"
               className="hud-button"
-              data-testid="design-pad-toggle-btn"
-              onClick={() => sketchStore.setOpen(!sketchOpen)}
-              aria-pressed={sketchOpen}
-              title={
-                sketchOpen
-                  ? "Close the design pad (your sketch is kept)"
-                  : 'Open the design pad — or say "Alfred, pull up the design tab"'
-              }
-            >
-              {sketchOpen ? "✏ DESIGN · ON" : "✏ DESIGN"}
-            </button>
-            <button
-              type="button"
-              className="hud-button"
+              data-testid="hud-toggle-btn"
               onClick={() => setFullHudPersisted(!fullHud)}
               aria-pressed={fullHud}
               title={
