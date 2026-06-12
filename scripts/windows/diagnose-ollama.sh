@@ -71,9 +71,20 @@ else
             "(Get-NetFirewallRule -DisplayName 'Ollama (Alfred WSL bridge)' -ErrorAction SilentlyContinue).Enabled" \
             2>/dev/null | tr -d '\r' | tail -1)"
         echo "      firewall rule 'Ollama (Alfred WSL bridge)' enabled: ${RULE_ON:-NOT FOUND}"
-        verdicts+=("Ollama listens on all interfaces but WSL still can't reach it — firewall. Re-run ./scripts/windows/setup-ollama-from-wsl.sh (approve UAC). If it persists, look for third-party antivirus/firewall software blocking port 11434.")
+        APP_RULES="$(timeout 10 powershell.exe -NoProfile -Command \
+            "Get-NetFirewallApplicationFilter -Program '*ollama*' -ErrorAction SilentlyContinue | Get-NetFirewallRule -ErrorAction SilentlyContinue | ForEach-Object { \$_.Action.ToString() + ' ' + \$_.Direction.ToString() + ' ' + \$_.DisplayName }" \
+            2>/dev/null | tr -d '\r')"
+        if [[ -n "$APP_RULES" ]]; then
+            echo "      ollama.exe app firewall rules:"
+            echo "$APP_RULES" | sed 's/^/        /'
+        fi
+        if echo "$APP_RULES" | grep -qi "^Block.*Inbound"; then
+            verdicts+=("Windows has an inbound BLOCK rule for ollama.exe (a firewall popup was cancelled at some point) — Block overrides Allow. Re-run ./scripts/windows/setup-ollama-from-wsl.sh (it now removes the block rule), then re-run this diagnostic.")
+        else
+            verdicts+=("Ollama listens on all interfaces but WSL still can't reach it — firewall. Re-run ./scripts/windows/setup-ollama-from-wsl.sh (approve UAC). If it persists, look for third-party antivirus/firewall software blocking port 11434.")
+        fi
     else
-        verdicts+=("Ollama is still bound to 127.0.0.1 — it did NOT pick up OLLAMA_HOST. Fully QUIT Ollama on Windows (right-click the tray icon → Quit Ollama), close any old 'ollama serve' console windows, start Ollama again, then re-run this diagnostic.")
+        verdicts+=("Ollama is still bound to 127.0.0.1 — the env var isn't being picked up. Easiest fix on newer Ollama versions: open the Ollama app on Windows → Settings (gear icon) → enable 'Expose Ollama to the network' — it rebinds immediately. Otherwise: right-click the tray icon → Quit Ollama, close any 'ollama serve' consoles, start Ollama again, re-run this diagnostic.")
     fi
 fi
 

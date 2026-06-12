@@ -25,6 +25,17 @@ $ErrorActionPreference = "Stop"
 Write-Host "OLLAMA_HOST set to 0.0.0.0:11434 (user scope)" -ForegroundColor Green
 
 # ── 2. Firewall rule, restricted to private ranges ─────────────────
+# First: remove any BLOCK rules Windows may have auto-created for
+# ollama.exe (clicking "Cancel" on the firewall popup creates one,
+# and Block rules override Allow rules).
+$blocks = Get-NetFirewallApplicationFilter -Program "*ollama*" -ErrorAction SilentlyContinue |
+    Get-NetFirewallRule -ErrorAction SilentlyContinue |
+    Where-Object { $_.Action -eq "Block" -and $_.Direction -eq "Inbound" }
+if ($blocks) {
+    $blocks | Remove-NetFirewallRule
+    Write-Host "Removed $(@($blocks).Count) inbound BLOCK rule(s) for ollama.exe" -ForegroundColor Yellow
+}
+
 $ruleName = "Ollama (Alfred WSL bridge)"
 if (-not (Get-NetFirewallRule -DisplayName $ruleName -ErrorAction SilentlyContinue)) {
     New-NetFirewallRule -DisplayName $ruleName `
