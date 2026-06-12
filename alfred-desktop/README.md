@@ -28,10 +28,11 @@ What the main process does on launch:
 ./scripts/windows/build-desktop-app.sh    # from the repo root
 ```
 
-Installs Node 22 in WSL if needed, builds the NSIS installer
-(electron-builder ≥ 24 edits the exe icon with pure-JS `resedit`,
-and `signExecutable: false` skips code signing — so no Wine), then
-copies **Alfred Setup 1.0.0.exe** to the Windows desktop and runs it.
+Installs Node 22 and Wine in WSL if needed (exe icon/metadata is
+edited with pure-JS `resedit` and `signExecutable: false` skips code
+signing, but NSIS builds the uninstaller by executing a 32-bit
+Windows stub — that one step runs under Wine), then copies
+**Alfred Setup 1.0.0.exe** to the Windows desktop and runs it.
 
 **Or natively on Windows** (needs [Node.js LTS](https://nodejs.org)
 22+, e.g. `winget install OpenJS.NodeJS.LTS`):

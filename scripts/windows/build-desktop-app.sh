@@ -36,6 +36,19 @@ if [[ "$need_node" == "1" ]]; then
 fi
 say "Node $(node -v) ✓"
 
+# ── Wine (one-time) ────────────────────────────────────────────────
+# The exe icon/metadata is edited wine-free (pure-JS resedit), but
+# NSIS generates the UNINSTALLER by actually executing a 32-bit
+# Windows stub — on Linux that one step runs under Wine.
+if ! command -v wine >/dev/null 2>&1; then
+    say "Installing Wine (one-time; NSIS runs a 32-bit Windows stub to build the uninstaller)"
+    sudo dpkg --add-architecture i386
+    sudo apt-get update -qq
+    sudo apt-get install -y --no-install-recommends wine wine32:i386 \
+        || sudo apt-get install -y --no-install-recommends wine
+fi
+say "Wine $(wine --version 2>/dev/null || echo present) ✓"
+
 # ── Build the installer ────────────────────────────────────────────
 cd "$REPO_ROOT/alfred-desktop"
 say "Installing build dependencies"

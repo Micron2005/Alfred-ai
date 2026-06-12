@@ -352,6 +352,28 @@ from the WSL terminal:
   now use the two bash scripts (manual Windows-side paths kept as
   alternatives in alfred-desktop/README.md).
 
+### Fixes from user's first real run (2026-06-12 evening)
+User ran the scripts on his PC; two failures, both fixed:
+1. install-wsl-engine.sh: "Unit file docker.service does not exist"
+   — his distro had a leftover docker CLI (old Docker Desktop WSL
+   integration) with NO engine, fooling the `command -v docker`
+   check. Fix: detect /lib|/etc/systemd/system/docker.service
+   instead; also `docker context use default` after install (stale
+   desktop-linux context). NOTE: his first runs ABORTED before
+   installing ollama-bridge + alfred.service (set -e) — rerun
+   completes those.
+2. build-desktop-app.sh: "spawn wine ENOENT" at the NSIS step.
+   resedit handles exe icon/metadata wine-free (confirmed: packaging
+   + "signing skipped" passed, Setup build started), BUT NSIS
+   generates the UNINSTALLER by executing a 32-bit Windows stub →
+   needs wine + wine32:i386 on Linux. Fix: script auto-installs
+   `dpkg --add-architecture i386; apt install wine wine32:i386`
+   (fallback plain wine). WSL2 kernel runs 32-bit ELF fine.
+   His env: Ubuntu noble, Node 22.22.3 installed clean, npm install
+   + electron win-x64 download + packaging all succeeded.
+3. setup-ollama-from-wsl.sh ran without visible error (UAC path) —
+   user has NOT yet confirmed `curl localhost:11434/api/tags`.
+
 ## Backlog / roadmap
 - P1: Face polish candidates (user feedback pending): Alfred
   announcing "monitor connected", brow/expression states tied to

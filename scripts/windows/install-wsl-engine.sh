@@ -64,13 +64,18 @@ fi
 say "systemd is running (PID 1) ✓"
 
 # ── 2. Docker Engine (docker-ce) ───────────────────────────────────
-if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
-    say "Docker Engine + compose already installed ✓"
+# Check for the systemd unit, not the CLI: Docker Desktop's WSL
+# integration leaves a `docker` CLI behind with no engine attached.
+if [[ -f /lib/systemd/system/docker.service || -f /etc/systemd/system/docker.service ]]; then
+    say "Docker Engine already installed ✓"
 else
     say "Installing Docker Engine (docker-ce) via get.docker.com"
     curl -fsSL https://get.docker.com | sudo sh
 fi
 sudo systemctl enable --now docker
+# Point the CLI at the local engine in case a stale Docker Desktop
+# context is still selected.
+docker context use default >/dev/null 2>&1 || true
 if ! id -nG "$ME" | tr ' ' '\n' | grep -qx docker; then
     say "Adding $ME to the docker group"
     sudo usermod -aG docker "$ME"

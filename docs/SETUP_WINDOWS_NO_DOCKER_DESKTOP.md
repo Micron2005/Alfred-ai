@@ -92,9 +92,9 @@ Build and install it from the same Ubuntu terminal:
 ./scripts/windows/build-desktop-app.sh
 ```
 
-The script installs Node 22 inside WSL if needed, builds the Windows
-installer (electron-builder edits the exe icon with pure-JS tooling,
-so no Wine and nothing is installed on Windows), copies
+The script installs Node 22 and Wine inside WSL if needed (Wine is
+used once per build: NSIS produces the uninstaller by running a
+32-bit Windows stub), builds the Windows installer, copies
 **Alfred Setup 1.0.0.exe** to your Windows desktop and launches it.
 The one-click installer finishes by starting Alfred.
 
@@ -144,6 +144,15 @@ To pin it to a specific monitor, tray → **Open Config File** and set:
 | Logs | `docker compose logs -f` / `journalctl -u alfred.service -f` |
 
 ## Troubleshooting
+
+- **`Failed to enable unit: Unit file docker.service does not
+  exist`** — your distro had a leftover Docker CLI (old Docker
+  Desktop integration) without an engine. Fixed in the installer:
+  `git pull` and re-run `./scripts/windows/install-wsl-engine.sh`.
+- **`wine process failed ENOENT` during the app build** — Wine
+  wasn't installed yet; `git pull` and re-run
+  `./scripts/windows/build-desktop-app.sh` (it now installs Wine
+  automatically).
 
 - **Splash stuck on "BUILDING THE STACK"** — first boot builds Docker
   images (minutes). If it ends in "BACKEND UNREACHABLE": check inside
