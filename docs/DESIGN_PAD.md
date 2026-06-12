@@ -15,14 +15,19 @@ outside the tab and are re-attached when you come back.
 ## Navigation (Procreate-style)
 
 - **White paper**, no grid, floating over the dark desk.
-- **Two-finger pinch** → zoom and move the paper at the same time.
+- **Two-finger pinch** → zoom, move, **and rotate** the paper in one
+  gesture (snaps to straight when within a few degrees of a quarter
+  turn).
 - **Two-finger tap** → undo · **three-finger tap** → redo.
+- **Touch & hold** still on the canvas → eyedropper loupe samples the
+  colour under your finger; release to make it the active colour.
 - A second finger landing mid-stroke **cancels that stroke** (palm
   safety).
 - Mouse: **scroll wheel** zooms at the cursor (trackpad pinch works
-  too), **middle-button drag** pans.
-- **− / % / +** controls bottom-right; tap the **%** to reset the
-  view to fit.
+  too), **middle-button drag** pans, and holding the button still
+  triggers the eyedropper.
+- **− / % / +** controls bottom-right; tap the **%** to reset zoom,
+  rotation and position.
 
 ## Drawing
 

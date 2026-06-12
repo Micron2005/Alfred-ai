@@ -117,6 +117,27 @@ Implemented in SketchPad.tsx (+ sketchStore default color #16181d):
   zoom 100→197%, +/reset buttons, stroke lands at correct logical
   coords after zoom round-trip. tsc/eslint/build clean.
 
+### Pinch-rotate + eyedropper (2026-06-12, later)
+User approved both suggested gestures.
+- ViewState gained rotation (radians); transform = translate/rotate/
+  scale with transformOrigin 50% 50% (centred origin makes the
+  bbox centre the invariant anchor — all gesture math + toLogical
+  inverse mapping use it). Pinch now zooms+pans+rotates with the
+  midpoint anchored; snaps to quarter turns within ~4°. Wheel zoom
+  and middle-drag pan preserve rotation. Reset clears rotation too.
+- toLogical rewritten with inverse rotation (offsetWidth = layout
+  size), so strokes land correctly while rotated.
+- Eyedropper: hold still ~550ms → stroke dot cancelled, loupe
+  (sketch-eyedropper-loupe/-hex) follows pointer live-sampling via
+  sampleColorAt (composites visible layers over white at 1px);
+  release applies colour. KEY FIX: restoreLayer is async (Image
+  decode) — sample must run in its onDone callback or it picks up
+  the just-drawn dot. Guard: skip if pointer already lifted.
+- setPointerCapture wrapped in try/catch (synthetic touch events).
+- Verified via Playwright: synthetic two-finger rotate → rotate(0.349
+  rad) in transform + reset clears; eyedropper picked #e03c3c off a
+  red stroke and #ffffff off blank paper; no stray dots remain.
+
 ### Phase A — Design Pad (DONE 2026-06-11, all tests pass)
 - `alfred-core/src/alfred_core/tools/sketch_marker.py` — [SKETCH_*]
   marker parser (OPEN/CLOSE/TOOL/COLOR/BRUSH/LAYER_ADD/LAYER_SELECT/

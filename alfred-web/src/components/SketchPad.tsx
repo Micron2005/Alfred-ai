@@ -22,12 +22,16 @@ import {
  *   - undo / redo and per-layer clear, PNG export.
  *
  * Procreate-style navigation:
- *   - two-finger pinch → zoom + pan the paper simultaneously;
+ *   - two-finger pinch → zoom, pan, AND rotate the paper (snaps to
+ *     quarter turns when close);
  *   - two-finger TAP → undo, three-finger TAP → redo;
+ *   - touch & hold still → eyedropper loupe samples the colour under
+ *     the pointer; release to make it the active colour;
  *   - a second finger landing mid-stroke CANCELS that stroke (palm
  *     and gesture safety, like Procreate);
  *   - mouse: scroll wheel zooms at the cursor (trackpad pinch works
- *     via ctrl+wheel), middle-button drag pans;
+ *     via ctrl+wheel), middle-button drag pans, hold-still with the
+ *     button down triggers the eyedropper too;
  *   - − / % / + controls bottom-right; tapping the % resets the view.
  *
  * Mount/unmount survival: this component renders INSIDE the DESIGN
@@ -146,15 +150,18 @@ function captureLayer(layerId: string): HistoryEntry | null {
   return { layerId, dataUrl: canvas.toDataURL("image/png") };
 }
 
-function restoreLayer(entry: HistoryEntry) {
+function restoreLayer(entry: HistoryEntry, onDone?: () => void) {
   const canvas = layerCanvases.get(entry.layerId);
-  if (!canvas) return;
-  const ctx = canvas.getContext("2d");
-  if (!ctx) return;
+  const ctx = canvas?.getContext("2d");
+  if (!ctx) {
+    onDone?.();
+    return;
+  }
   const img = new Image();
   img.onload = () => {
     ctx.clearRect(0, 0, LOGICAL_W, LOGICAL_H);
     ctx.drawImage(img, 0, 0);
+    onDone?.();
   };
   img.src = entry.dataUrl;
 }
@@ -233,6 +240,38 @@ function exportPng() {
   link.click();
 }
 
+function rgbToHex(r: number, g: number, b: number): string {
+  const to = (n: number) => n.toString(16).padStart(2, "0");
+  return `#${to(r)}${to(g)}${to(b)}`;
+}
+
+/**
+ * Eyedropper sample: composite the visible layers over the white
+ * paper at a single logical pixel and return the hex colour.
+ */
+function sampleColorAt(lx: number, ly: number): string {
+  const sx = Math.min(LOGICAL_W - 1, Math.max(0, Math.round(lx)));
+  const sy = Math.min(LOGICAL_H - 1, Math.max(0, Math.round(ly)));
+  const c = document.createElement("canvas");
+  c.width = 1;
+  c.height = 1;
+  const ctx = c.getContext("2d");
+  if (!ctx) return CANVAS_BG;
+  ctx.fillStyle = CANVAS_BG;
+  ctx.fillRect(0, 0, 1, 1);
+  const layers = sketchStore.getSnapshot().layers;
+  for (let i = layers.length - 1; i >= 0; i--) {
+    const layer = layers[i];
+    if (!layer.visible) continue;
+    const canvas = layerCanvases.get(layer.id);
+    if (!canvas) continue;
+    ctx.globalAlpha = layer.opacity;
+    ctx.drawImage(canvas, sx, sy, 1, 1, 0, 0, 1, 1);
+  }
+  const d = ctx.getImageData(0, 0, 1, 1).data;
+  return rgbToHex(d[0], d[1], d[2]);
+}
+
 // Register the canvas ops once at module load. Module-level (not in
 // a component effect) so Alfred's chat commands — "undo that",
 // "clear the layer" — and the send-time snapshot keep working even
@@ -258,6 +297,8 @@ interface ViewState {
   scale: number;
   tx: number;
   ty: number;
+  /** Radians — two-finger twist rotates the paper, Procreate-style. */
+  rotation: number;
 }
 
 interface PointerInfo {
@@ -269,8 +310,13 @@ type Gesture =
   | {
       mode: "pinch";
       dist0: number;
+      /** Angle of the two-finger line at gesture start (radians). */
+      angle0: number;
+      /** Bounding-box centre of the paper at gesture start. */
+      c0: { x: number; y: number };
+      /** Vector from the paper centre to the pinch midpoint at start. */
+      v0: { x: number; y: number };
       mid0: { x: number; y: number };
-      rect0: DOMRect;
       view0: ViewState;
       t0: number;
       moved: boolean;
@@ -307,8 +353,20 @@ export function SketchPad() {
   // After a pinch ends, a leftover finger must NOT start drawing
   // (classic Procreate behaviour) — suppressed until all fingers lift.
   const suppressDrawRef = useRef(false);
-  const viewRef = useRef<ViewState>({ scale: 1, tx: 0, ty: 0 });
+  const viewRef = useRef<ViewState>({ scale: 1, tx: 0, ty: 0, rotation: 0 });
   const [zoomPct, setZoomPct] = useState(100);
+  // Touch & hold eyedropper (Procreate-style): hold still on the
+  // canvas for ~half a second and a loupe appears sampling the
+  // colour under the pointer; release to make it the active colour.
+  const holdTimerRef = useRef<number | null>(null);
+  const strokeOriginRef = useRef<{ x: number; y: number } | null>(null);
+  const [eyedropper, setEyedropper] = useState<{
+    pointerId: number;
+    x: number;
+    y: number;
+    color: string;
+  } | null>(null);
+  const eyedropperRef = useRef<typeof eyedropper>(null);
   const [editingLayerId, setEditingLayerId] = useState<string | null>(null);
   const [layerNameDraft, setLayerNameDraft] = useState("");
 
@@ -348,13 +406,13 @@ export function SketchPad() {
     viewRef.current = next;
     const stack = stackRef.current;
     if (stack) {
-      stack.style.transform = `translate(${next.tx}px, ${next.ty}px) scale(${next.scale})`;
+      stack.style.transform = `translate(${next.tx}px, ${next.ty}px) rotate(${next.rotation}rad) scale(${next.scale})`;
     }
     setZoomPct(Math.round(next.scale * 100));
   }
 
   function resetView() {
-    applyView({ scale: 1, tx: 0, ty: 0 });
+    applyView({ scale: 1, tx: 0, ty: 0, rotation: 0 });
   }
 
   /** Zoom by ``factor`` keeping the client point (mx, my) fixed. */
@@ -365,11 +423,18 @@ export function SketchPad() {
     const next = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, view.scale * factor));
     if (next === view.scale) return;
     const rect = stack.getBoundingClientRect();
+    // With a centred transform origin the bounding-box centre IS the
+    // transform anchor, so it pins the maths down even when the
+    // paper is rotated: to keep the cursor fixed, the centre slides
+    // along the cursor→centre line as the scale changes.
+    const cx = rect.left + rect.width / 2;
+    const cy = rect.top + rect.height / 2;
     const ratio = next / view.scale;
     applyView({
       scale: next,
-      tx: view.tx + (mx - rect.left) * (1 - ratio),
-      ty: view.ty + (my - rect.top) * (1 - ratio),
+      rotation: view.rotation,
+      tx: view.tx + (mx - cx) * (1 - ratio),
+      ty: view.ty + (my - cy) * (1 - ratio),
     });
   }
 
@@ -406,12 +471,21 @@ export function SketchPad() {
   function toLogical(clientX: number, clientY: number) {
     const el = stackRef.current;
     if (!el) return { x: 0, y: 0 };
-    // getBoundingClientRect already accounts for the zoom/pan
-    // transform, so stroke coordinates stay correct at any zoom.
+    // The bounding-box centre is invariant under the centred
+    // rotate/scale transform, so it anchors the inverse mapping even
+    // while the paper is rotated. offsetWidth/Height give the
+    // untransformed layout size.
     const rect = el.getBoundingClientRect();
+    const view = viewRef.current;
+    const dx = clientX - (rect.left + rect.width / 2);
+    const dy = clientY - (rect.top + rect.height / 2);
+    const cos = Math.cos(-view.rotation);
+    const sin = Math.sin(-view.rotation);
+    const lx = (dx * cos - dy * sin) / view.scale + el.offsetWidth / 2;
+    const ly = (dx * sin + dy * cos) / view.scale + el.offsetHeight / 2;
     return {
-      x: ((clientX - rect.left) / rect.width) * LOGICAL_W,
-      y: ((clientY - rect.top) / rect.height) * LOGICAL_H,
+      x: (lx / el.offsetWidth) * LOGICAL_W,
+      y: (ly / el.offsetHeight) * LOGICAL_H,
     };
   }
 
@@ -453,16 +527,35 @@ export function SketchPad() {
   /** 0 means "unsupported" on many touch screens — treat as mid. */
   const pressureOf = (raw: number) => (raw > 0 ? Math.min(1, raw) : 0.5);
 
+  function clearHoldTimer() {
+    if (holdTimerRef.current !== null) {
+      window.clearTimeout(holdTimerRef.current);
+      holdTimerRef.current = null;
+    }
+  }
+
+  function dismissEyedropper() {
+    if (eyedropperRef.current) {
+      eyedropperRef.current = null;
+      setEyedropper(null);
+    }
+  }
+
   /**
    * A second finger landed mid-stroke: erase the partial stroke
    * (its pre-stroke snapshot is the newest undo entry), exactly
    * like Procreate treats a stray mark before a pinch.
    */
-  function cancelActiveStroke() {
-    if (!drawingRef.current) return;
+  function cancelActiveStroke(onDone?: () => void) {
+    clearHoldTimer();
+    if (!drawingRef.current) {
+      onDone?.();
+      return;
+    }
     drawingRef.current = null;
     const entry = history.undo.pop();
-    if (entry) restoreLayer(entry);
+    if (entry) restoreLayer(entry, onDone);
+    else onDone?.();
   }
 
   function beginPinch() {
@@ -470,11 +563,19 @@ export function SketchPad() {
     const stack = stackRef.current;
     if (pts.length < 2 || !stack) return;
     const [a, b] = pts;
+    const rect = stack.getBoundingClientRect();
+    const c0 = {
+      x: rect.left + rect.width / 2,
+      y: rect.top + rect.height / 2,
+    };
+    const mid0 = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
     gestureRef.current = {
       mode: "pinch",
       dist0: Math.max(1, Math.hypot(b.x - a.x, b.y - a.y)),
-      mid0: { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 },
-      rect0: stack.getBoundingClientRect(),
+      angle0: Math.atan2(b.y - a.y, b.x - a.x),
+      c0,
+      v0: { x: mid0.x - c0.x, y: mid0.y - c0.y },
+      mid0,
       view0: { ...viewRef.current },
       t0: performance.now(),
       moved: false,
@@ -489,10 +590,13 @@ export function SketchPad() {
     if (pts.length < 2) return;
     const [a, b] = pts;
     const dist = Math.max(1, Math.hypot(b.x - a.x, b.y - a.y));
+    const angle = Math.atan2(b.y - a.y, b.x - a.x);
     const mid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+    const dTheta = angle - gesture.angle0;
     if (
       Math.abs(dist / gesture.dist0 - 1) > 0.04 ||
-      Math.hypot(mid.x - gesture.mid0.x, mid.y - gesture.mid0.y) > 10
+      Math.hypot(mid.x - gesture.mid0.x, mid.y - gesture.mid0.y) > 10 ||
+      Math.abs(dTheta) > 0.06
     ) {
       gesture.moved = true;
     }
@@ -500,27 +604,47 @@ export function SketchPad() {
       MAX_ZOOM,
       Math.max(MIN_ZOOM, gesture.view0.scale * (dist / gesture.dist0)),
     );
+    let rotation = gesture.view0.rotation + dTheta;
+    // Procreate-style snap: settle on the nearest quarter turn when
+    // within ~4° of it, so getting back to straight is effortless.
+    const quarter = Math.PI / 2;
+    const nearestQuarter = Math.round(rotation / quarter) * quarter;
+    if (Math.abs(rotation - nearestQuarter) < 0.07) {
+      rotation = nearestQuarter;
+    }
+    // Keep the pinch midpoint anchored to the same spot on the paper
+    // while it zooms, rotates, and slides: the paper centre moves so
+    // the (rotated, rescaled) start-vector still ends on the current
+    // midpoint.
     const ratio = scale / gesture.view0.scale;
-    // Keep the gesture's original midpoint anchored to the same spot
-    // on the paper while it zooms and slides.
-    const newLeft =
-      mid.x - (gesture.mid0.x - gesture.rect0.left) * ratio;
-    const newTop = mid.y - (gesture.mid0.y - gesture.rect0.top) * ratio;
+    const dRot = rotation - gesture.view0.rotation;
+    const cos = Math.cos(dRot);
+    const sin = Math.sin(dRot);
+    const vx = gesture.v0.x * ratio;
+    const vy = gesture.v0.y * ratio;
+    const newCx = mid.x - (vx * cos - vy * sin);
+    const newCy = mid.y - (vx * sin + vy * cos);
     applyView({
       scale,
-      tx: gesture.view0.tx + (newLeft - gesture.rect0.left),
-      ty: gesture.view0.ty + (newTop - gesture.rect0.top),
+      rotation,
+      tx: gesture.view0.tx + (newCx - gesture.c0.x),
+      ty: gesture.view0.ty + (newCy - gesture.c0.y),
     });
   }
 
   function handlePointerDown(e: React.PointerEvent<HTMLElement>) {
     if (e.pointerType === "pen") lastPenTimeRef.current = performance.now();
     pointersRef.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
-    e.currentTarget.setPointerCapture(e.pointerId);
+    try {
+      e.currentTarget.setPointerCapture(e.pointerId);
+    } catch {
+      /* synthetic or already-lifted pointer */
+    }
 
     // Second touch → stop drawing, start pinch navigation.
     if (pointersRef.current.size === 2) {
       cancelActiveStroke();
+      dismissEyedropper();
       suppressDrawRef.current = true;
       beginPinch();
       return;
@@ -565,6 +689,34 @@ export function SketchPad() {
     drawingRef.current = { pointerId: e.pointerId, ...pt, pressure };
     // A dot for taps.
     drawSegment(pt, pt, pressure);
+    // Arm the touch-&-hold eyedropper: if this pointer stays nearly
+    // still for ~half a second, the stroke dot is cancelled and a
+    // colour-sampling loupe appears instead (Procreate behaviour).
+    strokeOriginRef.current = { x: e.clientX, y: e.clientY };
+    clearHoldTimer();
+    const downId = e.pointerId;
+    holdTimerRef.current = window.setTimeout(() => {
+      holdTimerRef.current = null;
+      const drawing = drawingRef.current;
+      const origin = strokeOriginRef.current;
+      if (!drawing || drawing.pointerId !== downId || !origin) return;
+      // Sample only AFTER the cancelled stroke-dot has been wiped
+      // from the canvas — the restore decodes an image async, and
+      // sampling too early would just pick up the dot we drew.
+      cancelActiveStroke(() => {
+        // The finger may have lifted while the restore decoded.
+        if (eyedropperRef.current || !pointersRef.current.has(downId)) return;
+        const at = toLogical(origin.x, origin.y);
+        const picked = {
+          pointerId: downId,
+          x: origin.x,
+          y: origin.y,
+          color: sampleColorAt(at.x, at.y),
+        };
+        eyedropperRef.current = picked;
+        setEyedropper(picked);
+      });
+    }, 550);
   }
 
   function handlePointerMove(e: React.PointerEvent<HTMLElement>) {
@@ -581,14 +733,38 @@ export function SketchPad() {
     if (gesture?.mode === "pan" && gesture.pointerId === e.pointerId) {
       applyView({
         scale: gesture.view0.scale,
+        rotation: gesture.view0.rotation,
         tx: gesture.view0.tx + (e.clientX - gesture.start.x),
         ty: gesture.view0.ty + (e.clientY - gesture.start.y),
       });
       return;
     }
 
+    // Eyedropper drag: follow the pointer, live-sampling the colour.
+    const picker = eyedropperRef.current;
+    if (picker && picker.pointerId === e.pointerId) {
+      const at = toLogical(e.clientX, e.clientY);
+      const next = {
+        ...picker,
+        x: e.clientX,
+        y: e.clientY,
+        color: sampleColorAt(at.x, at.y),
+      };
+      eyedropperRef.current = next;
+      setEyedropper(next);
+      return;
+    }
+
     const drawing = drawingRef.current;
     if (!drawing || drawing.pointerId !== e.pointerId) return;
+    // Real movement means it's a stroke, not a colour-sampling hold.
+    if (holdTimerRef.current !== null && strokeOriginRef.current) {
+      const travelled = Math.hypot(
+        e.clientX - strokeOriginRef.current.x,
+        e.clientY - strokeOriginRef.current.y,
+      );
+      if (travelled > 8) clearHoldTimer();
+    }
     if (e.pointerType === "pen") lastPenTimeRef.current = performance.now();
     // Coalesced events give the full-resolution stylus path on
     // 120 Hz+ digitisers instead of one point per frame.
@@ -618,6 +794,15 @@ export function SketchPad() {
       /* already released */
     }
 
+    // Releasing the eyedropper commits the sampled colour.
+    const picker = eyedropperRef.current;
+    if (picker && picker.pointerId === e.pointerId) {
+      sketchStore.setColor(picker.color);
+      dismissEyedropper();
+      if (pointersRef.current.size === 0) suppressDrawRef.current = false;
+      return;
+    }
+
     const gesture = gestureRef.current;
     if (gesture?.mode === "pinch" && pointersRef.current.size < 2) {
       gestureRef.current = null;
@@ -635,6 +820,7 @@ export function SketchPad() {
 
     const drawing = drawingRef.current;
     if (drawing && drawing.pointerId === e.pointerId) {
+      clearHoldTimer();
       drawingRef.current = null;
     }
   }
@@ -922,7 +1108,7 @@ export function SketchPad() {
               position: "relative",
               width: `min(100%, calc((100vh - 260px) * ${LOGICAL_W / LOGICAL_H}))`,
               aspectRatio: `${LOGICAL_W} / ${LOGICAL_H}`,
-              transformOrigin: "0 0",
+              transformOrigin: "50% 50%",
               willChange: "transform",
               cursor: "crosshair",
               borderRadius: 2,
@@ -959,7 +1145,7 @@ export function SketchPad() {
               className="hud-button"
               data-testid="sketch-zoom-reset-btn"
               onClick={resetView}
-              title="Reset zoom & position"
+              title="Reset zoom, rotation & position"
               style={{ minWidth: 58 }}
             >
               {zoomPct}%
@@ -974,6 +1160,47 @@ export function SketchPad() {
               +
             </button>
           </div>
+
+          {/* Touch & hold eyedropper loupe */}
+          {eyedropper ? (
+            <div
+              data-testid="sketch-eyedropper-loupe"
+              style={{
+                position: "fixed",
+                left: eyedropper.x - 32,
+                top: eyedropper.y - 100,
+                width: 64,
+                height: 64,
+                borderRadius: "50%",
+                background: eyedropper.color,
+                border: "3px solid #ffffff",
+                boxShadow:
+                  "0 4px 16px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(0, 0, 0, 0.35)",
+                pointerEvents: "none",
+                zIndex: 50,
+              }}
+            >
+              <span
+                className="mono"
+                data-testid="sketch-eyedropper-hex"
+                style={{
+                  position: "absolute",
+                  top: 68,
+                  left: "50%",
+                  transform: "translateX(-50%)",
+                  fontSize: 10,
+                  letterSpacing: 1,
+                  color: "var(--fg)",
+                  background: "rgba(3, 6, 12, 0.85)",
+                  padding: "1px 6px",
+                  borderRadius: 3,
+                  whiteSpace: "nowrap",
+                }}
+              >
+                {eyedropper.color.toUpperCase()}
+              </span>
+            </div>
+          ) : null}
         </main>
 
         {/* Layers panel */}
@@ -1229,10 +1456,10 @@ export function SketchPad() {
               lineHeight: 1.5,
             }}
           >
-            Pinch to zoom &amp; move the paper. Two-finger tap = undo,
-            three-finger tap = redo. Ask Alfred: &ldquo;analyze my
-            sketch&rdquo;, &ldquo;new layer called shading&rdquo;,
-            &ldquo;switch to the red pen&rdquo;.
+            Pinch to zoom, move &amp; rotate the paper. Two-finger tap =
+            undo, three-finger tap = redo. Hold a finger still to sample
+            a colour. Ask Alfred: &ldquo;analyze my sketch&rdquo;,
+            &ldquo;new layer called shading&rdquo;.
           </p>
         </aside>
       </div>
