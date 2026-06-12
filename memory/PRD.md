@@ -323,6 +323,35 @@ against the dev server: splash → "stack ready — opening HUD" →
 - USER VERIFICATION PENDING: run doc steps 1-3 on his PC (WSL
   engine script → Ollama script → build+install Alfred.exe).
 
+### Windows setup friction fixes (2026-06-12, after user ran PS1/
+winget commands inside bash)
+User executed `Enable-OllamaForWSL.ps1` and `winget` in the Ubuntu
+shell → "command not found". Reworked the flow so EVERY step runs
+from the WSL terminal:
+- `scripts/windows/setup-ollama-from-wsl.sh` — uses powershell.exe
+  interop + Start-Process -Verb RunAs (UAC) to run
+  Enable-OllamaForWSL.ps1 elevated; wslpath -w resolves the script
+  path. Quoting verified by echo-simulation.
+- `scripts/windows/build-desktop-app.sh` — builds Alfred.exe INSIDE
+  WSL: installs Node 22 via NodeSource if missing, npm install +
+  npm run dist, copies installer to the real Windows desktop
+  ([Environment]::GetFolderPath('Desktop') → wslpath -u; handles
+  OneDrive-redirected desktops) and launches it via powershell.exe.
+- KEY FINDINGS (verified empirically in pod): electron-builder 26
+  needs NO WINE — exe icon/metadata via pure-JS resedit
+  (app-builder-lib/out/util/resEdit.js); set win.signExecutable:
+  false to skip code signing (log: "file signing skipped via
+  signExecutable configuration"). Pod build produced a complete
+  211 MB Alfred.exe and failed ONLY at bundled linux/makensis
+  (x86_64 binary, pod is arm64 — user's WSL is x86_64 so fine).
+  Also: electron-builder defaults to HOST arch → pinned win target
+  arch to ["x64"] in package.json.
+- User context: repo at ~/Alfred-ai (capital A), Windows user
+  `mukar`, distro presumably Ubuntu.
+- Docs updated: sections 2-3 of SETUP_WINDOWS_NO_DOCKER_DESKTOP.md
+  now use the two bash scripts (manual Windows-side paths kept as
+  alternatives in alfred-desktop/README.md).
+
 ## Backlog / roadmap
 - P1: Face polish candidates (user feedback pending): Alfred
   announcing "monitor connected", brow/expression states tied to

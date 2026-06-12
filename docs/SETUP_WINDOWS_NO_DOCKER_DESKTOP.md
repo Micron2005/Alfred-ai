@@ -58,49 +58,45 @@ docker compose logs -f        # watch until alfred-web is up
 > Your `.env` needs no changes from the Docker Desktop setup. If this
 > is a fresh clone: `cp .env.example .env` and fill it in as usual.
 
-## 2. On Windows — let WSL containers reach Ollama (one time, admin)
+## 2. Let WSL containers reach Ollama (one time)
 
 Ollama stays on the Windows side (best GPU access). By default it
 only listens on `127.0.0.1`, which WSL containers can't reach without
-Docker Desktop. Fix it once, in an **elevated** PowerShell:
+Docker Desktop. Fix it from the same Ubuntu terminal:
 
-```powershell
-powershell -ExecutionPolicy Bypass -File \\wsl$\Ubuntu\home\YOU\alfred-ai\scripts\windows\Enable-OllamaForWSL.ps1
+```bash
+./scripts/windows/setup-ollama-from-wsl.sh
 ```
 
-(Adjust `Ubuntu`/`YOU` to your distro name and Linux username.) Then
-**quit Ollama from the tray and start it again**. Verify from WSL:
+Approve the **UAC prompt** that pops up on Windows — an admin
+PowerShell window then sets `OLLAMA_HOST=0.0.0.0:11434` and adds a
+firewall rule (private ranges only — Ollama is not exposed to the
+internet). Then **quit Ollama from the tray and start it again**.
+Verify from WSL:
 
 ```bash
 curl http://localhost:11434/api/tags     # should list your models
 ```
 
-The firewall rule it creates only allows private ranges — Ollama is
-not exposed to the internet.
+> Prefer doing it by hand? The underlying script is
+> `scripts/windows/Enable-OllamaForWSL.ps1` — run it from an
+> elevated PowerShell on Windows.
 
 ## 3. Build + install the Alfred desktop app (one time)
 
-The native shell lives in `alfred-desktop/`. Building it needs
-[Node.js LTS](https://nodejs.org) **22 or newer** on Windows:
+The native shell lives in `alfred-desktop/` — a real `Alfred.exe`
+with its own icon, splash, tray, and the face on the touchscreen.
+Build and install it from the same Ubuntu terminal:
 
-```powershell
-winget install OpenJS.NodeJS.LTS
+```bash
+./scripts/windows/build-desktop-app.sh
 ```
 
-Then (new PowerShell so `npm` is on PATH):
-
-```powershell
-# Copy the folder somewhere Windows-local — npm dislikes \\wsl$ paths.
-robocopy \\wsl$\Ubuntu\home\YOU\alfred-ai\alfred-desktop $env:USERPROFILE\alfred-desktop /E /XD node_modules dist
-# (robocopy exit code 1 just means "files copied" — that's success)
-
-cd $env:USERPROFILE\alfred-desktop
-npm install
-npm run dist
-
-# Installs Alfred and launches it when done:
-& ".\dist\Alfred Setup 1.0.0.exe"
-```
+The script installs Node 22 inside WSL if needed, builds the Windows
+installer (electron-builder edits the exe icon with pure-JS tooling,
+so no Wine and nothing is installed on Windows), copies
+**Alfred Setup 1.0.0.exe** to your Windows desktop and launches it.
+The one-click installer finishes by starting Alfred.
 
 That's it. From now on **Alfred is a program**: Start Menu entry,
 desktop shortcut, pin it to the taskbar. On first launch it:
@@ -143,7 +139,7 @@ To pin it to a specific monitor, tray → **Open Config File** and set:
 | Turn on PC | Alfred + face appear by themselves after logon |
 | Closed the HUD? | Click the tray icon, or launch Alfred from the Start Menu |
 | Update Alfred (web/backend) | In WSL: `git pull && sudo systemctl restart alfred.service` |
-| Update the desktop shell | Re-copy `alfred-desktop/`, `npm run dist`, run the new installer |
+| Update the desktop shell | In WSL: `./scripts/windows/build-desktop-app.sh` (rebuilds + reinstalls) |
 | Stop everything | Tray → Quit Alfred, then in WSL: `sudo systemctl stop alfred.service` (or PowerShell: `wsl --shutdown`) |
 | Logs | `docker compose logs -f` / `journalctl -u alfred.service -f` |
 
@@ -152,8 +148,10 @@ To pin it to a specific monitor, tray → **Open Config File** and set:
 - **Splash stuck on "BUILDING THE STACK"** — first boot builds Docker
   images (minutes). If it ends in "BACKEND UNREACHABLE": check inside
   WSL with `docker compose logs -f` and `systemctl status alfred`.
-- **`npm install` complains about the Node engine** — your Node is
-  older than 22; `winget upgrade OpenJS.NodeJS.LTS`.
+- **`npm install` complains about the Node engine** — Node inside WSL
+  is older than 22; re-run `./scripts/windows/build-desktop-app.sh`
+  (it installs Node 22) or `sudo apt-get install -y nodejs` after
+  `curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -`.
 - **Chat says the model is unreachable** — check the bridge chain:
   `curl http://localhost:11434/api/tags` inside WSL. If that fails:
   is Ollama running on Windows? Did you restart it after

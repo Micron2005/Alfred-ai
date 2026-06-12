@@ -20,22 +20,29 @@ What the main process does on launch:
    as a Windows login item, and lives in the tray (closing the HUD
    window hides it; quit from the tray).
 
-## Build the installer (on Windows, one time)
+## Build the installer
 
-Needs [Node.js LTS](https://nodejs.org) **22 or newer**
-(`winget install OpenJS.NodeJS.LTS`).
+**From WSL (recommended — one command, nothing installed on Windows):**
+
+```bash
+./scripts/windows/build-desktop-app.sh    # from the repo root
+```
+
+Installs Node 22 in WSL if needed, builds the NSIS installer
+(electron-builder ≥ 24 edits the exe icon with pure-JS `resedit`,
+and `signExecutable: false` skips code signing — so no Wine), then
+copies **Alfred Setup 1.0.0.exe** to the Windows desktop and runs it.
+
+**Or natively on Windows** (needs [Node.js LTS](https://nodejs.org)
+22+, e.g. `winget install OpenJS.NodeJS.LTS`):
 
 ```powershell
-# 1. Copy this folder somewhere Windows-local (npm dislikes \\wsl$ paths)
+# Copy this folder somewhere Windows-local (npm dislikes \\wsl$ paths)
 robocopy \\wsl$\Ubuntu\home\YOU\alfred-ai\alfred-desktop $env:USERPROFILE\alfred-desktop /E /XD node_modules dist
 # (robocopy exit code 1 just means "files copied" — that's success)
-
-# 2. Build
 cd $env:USERPROFILE\alfred-desktop
 npm install
 npm run dist
-
-# 3. Install — also launches Alfred when done
 & ".\dist\Alfred Setup 1.0.0.exe"
 ```
 

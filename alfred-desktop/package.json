@@ -27,8 +27,9 @@
       "build/**"
     ],
     "win": {
-      "target": ["nsis"],
-      "icon": "build/icon.ico"
+      "target": [{ "target": "nsis", "arch": ["x64"] }],
+      "icon": "build/icon.ico",
+      "signExecutable": false
     },
     "nsis": {
       "oneClick": true,
