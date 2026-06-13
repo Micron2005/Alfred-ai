@@ -113,24 +113,58 @@ else
 fi
 
 # ── Hop 6: from inside the alfred-core container ───────────────────
+# We do NOT use ``CONTAINER_OUT=$(docker compose exec -T ...)`` here:
+# ``docker compose exec -T`` inside command substitution can silently
+# hang past ``timeout`` because docker-cli doesn't propagate the SIGTERM
+# to the remote process. Instead we write directly to a tmp file, run
+# the exec under explicit ``timeout`` with ``--kill-after``, and read
+# the file back. This guarantees the script always finishes.
 echo ""
 echo -e "$INFO [6/6] alfred-core container → host.docker.internal:11434"
-CONTAINER_OUT="$(cd "$REPO_ROOT" && timeout 15 docker compose exec -T alfred-core \
-    curl -s --max-time 3 -o /dev/null -w '%{http_code}' \
-    http://host.docker.internal:11434/api/tags 2>&1 | tail -1)"
-if [[ "$CONTAINER_OUT" == "200" ]]; then
-    echo -e "  $PASS the backend container reaches Ollama — vitals should go green within ~30s"
-    echo ""
-    echo "      Models visible to Alfred:"
-    curl -s --max-time 3 http://localhost:11434/api/tags 2>/dev/null \
-        | python3 -c "import sys,json;[print('        -', m['name']) for m in json.load(sys.stdin).get('models',[])]" 2>/dev/null \
-        || true
-    echo "      (If the HUD still warns, the model named in .env LOCAL_MODEL_CHAT"
-    echo "       isn't in that list — pull it on Windows: ollama pull <model>)"
+HOP6_LOG="$(mktemp)"
+trap 'rm -f "$HOP6_LOG"' EXIT
+if ! (cd "$REPO_ROOT" && docker compose ps --status=running --services 2>/dev/null \
+        | grep -qx alfred-core); then
+    echo -e "  $FAIL alfred-core container isn't running"
+    verdicts+=("alfred-core isn't up. Start the stack: cd $REPO_ROOT && docker compose up -d (or: sudo systemctl restart alfred.service).")
 else
-    echo -e "  $FAIL container got '$CONTAINER_OUT'"
-    if [[ -z "${verdicts[*]:-}" ]]; then
-        verdicts+=("Everything upstream works but the container can't reach the WSL host — restart the stack: sudo systemctl restart alfred.service")
+    # Run exec in the background with a hard outer timeout so a hung
+    # docker daemon can never wedge this script.
+    (cd "$REPO_ROOT" && timeout --kill-after=2 8 docker compose exec -T alfred-core \
+        sh -c 'curl -s --max-time 4 -o /dev/null -w "%{http_code}" http://host.docker.internal:11434/api/tags || echo "EXEC_FAIL"' \
+        >"$HOP6_LOG" 2>&1) &
+    HOP6_PID=$!
+    wait "$HOP6_PID" 2>/dev/null
+    HOP6_RC=$?
+    CONTAINER_OUT="$(tr -d '\r\n' <"$HOP6_LOG" | tail -c 64)"
+    if [[ "$CONTAINER_OUT" == *"200" ]]; then
+        echo -e "  $PASS the backend container reaches Ollama — vitals should go green within ~30s"
+        echo ""
+        echo "      Models visible to Alfred:"
+        AVAIL_MODELS="$(curl -s --max-time 3 http://localhost:11434/api/tags 2>/dev/null \
+            | python3 -c "import sys,json;[print('        -', m['name']) for m in json.load(sys.stdin).get('models',[])]" 2>/dev/null \
+            || true)"
+        echo "$AVAIL_MODELS"
+        # Compare configured LOCAL_MODEL_CHAT against what's actually pulled.
+        CONFIG_MODEL="$(grep -E '^LOCAL_MODEL_CHAT=' "$REPO_ROOT/.env" 2>/dev/null \
+            | tail -1 | sed 's/^LOCAL_MODEL_CHAT=//' | tr -d '"' | tr -d "'")"
+        [[ -z "$CONFIG_MODEL" ]] && CONFIG_MODEL="dolphin-llama3:8b-v2.9-q4_K_M"
+        if [[ -n "$AVAIL_MODELS" ]] && ! echo "$AVAIL_MODELS" | grep -qF -- "- $CONFIG_MODEL"; then
+            echo ""
+            echo "      ⚠ LOCAL_MODEL_CHAT='$CONFIG_MODEL' isn't in that list."
+            echo "        Either pull it on Windows:  ollama pull $CONFIG_MODEL"
+            echo "        OR edit .env LOCAL_MODEL_CHAT to a model you already have, then:"
+            echo "        docker compose restart alfred-core"
+            verdicts+=("Ollama reachable but configured model '$CONFIG_MODEL' isn't pulled. Either 'ollama pull $CONFIG_MODEL' on Windows, or set LOCAL_MODEL_CHAT in .env to a model you have, then 'docker compose restart alfred-core'.")
+        fi
+    elif [[ "$HOP6_RC" -eq 124 || "$HOP6_RC" -eq 137 ]]; then
+        echo -e "  $FAIL container exec timed out (8s) — docker daemon or container is stuck"
+        verdicts+=("docker compose exec hung — restart the docker engine: sudo systemctl restart docker, then 'docker compose up -d'.")
+    else
+        echo -e "  $FAIL container got '$CONTAINER_OUT' (rc=$HOP6_RC)"
+        echo "      Raw output:"
+        sed 's/^/        /' "$HOP6_LOG" | head -20
+        verdicts+=("Everything upstream works but the container can't reach the WSL host. Restart the stack: cd $REPO_ROOT && docker compose restart alfred-core")
     fi
 fi
 
