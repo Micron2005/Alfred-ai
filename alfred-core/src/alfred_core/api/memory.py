@@ -23,6 +23,7 @@ from alfred_core.db.session import get_session
 from alfred_core.memory_archive import (
     delete_markdown_mirror,
     embed_note_text,
+    restore_from_mirror,
     search_relevant_notes,
     summarise_and_persist_conversation,
     write_markdown_mirror,
@@ -290,3 +291,44 @@ async def summarize_conversation(
     await session.commit()
     await session.refresh(note)
     return MemoryNoteOut.from_model(note)
+
+
+class MemoryRestoreResult(BaseModel):
+    """Outcome of ``POST /memory/restore``.
+
+    The endpoint is intentionally non-destructive: existing rows are
+    skipped (by original UUID), so calling it twice is safe and
+    "import any extra .md files" is just a re-run.
+    """
+
+    imported: int
+    skipped: int
+    failed: int
+    embedded: int
+    storage_path: str
+    errors: list[str] = []
+
+
+@router.post("/restore", response_model=MemoryRestoreResult)
+async def restore_memory_from_mirror(
+    session: AsyncSession = Depends(get_session),
+) -> MemoryRestoreResult:
+    """Re-hydrate ``memory_notes`` from the markdown mirror directory.
+
+    Disaster-recovery endpoint for the case where the Postgres volume
+    was wiped (e.g. a `docker compose down -v` or a migration that
+    reset the schema) but the host-mounted markdown mirror survived.
+    Idempotent — notes already in the DB by UUID are skipped, so the
+    user can also drop hand-written .md files into the mirror dir and
+    run this to import them.
+    """
+    report = await restore_from_mirror(session=session, settings=_settings)
+    await session.commit()
+    return MemoryRestoreResult(
+        imported=report.imported,
+        skipped=report.skipped,
+        failed=report.failed,
+        embedded=report.embedded,
+        storage_path=_settings.alfred_memory_dir,
+        errors=report.errors,
+    )

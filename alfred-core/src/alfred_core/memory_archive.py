@@ -396,6 +396,223 @@ def delete_markdown_mirror(filename: str, *, settings: Settings) -> None:
         log.warning("Could not delete memory mirror %s: %s", path, exc)
 
 
+# ─── Disaster-recovery: re-hydrate the DB from the markdown mirror ─────
+
+# Pattern for the metadata lines ``render_markdown`` emits, e.g.
+#   _id_: `9444ea30-8833-4b65-a43d-5128c2b1b71a`
+# The trailing two spaces ``render_markdown`` adds for a hard line
+# break aren't required by the parser — we strip whitespace.
+_MD_META_RE = re.compile(r"^_(\w+)_:\s*`([^`]*)`", re.MULTILINE)
+_MD_TITLE_RE = re.compile(r"^#\s+(.+?)\s*$", re.MULTILINE)
+_MD_SECTION_RE = re.compile(r"^##\s+(.+?)\s*$")
+_SECTION_KEY_MAP = {
+    "Key facts": "key_facts",
+    "Decisions": "decisions",
+    "Follow-ups": "follow_ups",
+}
+
+
+@dataclass
+class ParsedMarkdownNote:
+    """A ``MemoryNote`` parsed back out of its markdown mirror file.
+
+    Empty/optional fields default sensibly so a hand-edited file that
+    drops, say, the ``_conversation_:`` line or the Follow-ups section
+    still imports cleanly. ``id`` is ``None`` if the file is missing
+    its ``_id_:`` line — restore then mints a fresh UUID.
+    """
+
+    id: UUID | None
+    title: str
+    summary: str
+    source: str
+    created_at: datetime | None
+    source_conversation_id: UUID | None
+    structured: dict[str, list[str]]
+
+
+def parse_markdown_mirror(text: str) -> ParsedMarkdownNote:
+    """Reverse of ``render_markdown()``.
+
+    Tolerant of missing optional fields, hand-edited summaries, and
+    extra whitespace. Returns ``ParsedMarkdownNote``; the caller
+    decides how to persist (see ``restore_from_mirror``).
+    """
+
+    title_match = _MD_TITLE_RE.search(text)
+    title = title_match.group(1).strip() if title_match else "Untitled memory"
+
+    meta = {key: value for key, value in _MD_META_RE.findall(text)}
+
+    def _as_uuid(raw: str | None) -> UUID | None:
+        if not raw:
+            return None
+        try:
+            return UUID(raw)
+        except ValueError:
+            return None
+
+    created_at: datetime | None = None
+    if raw_created := meta.get("created"):
+        try:
+            created_at = datetime.fromisoformat(raw_created)
+        except ValueError:
+            created_at = None
+
+    # Walk lines, splitting body into ``## SectionName`` chunks.
+    sections: dict[str, str] = {}
+    current: str | None = None
+    buffer: list[str] = []
+    for line in text.splitlines():
+        match = _MD_SECTION_RE.match(line)
+        if match:
+            if current is not None:
+                sections[current] = "\n".join(buffer).strip()
+            current = match.group(1).strip()
+            buffer = []
+            continue
+        if current is not None:
+            buffer.append(line)
+    if current is not None:
+        sections[current] = "\n".join(buffer).strip()
+
+    summary = sections.get("Summary", "").strip()
+    # ``render_markdown`` writes this placeholder when summary is empty.
+    if summary == "_(no summary)_":
+        summary = ""
+
+    structured: dict[str, list[str]] = {}
+    for header, key in _SECTION_KEY_MAP.items():
+        body = sections.get(header, "")
+        if not body:
+            continue
+        items = [
+            line.strip()[2:].strip()
+            for line in body.splitlines()
+            if line.strip().startswith("- ")
+        ]
+        if items:
+            structured[key] = items
+
+    return ParsedMarkdownNote(
+        id=_as_uuid(meta.get("id")),
+        title=title,
+        summary=summary,
+        source=meta.get("source") or "conversation_summary",
+        created_at=created_at,
+        source_conversation_id=_as_uuid(meta.get("conversation")),
+        structured=structured,
+    )
+
+
+@dataclass
+class MirrorRestoreReport:
+    """Summary of a ``restore_from_mirror`` call."""
+
+    imported: int = 0
+    skipped: int = 0
+    failed: int = 0
+    embedded: int = 0
+    errors: list[str] = None  # type: ignore[assignment]
+
+    def __post_init__(self) -> None:
+        if self.errors is None:
+            self.errors = []
+
+
+async def restore_from_mirror(
+    *,
+    session: AsyncSession,
+    settings: Settings,
+) -> MirrorRestoreReport:
+    """Rehydrate ``memory_notes`` from the markdown mirror directory.
+
+    Idempotent: a note whose ``_id_`` already exists in the DB is
+    skipped. A note whose ``_id_`` is missing or unparseable is
+    imported with a fresh UUID (treated as "user dropped a hand-
+    written note in").
+
+    Embedding is best-effort — if Ollama is unreachable the column
+    stays NULL and the note is still saved (semantic search just
+    won't find it until a future re-embed).
+
+    The caller owns the transaction: this function only ``flush()``-es
+    so we can detect insert failures per-file and continue. Commit on
+    the way out.
+    """
+
+    report = MirrorRestoreReport()
+    directory = Path(settings.alfred_memory_dir)
+    if not directory.exists():
+        report.errors.append(f"Memory directory not found: {directory}")
+        return report
+
+    md_files = sorted(directory.glob("*.md"))
+    for path in md_files:
+        try:
+            raw = path.read_text(encoding="utf-8")
+        except OSError as exc:
+            report.failed += 1
+            report.errors.append(f"{path.name}: read error: {exc}")
+            continue
+
+        try:
+            parsed = parse_markdown_mirror(raw)
+        except Exception as exc:  # noqa: BLE001 — restore must be best-effort
+            report.failed += 1
+            report.errors.append(f"{path.name}: parse error: {exc}")
+            continue
+
+        # Idempotency: skip rows already in the DB by their original UUID.
+        if parsed.id is not None:
+            existing = await session.get(MemoryNote, parsed.id)
+            if existing is not None:
+                report.skipped += 1
+                continue
+
+        note = MemoryNote(
+            title=parsed.title[:200] or "Untitled memory",
+            summary=parsed.summary,
+            structured=parsed.structured or None,
+            source=parsed.source[:32] or "conversation_summary",
+            markdown_filename=path.name,
+            source_conversation_id=parsed.source_conversation_id,
+        )
+        if parsed.id is not None:
+            note.id = parsed.id
+        if parsed.created_at is not None:
+            note.created_at = parsed.created_at
+            note.updated_at = parsed.created_at
+
+        session.add(note)
+        try:
+            await session.flush()
+        except Exception as exc:  # noqa: BLE001 — keep going on bad rows
+            await session.rollback()
+            report.failed += 1
+            report.errors.append(f"{path.name}: insert failed: {exc}")
+            continue
+
+        # Re-embed AFTER the insert succeeds; failure stays best-effort.
+        embedding = await embed_note_text(
+            note.title, note.summary, settings=settings
+        )
+        if embedding is not None:
+            note.embedding = embedding
+            report.embedded += 1
+            try:
+                await session.flush()
+            except Exception as exc:  # noqa: BLE001
+                # Embedding write failed but the row is in — count it
+                # imported, surface the error so the user can re-run.
+                report.errors.append(
+                    f"{path.name}: embed write failed: {exc}"
+                )
+        report.imported += 1
+
+    return report
+
+
 # ─── Persistence ────────────────────────────────────────────────────────
 
 
