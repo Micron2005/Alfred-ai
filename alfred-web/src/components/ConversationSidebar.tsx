@@ -2,9 +2,10 @@
 
 import { useEffect, useState } from "react";
 import type { ConversationSummary } from "@/lib/api";
+import { MemoryPanel } from "./MemoryPanel";
 
 const TAB_KEY = "alfred.sidebarTab";
-type Tab = "conversation" | "archives";
+type Tab = "conversation" | "archives" | "memory";
 
 interface Props {
   conversations: ConversationSummary[];
@@ -67,7 +68,8 @@ export function ConversationSidebar({
     const stored = window.localStorage.getItem(TAB_KEY);
     if (
       stored === "archives" ||
-      stored === "conversation"
+      stored === "conversation" ||
+      stored === "memory"
     ) {
       setTabState(stored);
     }
@@ -195,6 +197,12 @@ export function ConversationSidebar({
             onClick={() => setTab("archives")}
             label="⟢ ARCHIVES"
             title="Saved conversations"
+          />
+          <SidebarTab
+            active={tab === "memory"}
+            onClick={() => setTab("memory")}
+            label="◈ MEMORY"
+            title="Long-term memory archive"
           />
           <span style={{ flex: 1 }} />
           <button
@@ -375,12 +383,14 @@ export function ConversationSidebar({
       ) : null}
 
       {/*
-        Memory panel removed (user-facing UI gone). Long-term memory
-        archive still works behind the scenes — chat retrieval injects
-        relevant past notes, [REMEMBER_CONVERSATION] markers still
-        archive transcripts to alfred-memory/, the API endpoints stay
-        exposed for power-user curl access — but no in-HUD browser.
+        Memory tab — long-term memory archive (Phase 12b). Like the
+        archives panel, this is fine to mount/unmount on tab switch
+        because nothing in the panel holds a long-lived ref or
+        recording that has to survive a remount.
       */}
+      {!collapsed && tab === "memory" ? (
+        <MemoryPanel activeConversationId={activeId} />
+      ) : null}
     </aside>
   );
 }
