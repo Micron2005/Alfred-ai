@@ -392,6 +392,42 @@ User ran the scripts on his PC; two failures, both fixed:
    downstream failures. Told user: tray → Quit Ollama → relaunch →
    re-run diagnostic. AWAITING RESULT.
 
+### Local LLM blocker RESOLVED (2026-06-13)
+After user restarted Ollama with OLLAMA_HOST=0.0.0.0:11434 and the
+bridge live, all 5 upstream hops PASS. Hop 6 of diagnose-ollama.sh
+was silently hanging — bug in the old version: ``CONTAINER_OUT=$(...
+timeout 15 docker compose exec -T alfred-core ...)`` — docker-cli
+doesn't propagate SIGTERM from outer ``timeout`` to the remote curl,
+so the substitution wedges indefinitely with NO output written.
+Manual probes from the user confirmed the container path is healthy:
+``getent hosts host.docker.internal`` → 172.17.0.1; raw curl from
+inside the container → HTTP 200 + ``{"models":[llama3.1:8b-instruct-
+q4_K_M, nomic-embed-text:latest]}``. The HUD's old "Local LLM not
+running" was stale state from BEFORE the firewall/env-var fix.
+
+Fixed in this session:
+- ``scripts/windows/diagnose-ollama.sh`` step 6 rewritten to never
+  hang: backgrounded ``docker compose exec`` with
+  ``timeout --kill-after=2 8``, output captured to ``mktemp`` then
+  read back (no command substitution around exec), explicit container-
+  running pre-check, and a model-mismatch warning that grepps the
+  user's ``.env LOCAL_MODEL_CHAT`` against ``/api/tags`` and prints
+  the exact ``ollama pull`` or ``sed`` fix command.
+- User's ``.env`` was on default ``dolphin-llama3:8b-v2.9-q4_K_M``
+  (not pulled). User chose to keep the model they already had —
+  one-shot sed updated ``LOCAL_MODEL_CHAT="llama3.1:8b-instruct-
+  q4_K_M"`` + ``docker compose restart alfred-core``.
+
+VERIFIED end-to-end via ``curl http://localhost:8000/vitals``: EVERY
+configured vital is now ``ok`` — Local LLM, Cloud LLM (Claude Sonnet
+4.5), Database, Tavily Web Search, Gmail, Spotify; only 3D Printer
+is ``off`` (intentional P3 backlog).
+
+User decisions captured for the dolphin uncensored variant (Option B):
+NOT pulled. If user later wants the uncensored persona, they can
+``ollama pull dolphin-llama3:8b-v2.9-q4_K_M`` on Windows and flip the
+.env line back — the wiring already supports it.
+
 ## Backlog / roadmap
 - P1: Face polish candidates (user feedback pending): Alfred
   announcing "monitor connected", brow/expression states tied to
