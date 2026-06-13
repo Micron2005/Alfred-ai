@@ -15,10 +15,9 @@
  */
 
 import type { ConversationSummary } from "@/lib/api";
-import { MemoryPanel } from "./MemoryPanel";
 import { useState, useEffect } from "react";
 
-type Tab = "conversation" | "archives" | "memory";
+type Tab = "conversation" | "archives";
 const TAB_KEY = "alfred.chatTabView.tab.v1";
 
 interface Props {
@@ -61,7 +60,7 @@ export function ChatTabView({
   useEffect(() => {
     if (typeof window === "undefined") return;
     const stored = window.localStorage.getItem(TAB_KEY);
-    if (stored === "conversation" || stored === "archives" || stored === "memory") {
+    if (stored === "conversation" || stored === "archives") {
       setTabState(stored);
     }
   }, []);
@@ -113,11 +112,6 @@ export function ChatTabView({
             onClick={() => setTab("archives")}
             label="ARCHIVES"
           />
-          <RailTab
-            active={tab === "memory"}
-            onClick={() => setTab("memory")}
-            label="MEMORY"
-          />
         </div>
 
         {/* New chat button — always visible at top */}
@@ -141,12 +135,10 @@ export function ChatTabView({
             flex: 1,
             overflowY: "auto",
             minHeight: 0,
-            padding: tab === "memory" ? 0 : "8px 6px",
+            padding: "8px 6px",
           }}
         >
-          {tab === "memory" ? (
-            <MemoryPanel activeConversationId={activeId} />
-          ) : conversations.length === 0 ? (
+          {conversations.length === 0 ? (
             <p
               className="mono"
               style={{
