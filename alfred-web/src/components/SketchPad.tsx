@@ -163,6 +163,156 @@ function detachStrokeBuffer() {
   strokeBufferEl.remove();
 }
 
+// ── QuickShape: pause-to-snap helpers ────────────────────────────────
+//
+// Classify a hand-drawn point cloud as one of {line, rect, ellipse},
+// or return null if it doesn't look enough like any of them. Used
+// when the pen has been still for ~350 ms mid-stroke (Procreate's
+// "draw a circle, pause, watch it snap" gesture).
+//
+// The math is intentionally cheap — three signals, no fitting:
+//   1. ``openness`` = distance(start, end) / path-length. Near 1 →
+//      open path → snap to LINE. Near 0 → closed shape.
+//   2. For closed shapes, the coefficient-of-variation of distance
+//      from the centroid: low CV → ellipse (equidistant), high CV
+//      → rect (corners poke out further than edge midpoints).
+//   3. Bbox aspect ratio close to 1 → snap circle/square instead of
+//      ellipse/rectangle.
+
+interface QuickShape {
+  kind: "line" | "rect" | "ellipse";
+  start?: { x: number; y: number };
+  end?: { x: number; y: number };
+  bbox?: { x: number; y: number; w: number; h: number };
+}
+
+function classifyShape(
+  pts: ReadonlyArray<{ x: number; y: number }>,
+): QuickShape | null {
+  if (pts.length < 8) return null;
+
+  let length = 0;
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  for (let i = 0; i < pts.length; i++) {
+    const p = pts[i];
+    if (i > 0) {
+      length += Math.hypot(p.x - pts[i - 1].x, p.y - pts[i - 1].y);
+    }
+    if (p.x < minX) minX = p.x;
+    if (p.y < minY) minY = p.y;
+    if (p.x > maxX) maxX = p.x;
+    if (p.y > maxY) maxY = p.y;
+  }
+  const w = maxX - minX;
+  const h = maxY - minY;
+  if (length < 30 || (w < 10 && h < 10)) return null;
+
+  const start = pts[0];
+  const end = pts[pts.length - 1];
+  const openness = Math.hypot(start.x - end.x, start.y - end.y) / length;
+
+  if (openness > 0.6) {
+    // Open path — candidate for LINE. Reject if it's too curvy by
+    // measuring max perpendicular distance from the straight line
+    // joining endpoints (normalised by line length).
+    const lineLen = Math.hypot(end.x - start.x, end.y - start.y);
+    if (lineLen < 20) return null;
+    const nx = -(end.y - start.y) / lineLen;
+    const ny = (end.x - start.x) / lineLen;
+    let maxPerp = 0;
+    for (const p of pts) {
+      const d = Math.abs((p.x - start.x) * nx + (p.y - start.y) * ny);
+      if (d > maxPerp) maxPerp = d;
+    }
+    if (maxPerp / lineLen > 0.15) return null;
+    return { kind: "line", start, end };
+  }
+
+  if (openness < 0.25) {
+    // Closed shape — disambiguate rect vs ellipse.
+    const cx = (minX + maxX) / 2;
+    const cy = (minY + maxY) / 2;
+    let sumD = 0;
+    for (const p of pts) sumD += Math.hypot(p.x - cx, p.y - cy);
+    const meanD = sumD / pts.length;
+    let sumVar = 0;
+    for (const p of pts) {
+      const d = Math.hypot(p.x - cx, p.y - cy);
+      sumVar += (d - meanD) * (d - meanD);
+    }
+    const cv = Math.sqrt(sumVar / pts.length) / Math.max(meanD, 1);
+    const bbox = { x: minX, y: minY, w, h };
+    if (cv < 0.12) return { kind: "ellipse", bbox };
+    if (cv > 0.18) return { kind: "rect", bbox };
+    return null;
+  }
+
+  return null;
+}
+
+/**
+ * Replace the in-progress stroke on ``strokeBufferEl`` with the
+ * perfect geometric version of ``shape``. The layer composite on
+ * pen-lift then applies the tool's opacity — same path as a freehand
+ * stroke, so QuickShape works with the same per-tool ink settings.
+ */
+function renderQuickShape(
+  shape: QuickShape,
+  color: string,
+  size: number,
+): void {
+  const buf = strokeBufferEl;
+  if (!buf) return;
+  const ctx = buf.getContext("2d");
+  if (!ctx) return;
+  ctx.clearRect(0, 0, LOGICAL_W, LOGICAL_H);
+  ctx.save();
+  ctx.strokeStyle = color;
+  ctx.lineWidth = size;
+  ctx.lineCap = "round";
+  ctx.lineJoin = "round";
+  ctx.beginPath();
+  if (shape.kind === "line" && shape.start && shape.end) {
+    ctx.moveTo(shape.start.x, shape.start.y);
+    ctx.lineTo(shape.end.x, shape.end.y);
+  } else if (shape.kind === "rect" && shape.bbox) {
+    let { x, y, w, h } = shape.bbox;
+    // Snap to a perfect square when the user clearly meant one.
+    const aspect = w / Math.max(h, 1);
+    if (aspect > 0.85 && aspect < 1.18) {
+      const s = Math.max(w, h);
+      x = x + w / 2 - s / 2;
+      y = y + h / 2 - s / 2;
+      w = h = s;
+    }
+    ctx.rect(x, y, w, h);
+  } else if (shape.kind === "ellipse" && shape.bbox) {
+    let { x, y, w, h } = shape.bbox;
+    const aspect = w / Math.max(h, 1);
+    if (aspect > 0.85 && aspect < 1.18) {
+      // Snap to a perfect circle when the user clearly meant one.
+      const s = Math.max(w, h);
+      x = x + w / 2 - s / 2;
+      y = y + h / 2 - s / 2;
+      w = h = s;
+    }
+    ctx.ellipse(
+      x + w / 2,
+      y + h / 2,
+      w / 2,
+      h / 2,
+      0,
+      0,
+      Math.PI * 2,
+    );
+  }
+  ctx.stroke();
+  ctx.restore();
+}
+
 function captureLayer(layerId: string): HistoryEntry | null {
   const canvas = layerCanvases.get(layerId);
   if (!canvas) return null;
@@ -405,6 +555,18 @@ export function SketchPad() {
      * nothing and pushed no undo entry.
      */
     inert: boolean;
+    /**
+     * Raw stroke point cloud, used by QuickShape's pause-to-snap.
+     * Updated from the actual pointer event, NOT the streamlined
+     * position — shape recognition wants the user's true path.
+     */
+    points: Array<{ x: number; y: number }>;
+    /**
+     * Once QuickShape has classified + snapped this stroke, further
+     * pointer moves don't paint to the buffer (the snapped shape
+     * stays locked until lift). null = no snap yet.
+     */
+    snap: QuickShape | null;
   } | null>(null);
   // Timestamp of the last stylus event — used to reject palm touches
   // that land while (or just after) the pen is on the glass.
@@ -423,6 +585,15 @@ export function SketchPad() {
   // colour under the pointer; release to make it the active colour.
   const holdTimerRef = useRef<number | null>(null);
   const strokeOriginRef = useRef<{ x: number; y: number } | null>(null);
+  // QuickShape: armed when the pen has gone still mid-stroke for the
+  // brief window we'll wait before trying to snap to a shape.
+  const snapTimerRef = useRef<number | null>(null);
+  function clearSnapTimer() {
+    if (snapTimerRef.current !== null) {
+      window.clearTimeout(snapTimerRef.current);
+      snapTimerRef.current = null;
+    }
+  }
   const [eyedropper, setEyedropper] = useState<{
     pointerId: number;
     x: number;
@@ -629,6 +800,7 @@ export function SketchPad() {
       return;
     }
     drawingRef.current = null;
+    clearSnapTimer();
     // Inert "strokes" (locked/hidden layer) never pushed an undo
     // entry and painted nothing — nothing to roll back.
     if (drawing.inert) {
@@ -808,6 +980,8 @@ export function SketchPad() {
       layerId: activeLayerId,
       buffered,
       inert,
+      points: [pt],
+      snap: null,
     };
     // A dot for taps.
     if (!inert) drawSegment(pt, pt, pressure);
@@ -889,6 +1063,10 @@ export function SketchPad() {
     }
     if (e.pointerType === "pen") lastPenTimeRef.current = performance.now();
     if (drawing.inert) return;
+    // QuickShape: once a snap is locked in mid-stroke, additional
+    // movement just keeps the snapped shape on screen — it doesn't
+    // paint over it. User can release to commit, or undo to retry.
+    if (drawing.snap) return;
     // Streamline (Procreate): exponentially blend the drawn position
     // toward the raw pointer position. ``streamline=0`` → ``alpha=1``
     // (raw passthrough, every micro-jitter shows); ``streamline=1`` →
@@ -907,8 +1085,18 @@ export function SketchPad() {
       typeof native.getCoalescedEvents === "function"
         ? native.getCoalescedEvents()
         : [native];
+    // Track how much the pen has moved in this batch — used to arm
+    // (or cancel) the QuickShape snap timer below.
+    let batchMovedSq = 0;
     for (const ev of events.length > 0 ? events : [native]) {
       const raw = toLogical(ev.clientX, ev.clientY);
+      const lastPoint = drawing.points[drawing.points.length - 1];
+      if (lastPoint) {
+        const dx = raw.x - lastPoint.x;
+        const dy = raw.y - lastPoint.y;
+        batchMovedSq += dx * dx + dy * dy;
+      }
+      drawing.points.push(raw);
       // Exponential smoothing keeps a jittery pressure sensor from
       // producing lumpy strokes.
       const pressure =
@@ -920,6 +1108,30 @@ export function SketchPad() {
       drawing.x = nextX;
       drawing.y = nextY;
       drawing.pressure = pressure;
+    }
+    // ── QuickShape arm/disarm ─────────────────────────────────────
+    // If the pen barely moved this batch AND we've gathered enough
+    // points to make a shape, arm the snap timer. Any meaningful
+    // movement cancels it — so dragging a tail off the shape resumes
+    // freehand drawing.
+    if (drawing.buffered && drawing.points.length >= 8) {
+      if (batchMovedSq < 4 /* px² */) {
+        if (snapTimerRef.current === null) {
+          snapTimerRef.current = window.setTimeout(() => {
+            snapTimerRef.current = null;
+            const d = drawingRef.current;
+            if (!d || !d.buffered || d.inert || d.snap) return;
+            const shape = classifyShape(d.points);
+            if (!shape) return;
+            const snap = sketchStore.getSnapshot();
+            const toolSet = snap.toolSettings[snap.tool];
+            renderQuickShape(shape, snap.color, toolSet.size);
+            d.snap = shape;
+          }, 350);
+        }
+      } else {
+        clearSnapTimer();
+      }
     }
   }
 
@@ -958,13 +1170,15 @@ export function SketchPad() {
     const drawing = drawingRef.current;
     if (drawing && drawing.pointerId === e.pointerId) {
       clearHoldTimer();
+      clearSnapTimer();
       // High-streamline strokes leave the smoothed position trailing
       // behind the lift point. Draw a final short segment from the
       // smoothed position to the actual lift point so the line ends
       // where the user actually lifted the pen — Procreate does this
       // implicitly because its "end-of-stroke" interpolation runs to
-      // completion before commit.
-      if (!drawing.inert) {
+      // completion before commit. Skip when a QuickShape snap is
+      // locked in (the buffer already holds the perfect geometry).
+      if (!drawing.inert && !drawing.snap) {
         const lift = toLogical(e.clientX, e.clientY);
         const dx = lift.x - drawing.x;
         const dy = lift.y - drawing.y;
