@@ -180,10 +180,12 @@ function detachStrokeBuffer() {
 //      ellipse/rectangle.
 
 interface QuickShape {
-  kind: "line" | "rect" | "ellipse";
+  kind: "line" | "rect" | "ellipse" | "triangle";
   start?: { x: number; y: number };
   end?: { x: number; y: number };
   bbox?: { x: number; y: number; w: number; h: number };
+  // For triangles: the three vertices, ordered around the shape.
+  vertices?: Array<{ x: number; y: number }>;
 }
 
 function classifyShape(
@@ -214,10 +216,11 @@ function classifyShape(
   const end = pts[pts.length - 1];
   const openness = Math.hypot(start.x - end.x, start.y - end.y) / length;
 
-  if (openness > 0.6) {
-    // Open path — candidate for LINE. Reject if it's too curvy by
-    // measuring max perpendicular distance from the straight line
-    // joining endpoints (normalised by line length).
+  // Open path → LINE. Looser thresholds than the first version
+  // because hand-drawn lines have natural wobble — the previous
+  // 0.6 openness + 0.15 perp budget rejected too many "obviously
+  // straight" strokes.
+  if (openness > 0.55) {
     const lineLen = Math.hypot(end.x - start.x, end.y - start.y);
     if (lineLen < 20) return null;
     const nx = -(end.y - start.y) / lineLen;
@@ -227,12 +230,39 @@ function classifyShape(
       const d = Math.abs((p.x - start.x) * nx + (p.y - start.y) * ny);
       if (d > maxPerp) maxPerp = d;
     }
-    if (maxPerp / lineLen > 0.15) return null;
+    if (maxPerp / lineLen > 0.22) return null;
     return { kind: "line", start, end };
   }
 
   if (openness < 0.25) {
-    // Closed shape — disambiguate rect vs ellipse.
+    // Closed shape — disambiguate rect / ellipse / triangle.
+    //
+    // Fill ratio (shape area / bounding box area, via the shoelace
+    // formula) is the cleanest tiebreaker because the three look
+    // very different on this axis:
+    //   • triangle  ≈ 0.45 (half of bbox, modulo shape skew)
+    //   • ellipse   ≈ 0.78 (π/4)
+    //   • rectangle ≈ 0.95 (close to whole bbox)
+    let signedArea = 0;
+    for (let i = 0; i < pts.length; i++) {
+      const p1 = pts[i];
+      const p2 = pts[(i + 1) % pts.length];
+      signedArea += p1.x * p2.y - p2.x * p1.y;
+    }
+    const fillRatio = Math.abs(signedArea / 2) / Math.max(w * h, 1);
+    const bbox = { x: minX, y: minY, w, h };
+
+    if (fillRatio < 0.6) {
+      // Triangle candidate — pick the 3 vertices by running the
+      // classic "highest perpendicular distance from a baseline"
+      // recursion (a 2-pass simplification of Douglas-Peucker).
+      const tri = findTriangleVertices(pts, start);
+      if (tri) return { kind: "triangle", vertices: tri };
+      return null;
+    }
+
+    // CV of radial distance from centroid: tight for ellipse,
+    // loose for rectangle (corners further out than edge midpoints).
     const cx = (minX + maxX) / 2;
     const cy = (minY + maxY) / 2;
     let sumD = 0;
@@ -244,13 +274,58 @@ function classifyShape(
       sumVar += (d - meanD) * (d - meanD);
     }
     const cv = Math.sqrt(sumVar / pts.length) / Math.max(meanD, 1);
-    const bbox = { x: minX, y: minY, w, h };
     if (cv < 0.12) return { kind: "ellipse", bbox };
     if (cv > 0.18) return { kind: "rect", bbox };
     return null;
   }
 
   return null;
+}
+
+/**
+ * Find 3 vertices of a hand-drawn triangle. The point furthest
+ * from the line joining ``start`` ↔ farthest-point gives us the
+ * third corner; together with start and the farthest-from-start
+ * that's a triangle. Returns null if the geometry is too degenerate
+ * to bother snapping.
+ */
+function findTriangleVertices(
+  pts: ReadonlyArray<{ x: number; y: number }>,
+  start: { x: number; y: number },
+): Array<{ x: number; y: number }> | null {
+  // Vertex A is the user's start point (which is also the end, ~ish,
+  // since the shape is closed).
+  // Vertex B is the point farthest from A.
+  let bIdx = 0;
+  let bDist = 0;
+  for (let i = 0; i < pts.length; i++) {
+    const d = Math.hypot(pts[i].x - start.x, pts[i].y - start.y);
+    if (d > bDist) {
+      bDist = d;
+      bIdx = i;
+    }
+  }
+  if (bDist < 30) return null;
+  const b = pts[bIdx];
+
+  // Vertex C is the point farthest from the line A-B (perpendicular
+  // distance).
+  const lineLen = Math.hypot(b.x - start.x, b.y - start.y);
+  if (lineLen < 1) return null;
+  const nx = -(b.y - start.y) / lineLen;
+  const ny = (b.x - start.x) / lineLen;
+  let cDist = 0;
+  let c = pts[0];
+  for (const p of pts) {
+    const d = Math.abs((p.x - start.x) * nx + (p.y - start.y) * ny);
+    if (d > cDist) {
+      cDist = d;
+      c = p;
+    }
+  }
+  // Reject if it's basically a line (too thin to be a triangle).
+  if (cDist < lineLen * 0.2) return null;
+  return [start, b, c];
 }
 
 /**
@@ -308,6 +383,12 @@ function renderQuickShape(
       0,
       Math.PI * 2,
     );
+  } else if (shape.kind === "triangle" && shape.vertices) {
+    const [a, b, c] = shape.vertices;
+    ctx.moveTo(a.x, a.y);
+    ctx.lineTo(b.x, b.y);
+    ctx.lineTo(c.x, c.y);
+    ctx.closePath();
   }
   ctx.stroke();
   ctx.restore();
