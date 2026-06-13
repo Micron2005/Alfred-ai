@@ -499,6 +499,14 @@ User runs ONE command on his PC to migrate + restore memory:
 ``bash ~/Alfred-ai/scripts/native/go-native.sh``
 
 ## Backlog / roadmap
+- P1 (NEW from 2026-06-13 evening): Hand tracking regression. User
+  reported hand tracking isn't working after today's Docker stop /
+  start sequence; HUD otherwise fully restored (chat, memory, vitals,
+  Spotify, weather, Earth, MEMORY sub-tab all back). Likely candidates:
+  alfred-web Electron app needs hard refresh to re-acquire camera
+  permission, OR MediaPipe model failed to fetch behind a hot
+  restart, OR the front-end-only Pose+Hands worker fell silent. Don't
+  touch until user explicitly asks — they said "alright for now."
 - P1: Face polish candidates (user feedback pending): Alfred
   announcing "monitor connected", brow/expression states tied to
   persona mood, mouth viseme shaping (vs amplitude-only jaw).
