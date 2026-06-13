@@ -1,0 +1,38 @@
+# Alfred AI — frontend (Next.js production server) — native systemd unit.
+#
+# Installed by scripts/native/go-native.sh. The %placeholders% are
+# substituted at install time. ``next build`` is run by go-native.sh
+# so this unit just serves the pre-built bundle.
+#
+#   Status:   sudo systemctl status alfred-web.service
+#   Logs:     sudo journalctl -u alfred-web.service -f
+#   Restart:  sudo systemctl restart alfred-web.service
+#
+# After editing alfred-web/ source code:
+#   cd %REPO_ROOT%/alfred-web && npm run build
+#   sudo systemctl restart alfred-web.service
+
+[Unit]
+Description=Alfred AI — frontend (Next.js)
+Documentation=https://github.com/Micron2005/Alfred-ai
+After=network-online.target alfred-core.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%REPO_ROOT%/alfred-web
+EnvironmentFile=%REPO_ROOT%/.env
+Environment=NODE_ENV=production
+Environment=PORT=3000
+ExecStart=/usr/bin/env npm run start
+
+User=%RUN_AS_USER%
+Group=%RUN_AS_USER%
+
+Restart=on-failure
+RestartSec=5s
+StartLimitInterval=600s
+StartLimitBurst=5
+
+[Install]
+WantedBy=multi-user.target

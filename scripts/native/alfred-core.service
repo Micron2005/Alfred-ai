@@ -1,0 +1,48 @@
+# Alfred AI — backend (FastAPI / uvicorn) — native systemd unit.
+#
+# Installed by scripts/native/go-native.sh. The %placeholders% are
+# substituted at install time with the user's repo path and account.
+#
+#   Status:   sudo systemctl status alfred-core.service
+#   Logs:     sudo journalctl -u alfred-core.service -f
+#   Restart:  sudo systemctl restart alfred-core.service
+#
+# Hot reload is intentionally OFF in production-style boots: the
+# user can run `uvicorn alfred_core.main:app --reload` manually
+# during development. Set ``ALFRED_DEV_RELOAD=1`` in
+# /etc/systemd/system/alfred-core.service.d/override.conf to enable.
+
+[Unit]
+Description=Alfred AI — backend (FastAPI)
+Documentation=https://github.com/Micron2005/Alfred-ai
+After=network-online.target postgresql.service alfred-ollama-bridge.service
+Wants=network-online.target postgresql.service
+
+[Service]
+Type=simple
+WorkingDirectory=%REPO_ROOT%
+EnvironmentFile=%REPO_ROOT%/.env
+# Piper TTS binary + voice live under .alfred-deps/piper, baked in
+# by go-native.sh. Putting them on PATH lets the Piper TTS backend
+# spawn ``piper`` without an absolute path lookup.
+Environment=PATH=%REPO_ROOT%/.venv-alfred-core/bin:%REPO_ROOT%/.alfred-deps/piper:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Environment=PYTHONUNBUFFERED=1
+# Resolve the Piper voice file the alfred-core code looks up at TTS
+# time. Matches the Dockerfile ENV.
+Environment=ALFRED_TTS_VOICE=en_GB-northern_english_male-medium
+ExecStart=%REPO_ROOT%/.venv-alfred-core/bin/uvicorn alfred_core.main:app --host 0.0.0.0 --port 8000
+
+User=%RUN_AS_USER%
+Group=%RUN_AS_USER%
+
+Restart=on-failure
+RestartSec=5s
+StartLimitInterval=600s
+StartLimitBurst=5
+
+# Use /tmp inside the unit's private namespace so faster-whisper +
+# Piper tempfiles don't pollute /tmp across reboots.
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

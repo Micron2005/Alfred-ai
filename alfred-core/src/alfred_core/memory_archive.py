@@ -570,13 +570,29 @@ async def restore_from_mirror(
                 report.skipped += 1
                 continue
 
+        # Resolve the source conversation FK. If the referenced
+        # conversation no longer exists (typical after a volume wipe —
+        # the .md mirror survives but the conversations table is
+        # empty), set the column to NULL. The schema already declares
+        # ``ON DELETE SET NULL`` for this exact case, so "orphan note
+        # pointing at a deleted conversation" is the correct
+        # representation. Without this, every restore attempt would
+        # 23503 FK-violate and the savepoint would roll the row back.
+        source_conv_id = parsed.source_conversation_id
+        if source_conv_id is not None:
+            conv_row = await session.execute(
+                select(Conversation.id).where(Conversation.id == source_conv_id)
+            )
+            if conv_row.scalar_one_or_none() is None:
+                source_conv_id = None
+
         note = MemoryNote(
             title=parsed.title[:200] or "Untitled memory",
             summary=parsed.summary,
             structured=parsed.structured or None,
             source=parsed.source[:32] or "conversation_summary",
             markdown_filename=path.name,
-            source_conversation_id=parsed.source_conversation_id,
+            source_conversation_id=source_conv_id,
         )
         if parsed.id is not None:
             note.id = parsed.id
@@ -584,27 +600,32 @@ async def restore_from_mirror(
             note.created_at = parsed.created_at
             note.updated_at = parsed.created_at
 
-        session.add(note)
+        # Wrap each row in a SAVEPOINT. Without this, a single failed
+        # ``flush()`` poisons the outer transaction and every
+        # subsequent row in the loop fails too — which is exactly
+        # what was happening with the FK error (imported=0,
+        # failed=22 instead of 20/2).
         try:
-            await session.flush()
+            async with session.begin_nested():
+                session.add(note)
+                await session.flush()
         except Exception as exc:  # noqa: BLE001 — keep going on bad rows
-            await session.rollback()
             report.failed += 1
             report.errors.append(f"{path.name}: insert failed: {exc}")
             continue
 
-        # Re-embed AFTER the insert succeeds; failure stays best-effort.
+        # Re-embed AFTER the insert savepoint succeeds; failure stays
+        # best-effort (the row already exists with embedding=NULL).
         embedding = await embed_note_text(
             note.title, note.summary, settings=settings
         )
         if embedding is not None:
-            note.embedding = embedding
-            report.embedded += 1
             try:
-                await session.flush()
+                async with session.begin_nested():
+                    note.embedding = embedding
+                    await session.flush()
+                report.embedded += 1
             except Exception as exc:  # noqa: BLE001
-                # Embedding write failed but the row is in — count it
-                # imported, surface the error so the user can re-run.
                 report.errors.append(
                     f"{path.name}: embed write failed: {exc}"
                 )

@@ -428,6 +428,76 @@ NOT pulled. If user later wants the uncensored persona, they can
 ``ollama pull dolphin-llama3:8b-v2.9-q4_K_M`` on Windows and flip the
 .env line back — the wiring already supports it.
 
+### Memory archive restore + Docker → native WSL2 migration (2026-06-13)
+User reported memory empty in the app despite having all 22 markdown
+files on disk. Diagnosis: Postgres volume was wiped during the WSL
+Docker Engine migration earlier today; markdown files (host bind
+mount) survived but the canonical ``memory_notes`` table was empty.
+There was no rehydrate-from-disk path — render_markdown was one-way.
+
+User then sharply pushed back: every fix I'd been proposing kept
+landing in Docker (rebuild image, exec into container, etc.), but
+he'd been asking since the first session to drop Docker entirely
+because his main PC can't legally run Docker Desktop. Pivoted to
+option (b) — native WSL2 + systemd, Docker gone.
+
+Implemented (all tested at unit level, ready for user to run):
+
+DISASTER-RECOVERY (memory rehydration)
+- ``memory_archive.parse_markdown_mirror`` — reverse of
+  ``render_markdown``. Tolerant of missing optional fields, hand-
+  edited summaries, free-form prose mixed into bullet sections.
+- ``memory_archive.restore_from_mirror`` — scans the mirror dir,
+  upserts by original UUID (idempotent), re-embeds via Ollama.
+  KEY FIXES from first user run (which failed 22/22):
+  • FK violation when ``source_conversation_id`` referenced a
+    conversation that no longer existed (whole DB had been wiped,
+    not just memory_notes). Schema declares ON DELETE SET NULL for
+    that FK exactly so orphan notes are valid — restore now
+    pre-checks via ``select(Conversation.id).where(...)`` and sets
+    the FK to NULL when the conversation is missing.
+  • SQLAlchemy "transaction poisoned" cascade: one failed
+    ``flush()`` aborted the rest of the loop. Wrapped each row
+    insert + each embedding write in ``session.begin_nested()``
+    so failures are SAVEPOINT-isolated.
+- ``POST /memory/restore`` endpoint (idempotent, also handles
+  hand-dropped .md files).
+- ``scripts/restore-memory.py`` — standalone, runs OUTSIDE Docker
+  via the alfred-core venv, reads .env, talks straight to native
+  Postgres on localhost:5432, redacts the DB password when echoing.
+- Tests: ``tests/test_memory_restore.py`` — 7 parser tests
+  (round-trip, real user file, missing optionals, ``_(no summary)_``
+  placeholder, malformed UUID, section reordering, prose-in-section
+  rejection). All 26 memory tests pass.
+
+DE-DOCKER MIGRATION
+- ``scripts/native/go-native.sh`` — single command, idempotent, end-
+  to-end: apt-installs postgresql-16 + pgvector + python3-venv +
+  Node 20 (NodeSource) + ffmpeg + socat; creates ``alfred`` role
+  and DB with a freshly-generated password; installs the ``vector``
+  extension; rewrites ``.env`` (DATABASE_URL → native socket,
+  OLLAMA_HOST → http://localhost:11434 — the existing socat bridge
+  on WSL :11434 already relays to Windows Ollama, so no more
+  host.docker.internal magic); builds the alfred-core venv at
+  ``.venv-alfred-core`` (``pip install -e alfred-core``); downloads
+  Piper voice + pre-warms Whisper into ``.alfred-deps/``; runs
+  ``npm install --legacy-peer-deps`` + ``next build``; installs
+  ``alfred-core.service`` + ``alfred-web.service`` systemd units;
+  ``docker compose down`` (volumes preserved); restarts native
+  services; runs restore-memory.py against the fresh native DB.
+- ``scripts/native/alfred-core.service`` — uvicorn under the venv
+  bin, ``PrivateTmp=yes``, Piper on PATH.
+- ``scripts/native/alfred-web.service`` — ``npm run start`` from
+  the prebuilt ``.next`` standalone bundle.
+- ``scripts/native/uninstall-docker.sh`` — interactive teardown:
+  containers/volumes/images first, then engine packages
+  (docker-ce, containerd.io, buildx, compose-plugin), apt sources,
+  /var/lib/docker. ``--containers-only`` flag keeps the engine
+  installed if the user wants it around for unrelated work.
+
+User runs ONE command on his PC to migrate + restore memory:
+``bash ~/Alfred-ai/scripts/native/go-native.sh``
+
 ## Backlog / roadmap
 - P1: Face polish candidates (user feedback pending): Alfred
   announcing "monitor connected", brow/expression states tied to
