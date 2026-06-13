@@ -41,13 +41,25 @@ export interface ToolSettings {
   size: number;
   /** Ink opacity 0..1 (the tool's own translucency, not the layer's). */
   opacity: number;
+  /**
+   * Stroke smoothing, 0..1 (we surface it to the UI as 0–100%).
+   *
+   * 0 = raw input — every micro-jitter from the stylus comes through;
+   * 1 = maximum smoothing — the cursor "lags" behind the pen but lines
+   * come out silky-clean. Implemented as an exponential filter in
+   * SketchPad: ``smoothed = lerp(smoothed, raw, 1 - streamline*0.95)``.
+   *
+   * Defaults are tool-appropriate — pen leans heavier than pencil,
+   * which wants to feel raw and grippy. Procreate sets per-brush.
+   */
+  streamline: number;
 }
 
 export const DEFAULT_TOOL_SETTINGS: Record<SketchTool, ToolSettings> = {
-  pencil: { size: 5, opacity: 0.72 },
-  pen: { size: 6, opacity: 1 },
-  marker: { size: 16, opacity: 0.32 },
-  eraser: { size: 20, opacity: 1 },
+  pencil: { size: 5, opacity: 0.72, streamline: 0.2 },
+  pen: { size: 6, opacity: 1, streamline: 0.5 },
+  marker: { size: 16, opacity: 0.32, streamline: 0.35 },
+  eraser: { size: 20, opacity: 1, streamline: 0.2 },
 };
 
 export interface SketchSnapshotState {
@@ -189,6 +201,14 @@ class SketchStore {
     if (!Number.isFinite(opacity)) return;
     this.updateActiveTool({
       opacity: Math.max(0.01, Math.min(1, opacity)),
+    });
+  }
+
+  /** Stroke smoothing, 0..1 — 0 raw, 1 maximally streamlined. */
+  setBrushStreamline(streamline: number) {
+    if (!Number.isFinite(streamline)) return;
+    this.updateActiveTool({
+      streamline: Math.max(0, Math.min(1, streamline)),
     });
   }
 

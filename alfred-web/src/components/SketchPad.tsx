@@ -889,6 +889,17 @@ export function SketchPad() {
     }
     if (e.pointerType === "pen") lastPenTimeRef.current = performance.now();
     if (drawing.inert) return;
+    // Streamline (Procreate): exponentially blend the drawn position
+    // toward the raw pointer position. ``streamline=0`` → ``alpha=1``
+    // (raw passthrough, every micro-jitter shows); ``streamline=1`` →
+    // ``alpha=0.05`` (silky-clean lines, cursor visibly "lags"). The
+    // 0.95 cap keeps even the max setting from going so slow strokes
+    // stop following the pen — that floor matches how Procreate feels
+    // at 100%.
+    const streamline =
+      sketchStore.getSnapshot().toolSettings[sketchStore.getSnapshot().tool]
+        ?.streamline ?? 0;
+    const alpha = 1 - streamline * 0.95;
     // Coalesced events give the full-resolution stylus path on
     // 120 Hz+ digitisers instead of one point per frame.
     const native = e.nativeEvent;
@@ -897,14 +908,17 @@ export function SketchPad() {
         ? native.getCoalescedEvents()
         : [native];
     for (const ev of events.length > 0 ? events : [native]) {
-      const pt = toLogical(ev.clientX, ev.clientY);
+      const raw = toLogical(ev.clientX, ev.clientY);
       // Exponential smoothing keeps a jittery pressure sensor from
       // producing lumpy strokes.
       const pressure =
         drawing.pressure * 0.65 + pressureOf(ev.pressure) * 0.35;
-      drawSegment({ x: drawing.x, y: drawing.y }, pt, pressure);
-      drawing.x = pt.x;
-      drawing.y = pt.y;
+      // Streamlined "next" position — blends prev output toward raw.
+      const nextX = drawing.x + (raw.x - drawing.x) * alpha;
+      const nextY = drawing.y + (raw.y - drawing.y) * alpha;
+      drawSegment({ x: drawing.x, y: drawing.y }, { x: nextX, y: nextY }, pressure);
+      drawing.x = nextX;
+      drawing.y = nextY;
       drawing.pressure = pressure;
     }
   }
@@ -944,6 +958,24 @@ export function SketchPad() {
     const drawing = drawingRef.current;
     if (drawing && drawing.pointerId === e.pointerId) {
       clearHoldTimer();
+      // High-streamline strokes leave the smoothed position trailing
+      // behind the lift point. Draw a final short segment from the
+      // smoothed position to the actual lift point so the line ends
+      // where the user actually lifted the pen — Procreate does this
+      // implicitly because its "end-of-stroke" interpolation runs to
+      // completion before commit.
+      if (!drawing.inert) {
+        const lift = toLogical(e.clientX, e.clientY);
+        const dx = lift.x - drawing.x;
+        const dy = lift.y - drawing.y;
+        if (dx * dx + dy * dy > 0.25) {
+          drawSegment(
+            { x: drawing.x, y: drawing.y },
+            lift,
+            drawing.pressure,
+          );
+        }
+      }
       drawingRef.current = null;
       // Finished buffered stroke: composite it onto the layer ONCE
       // at the tool's opacity, then clear the preview buffer.
@@ -1150,6 +1182,31 @@ export function SketchPad() {
             data-testid="sketch-tool-opacity-slider"
             onChange={(e) =>
               sketchStore.setBrushOpacity(Number(e.target.value) / 100)
+            }
+            style={{ width: "100%", accentColor: "var(--hud)" }}
+          />
+          {/* Streamline — exponential stroke smoothing, per tool.
+              Procreate's first-impression "wow that feels good" knob. */}
+          <label
+            className="mono"
+            style={{
+              fontSize: 9,
+              letterSpacing: 1.5,
+              color: "var(--muted)",
+              textAlign: "center",
+            }}
+          >
+            STREAMLINE {Math.round(toolSet.streamline * 100)}%
+          </label>
+          <input
+            type="range"
+            min={0}
+            max={100}
+            step={1}
+            value={Math.round(toolSet.streamline * 100)}
+            data-testid="sketch-streamline-slider"
+            onChange={(e) =>
+              sketchStore.setBrushStreamline(Number(e.target.value) / 100)
             }
             style={{ width: "100%", accentColor: "var(--hud)" }}
           />
