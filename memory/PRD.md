@@ -498,7 +498,62 @@ DE-DOCKER MIGRATION
 User runs ONE command on his PC to migrate + restore memory:
 ``bash ~/Alfred-ai/scripts/native/go-native.sh``
 
-### Sketch pop-out + pen/pencil texture + camera fix (2026-02 fork)
+### Camera-tile root cause is NOT a race — it's /face stealing the camera (2026-02 fork, follow-up)
+
+User rebuilt + reinstalled but reported the camera tile still shows
+ERROR. Wireframe head in the /face popup STILL tracks him though.
+That mismatch was the diagnostic clue: the /face popup window auto-
+opens on Electron startup (``face: "auto"`` config), ran its own
+``useFaceTracking`` with a fallback ``getUserMedia``, and held the
+OS camera **before** the user ever toggled CAM ON in the HUD. So
+HUD's ``useCamera`` was correctly returning NotReadableError (device
+in use), and on consumer webcams two windows cannot share the same
+device.
+
+Fix this round:
+- Extended ``faceBus`` BroadcastChannel protocol with an optional
+  ``gaze`` field (``{x, y, active}``). The HUD's ``useFaceTracking``
+  output now writes into a module-local ``currentGaze`` mailbox via
+  ``publishGaze(...)``; the publisher snapshots it every send.
+- ``FaceWindow`` no longer calls ``useFaceTracking`` at all — no
+  ``getUserMedia``, no MediaPipe init, no camera grab. It subscribes
+  to ``faceBus`` and uses the HUD's gaze data to drive the wireframe
+  head. ``GAZE_STALE_MS = 600 ms`` decays gracefully to ambient drift
+  if the HUD loses the face. Removed the "CAM ON/OFF" toggle from
+  /face (it doesn't have a camera anymore); the gaze indicator now
+  reads ``NO HUD`` / ``SCANNING`` / ``GAZE LOCK`` to reflect what
+  the HUD is doing.
+- Publisher cadence: was 30 Hz while non-idle, 1 Hz heartbeat while
+  idle. Bumped to ``30 Hz whenever the HUD has an active gaze``
+  (otherwise head tracking at 1 Hz looks janky when Alfred is idle
+  but the user is moving).
+- Grain stamping in SketchPad bumped: jitter 0.6→0.85 × lineWidth,
+  dot radius 0.35→0.45 × lineWidth, alpha range 0.4..0.95→0.35..1.0,
+  density 1/0.6 px→1/0.5 px. Pencil now reads obviously chalky.
+
+Files changed this round:
+- ``alfred-web/src/lib/faceBus.ts`` (gaze in protocol)
+- ``alfred-web/src/components/FaceWindow.tsx`` (rewrite — no camera)
+- ``alfred-web/src/components/ChatWindow.tsx`` (publishGaze wiring)
+- ``alfred-web/src/components/SketchPad.tsx`` (beefier grain)
+
+Verification by user (rebuild order MATTERS):
+1. ``git pull`` the latest changes onto the Desktop.
+2. ``docker compose build --no-cache alfred-web && docker compose up -d alfred-web``
+   — ``--no-cache`` because the Dockerfile's ``COPY . .`` can
+   sometimes hit a stale layer if the host file mtimes haven't
+   advanced (mounted volumes / WSL clock skew).
+3. **Also rebuild the Electron desktop app**:
+   ``cd alfred-desktop && yarn install && yarn dist``
+   then run the newly-built installer from ``dist/``.
+   The POP TO TOUCHSCREEN bug and the sketch monitor routing logic
+   live in ``alfred-desktop/main.js`` — they do NOT come from the
+   alfred-web Docker container, they come from the Electron .exe.
+4. Reload the HUD. Toggle CAM ON → live preview should appear
+   within ~2 s, error banner should NOT show. /face popup should
+   still track the user.
+
+
 User feedback after the Desktop migration:
 1. "i dont like how the pen and pencil draw the same exact way" —
    they had different pressure curves but visually identical strokes.

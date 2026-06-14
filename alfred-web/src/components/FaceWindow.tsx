@@ -7,20 +7,34 @@
  *
  * Composition:
  *   - WireframeFace fills the viewport (the wire-mesh avatar).
- *   - faceBus subscription feeds it live mode + TTS amplitude from
- *     the HUD window → lip-sync. A stale bus (no heartbeat for 4 s)
- *     degrades gracefully to STANDBY.
- *   - useFaceTracking (MediaPipe, this window's own camera grab)
- *     turns the user's face position into a gaze target so the head
- *     looks directly at them. No camera → ambient idle drift.
+ *   - faceBus subscription feeds it live mode + TTS amplitude +
+ *     gaze direction from the HUD window. A stale bus (no
+ *     heartbeat for 4 s) degrades gracefully to STANDBY + ambient
+ *     idle drift.
  *   - Tap anywhere → toggle fullscreen (kiosk look on the touchscreen).
+ *
+ * Camera ownership: BEFORE 2026-02 this window ran its own
+ * ``useFaceTracking`` (a second ``getUserMedia`` call) to drive
+ * gaze. That worked in isolation but collided with the HUD's
+ * ``useCamera`` the moment the user toggled CAM ON in the HUD —
+ * the OS device was already locked by /face, so useCamera failed
+ * with NotReadableError and the HUD's camera preview tile sat at
+ * ``ERROR``. The user's exact report: "the wire mesh face still
+ * follows me but the camera picture just says error on it".
+ *
+ * Fix: the HUD's face tracker is now the single source of truth.
+ * It republishes gaze direction (x, y, active) into the same
+ * BroadcastChannel that already carries mode/level for lip-sync.
+ * /face just subscribes — no camera grab here. The OS camera
+ * light comes on exactly once (when the user toggles CAM ON in
+ * the HUD), and both the HUD's preview tile AND this window's
+ * wireframe head see the same face data.
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { subscribeFaceBus } from "@/lib/faceBus";
 import type { OrbMode } from "@/lib/orbState";
-import { useFaceTracking } from "@/lib/useFaceTracking";
 import { WireframeFace, type GazeTarget } from "@/components/WireframeFace";
 
 const MODE_LABEL: Record<OrbMode, string> = {
@@ -32,25 +46,37 @@ const MODE_LABEL: Record<OrbMode, string> = {
 
 const LINK_STALE_MS = 4000;
 const LEVEL_STALE_MS = 400;
+/** Gaze decays slightly faster than level — when the HUD's face
+ *  tracker loses the user, /face should stop pointing at the old
+ *  position within ~600 ms (one slow head turn). The HUD publisher
+ *  emits ``gaze: null`` immediately when the face is lost so this
+ *  upper bound is only hit if the HUD itself crashes mid-track. */
+const GAZE_STALE_MS = 600;
 
 export function FaceWindow() {
-  const busRef = useRef<{ mode: OrbMode; level: number; at: number }>({
+  const busRef = useRef<{
+    mode: OrbMode;
+    level: number;
+    /** Last gaze update from the HUD. ``null`` = no face right now;
+     *  ``at`` is a separate timestamp because gaze can go stale
+     *  faster than the overall HUD link does (a stuck HUD link is
+     *  silence; a stale gaze means the user walked away). */
+    gaze: GazeTarget | null;
+    gazeAt: number;
+    at: number;
+  }>({
     mode: "idle",
     level: 0,
+    gaze: null,
+    gazeAt: 0,
     at: 0,
   });
   const gazeRef = useRef<GazeTarget>({ x: 0, y: 0, active: false });
 
   const [linked, setLinked] = useState(false);
   const [modeLabel, setModeLabel] = useState("AWAITING HUD LINK");
-  const [camEnabled, setCamEnabled] = useState(true);
+  const [hudHasFace, setHudHasFace] = useState(false);
   const [hintVisible, setHintVisible] = useState(true);
-
-  const {
-    status: camStatus,
-    face,
-    videoRef,
-  } = useFaceTracking({ enabled: camEnabled, detectionIntervalMs: 66 });
 
   useEffect(() => {
     document.title = "Alfred — Face";
@@ -59,42 +85,52 @@ export function FaceWindow() {
   useEffect(
     () =>
       subscribeFaceBus((s) => {
-        busRef.current = { mode: s.mode, level: s.level, at: Date.now() };
+        const now = Date.now();
+        const prev = busRef.current;
+        busRef.current = {
+          mode: s.mode,
+          level: s.level,
+          // Only refresh the gaze timestamp when the HUD actually
+          // sent a fresh sample — heartbeat messages with no face
+          // arrive with ``gaze: null`` and shouldn't reset
+          // gazeAt (we'd never time out otherwise).
+          gaze: s.gaze
+            ? { x: s.gaze.x, y: s.gaze.y, active: s.gaze.active }
+            : prev.gaze,
+          gazeAt: s.gaze ? now : prev.gazeAt,
+          at: now,
+        };
       }),
     [],
   );
 
   // Low-frequency chrome refresh — the 3D loop reads refs directly,
-  // so React only needs to repaint the text indicators twice a second.
+  // so React only needs to repaint the text indicators twice a
+  // second. We also re-derive the freshness of the gaze ref here
+  // so the visible indicator and the 3D head agree on whether the
+  // HUD currently sees a face.
   useEffect(() => {
     const id = window.setInterval(() => {
       const b = busRef.current;
-      const fresh = Date.now() - b.at < LINK_STALE_MS;
-      setLinked(fresh);
-      setModeLabel(fresh ? MODE_LABEL[b.mode] : "AWAITING HUD LINK");
-    }, 500);
+      const now = Date.now();
+      const linkFresh = now - b.at < LINK_STALE_MS;
+      const gazeFresh =
+        linkFresh && b.gaze !== null && now - b.gazeAt < GAZE_STALE_MS;
+      setLinked(linkFresh);
+      setModeLabel(linkFresh ? MODE_LABEL[b.mode] : "AWAITING HUD LINK");
+      setHudHasFace(gazeFresh && b.gaze?.active === true);
+      // Refresh the 3D head's gaze ref. When the gaze goes stale we
+      // hand WireframeFace an inactive target — it then falls back
+      // to its built-in ambient idle drift instead of locking on
+      // whatever the last reported (x, y) was.
+      if (gazeFresh && b.gaze && b.gaze.active) {
+        gazeRef.current = { x: b.gaze.x, y: b.gaze.y, active: true };
+      } else {
+        gazeRef.current = { ...gazeRef.current, active: false };
+      }
+    }, 250);
     return () => window.clearInterval(id);
   }, []);
-
-  // Webcam face → normalized gaze target. The landmarks are already
-  // mirrored (selfie view), so "where your image appears" IS the
-  // direction you are relative to the screen — the head just looks
-  // at that point.
-  useEffect(() => {
-    if (!face) {
-      gazeRef.current = { ...gazeRef.current, active: false };
-      return;
-    }
-    const vw = window.innerWidth || 1;
-    const vh = window.innerHeight || 1;
-    const cx = face.bbox.x + face.bbox.w / 2;
-    const cy = face.bbox.y + face.bbox.h / 2;
-    gazeRef.current = {
-      x: (cx / vw) * 2 - 1,
-      y: (cy / vh) * 2 - 1,
-      active: true,
-    };
-  }, [face]);
 
   // Fade the fullscreen hint after a few seconds.
   useEffect(() => {
@@ -120,16 +156,16 @@ export function FaceWindow() {
     }
   }, []);
 
-  const gazeLabel = !camEnabled
-    ? "CAM OFF"
-    : camStatus === "error"
-      ? "CAM OFFLINE"
-      : face
-        ? "GAZE LOCK"
-        : camStatus === "ready"
-          ? "SCANNING"
-          : "CAM INIT";
-  const gazeLocked = camEnabled && !!face;
+  // Gaze indicator now reflects what the HUD's face tracker is
+  // doing, not a /face-local camera state. Three states map
+  // cleanly: no HUD link → "NO HUD"; HUD linked but no face this
+  // frame → "SCANNING"; HUD linked AND face present → "GAZE LOCK".
+  const gazeLabel = !linked
+    ? "NO HUD"
+    : hudHasFace
+      ? "GAZE LOCK"
+      : "SCANNING";
+  const gazeLocked = hudHasFace;
 
   return (
     <div
@@ -147,14 +183,6 @@ export function FaceWindow() {
       }}
     >
       <WireframeFace getMode={getMode} getLevel={getLevel} getGaze={getGaze} />
-
-      {/* Hidden camera element required by useFaceTracking. */}
-      <video
-        ref={videoRef as React.RefObject<HTMLVideoElement>}
-        muted
-        playsInline
-        style={{ display: "none" }}
-      />
 
       {/* ── Top-left: identity + mode ─────────────────────────── */}
       <div
@@ -243,26 +271,6 @@ export function FaceWindow() {
           />
           {gazeLabel}
         </div>
-        <button
-          data-testid="face-window-camera-toggle"
-          onClick={(e) => {
-            e.stopPropagation();
-            setCamEnabled((v) => !v);
-          }}
-          style={{
-            marginTop: 4,
-            background: "transparent",
-            border: "1px solid var(--border)",
-            color: camEnabled ? "var(--hud)" : "var(--muted)",
-            fontFamily: "inherit",
-            fontSize: 10,
-            letterSpacing: 3,
-            padding: "7px 14px",
-            cursor: "pointer",
-          }}
-        >
-          CAM {camEnabled ? "ON" : "OFF"}
-        </button>
       </div>
 
       {/* ── Bottom: fullscreen hint ────────────────────────────── */}

@@ -680,36 +680,35 @@ function BrushPreviewChip(props: {
     const segs = 24;
     const lineWidth = Math.max(0.6, Math.min(h - 6, size));
     if (texture === "grainy") {
-      const coreWidth = Math.max(0.4, lineWidth * 0.6);
+      const coreWidth = Math.max(0.4, lineWidth * 0.45);
       ctx.lineWidth = coreWidth;
-      ctx.globalAlpha = opacity * 0.55;
+      // Faint core — even fainter than the runtime stroke so the
+      // chip leans extra-pencilly visually; the stamps below carry
+      // the readable weight.
+      ctx.globalAlpha = opacity * 0.35;
       ctx.beginPath();
       ctx.moveTo(x0, y);
       ctx.lineTo(x1, y);
       ctx.stroke();
-      const dotRadius = Math.max(0.4, lineWidth * 0.35);
-      const jitter = Math.max(0.8, lineWidth * 0.6);
-      // Same stamp density as drawSegment so the chip predicts the
-      // real result accurately.
+      const dotRadius = Math.max(0.5, lineWidth * 0.45);
+      const jitter = Math.max(1, lineWidth * 0.85);
       const totalLen = x1 - x0;
       const stampsPerSeg = Math.max(
         1,
-        Math.ceil(totalLen / segs / Math.max(1, lineWidth * 0.6)),
+        Math.ceil(totalLen / segs / Math.max(1, lineWidth * 0.5)),
       );
       for (let i = 0; i < segs; i++) {
         for (let k = 0; k < stampsPerSeg; k++) {
           const t = (i + (k + 0.5) / stampsPerSeg) / segs;
           const cx = x0 + (x1 - x0) * t;
-          const ox =
-            (Math.random() + Math.random() - 1) * jitter;
-          const oy =
-            (Math.random() + Math.random() - 1) * jitter;
-          ctx.globalAlpha = opacity * (0.4 + Math.random() * 0.55);
+          const ox = (Math.random() + Math.random() - 1) * jitter;
+          const oy = (Math.random() + Math.random() - 1) * jitter;
+          ctx.globalAlpha = opacity * (0.35 + Math.random() * 0.65);
           ctx.beginPath();
           ctx.arc(
             cx + ox,
             y + oy,
-            dotRadius * (0.7 + Math.random() * 0.6),
+            dotRadius * (0.6 + Math.random() * 0.8),
             0,
             Math.PI * 2,
           );
@@ -988,16 +987,16 @@ export function SketchPad() {
     // result reads as graphite rather than ink. Smooth tools (pen,
     // marker, eraser) keep the existing crisp single stroke.
     if (cfg.texture === "grainy") {
-      // Core line at ~60% of the nominal width so the grain dots
-      // (drawn next) carry most of the visual weight — same idea
-      // as Procreate's pencil brushes, where the texture is the
-      // mark, not a halo around a solid line.
-      const coreWidth = Math.max(0.4, lineWidth * 0.6);
+      // Core line at ~45% of nominal width and very low alpha so
+      // the grain dots (drawn next) carry the visible weight —
+      // same idea as Procreate's pencil brushes, where the
+      // texture is the mark, not a halo around a solid line.
+      const coreWidth = Math.max(0.4, lineWidth * 0.45);
       const prevAlpha = ctx.globalAlpha;
       ctx.lineWidth = coreWidth;
       // Faint core — keeps the line readable when the user draws
       // very slowly (so stamps don't overlap densely).
-      ctx.globalAlpha = prevAlpha * 0.55;
+      ctx.globalAlpha = prevAlpha * 0.35;
       ctx.beginPath();
       ctx.moveTo(from.x, from.y);
       ctx.lineTo(to.x, to.y);
@@ -1008,14 +1007,14 @@ export function SketchPad() {
       // continuous grain, and dot size is proportional to line
       // width so the texture scales with the brush.
       const segLen = Math.hypot(to.x - from.x, to.y - from.y);
-      // ~1 stamp per (0.6 × lineWidth) pixels of travel — dense
+      // ~1 stamp per (0.5 × lineWidth) pixels of travel — dense
       // enough to look continuous, sparse enough to be cheap.
       const stamps = Math.min(
-        24,
-        Math.max(1, Math.ceil(segLen / Math.max(1, lineWidth * 0.6))),
+        32,
+        Math.max(1, Math.ceil(segLen / Math.max(1, lineWidth * 0.5))),
       );
-      const dotRadius = Math.max(0.4, lineWidth * 0.35);
-      const jitter = Math.max(0.8, lineWidth * 0.6);
+      const dotRadius = Math.max(0.5, lineWidth * 0.45);
+      const jitter = Math.max(1, lineWidth * 0.85);
       for (let i = 0; i < stamps; i++) {
         const t = (i + 0.5) / stamps;
         const cx = from.x + (to.x - from.x) * t;
@@ -1029,13 +1028,13 @@ export function SketchPad() {
           (Math.random() + Math.random() - 1) * jitter;
         // Per-dot alpha variation — some grains are darker, some
         // fainter, which is what gives graphite its broken edge.
-        const dotAlpha = prevAlpha * (0.4 + Math.random() * 0.55);
+        const dotAlpha = prevAlpha * (0.35 + Math.random() * 0.65);
         ctx.globalAlpha = dotAlpha;
         ctx.beginPath();
         ctx.arc(
           cx + ox,
           cy + oy,
-          dotRadius * (0.7 + Math.random() * 0.6),
+          dotRadius * (0.6 + Math.random() * 0.8),
           0,
           Math.PI * 2,
         );

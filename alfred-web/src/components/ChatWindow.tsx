@@ -85,7 +85,7 @@ import { RadialMenu, type RadialMenuItem } from "@/components/RadialMenu";
 import { Spotify3DView } from "@/components/Spotify3DView";
 import { WorkshopView } from "@/components/WorkshopView";
 import { FaceModeView } from "@/components/FaceModeView";
-import { startFaceBusPublisher } from "@/lib/faceBus";
+import { publishGaze, startFaceBusPublisher } from "@/lib/faceBus";
 import { startFaceAutoLaunch } from "@/lib/faceScreen";
 import { VitalsPanel } from "@/components/VitalsPanel";
 import { HandsFreeOverlay } from "@/components/HandsFreeOverlay";
@@ -1008,6 +1008,30 @@ export function ChatWindow() {
     faceStatus: face.status,
     enabled: cameraOn,
   });
+
+  // Republish the HUD's face position to the /face popup so its
+  // wireframe head can track the user without needing its own
+  // camera grab. This is what closes the camera-tile blank bug:
+  // ONE camera (HUD), TWO consumers (HUD widgets + /face avatar)
+  // wired together via the same BroadcastChannel that already
+  // carries mode/level for lip-sync. See faceBus.ts for the
+  // protocol and the ownership-note comment block.
+  useEffect(() => {
+    const f = face.face;
+    if (!f) {
+      publishGaze({ x: 0, y: 0, active: false });
+      return;
+    }
+    const vw = window.innerWidth || 1;
+    const vh = window.innerHeight || 1;
+    const cx = f.bbox.x + f.bbox.w / 2;
+    const cy = f.bbox.y + f.bbox.h / 2;
+    publishGaze({
+      x: (cx / vw) * 2 - 1,
+      y: (cy / vh) * 2 - 1,
+      active: true,
+    });
+  }, [face.face]);
 
   // Two-hand "sliding-door" gesture switches between the HUD,
   // CHAT, and DESIGN tabs. We feed it the same hand state the
