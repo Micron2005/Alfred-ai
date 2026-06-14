@@ -694,21 +694,44 @@ function ColorDropdown(props: {
       const el = triggerRef.current;
       if (!el) return;
       const rect = el.getBoundingClientRect();
-      const PANEL_H_ESTIMATE = 360; // big enough to cover the worst case
-      const PANEL_MARGIN = 12;
+      const PANEL_W = 220; // matches the panel style.width below
+      const PANEL_H_ESTIMATE = 360;
+      const MARGIN = 12;
+      const vw = window.innerWidth;
       const vh = window.innerHeight;
-      // Prefer aligning to the top of the button; if that would
-      // overflow the viewport bottom, slide upward until the panel
-      // fits with a 12 px margin. The minimum clamp at 12 px keeps
-      // a margin from the top too if the viewport itself is tiny.
+
+      // Horizontal: prefer the right side of the button (the
+      // dropdown's natural side when the trigger lives in the
+      // LEFT rail of the HUD's design tab), but flip to the LEFT
+      // side when that would clip off the viewport. The new
+      // Procreate-style /sketch popout puts the color drop in the
+      // RIGHT-edge toolrail, so the panel needs to live to its
+      // left or it falls off-screen — the user-reported "popping
+      // out on the edge of the right side when the left side
+      // would be perfectly fine" bug.
+      const rightAnchorLeft = rect.right + MARGIN;
+      let left = rightAnchorLeft;
+      if (rightAnchorLeft + PANEL_W > vw - MARGIN) {
+        // Flip to left side: panel ends at button.left - margin.
+        left = rect.left - PANEL_W - MARGIN;
+      }
+      // Final clamp so the panel never falls outside the viewport
+      // even on degenerate layouts (small windows, popped sketch
+      // on a 720 p touchscreen, etc).
+      left = Math.max(
+        MARGIN,
+        Math.min(left, vw - PANEL_W - MARGIN),
+      );
+
+      // Vertical: prefer aligning to the top of the button; if
+      // that would overflow the viewport bottom, slide upward
+      // until the panel fits. ``Math.max(MARGIN, ...)`` keeps a
+      // margin from the top too if the viewport itself is tiny.
       const desiredTop = rect.top;
-      const maxTop = vh - PANEL_H_ESTIMATE - PANEL_MARGIN;
-      const top = Math.max(PANEL_MARGIN, Math.min(desiredTop, maxTop));
-      setAnchor({
-        // 12 px gap to the right of the button.
-        left: Math.round(rect.right + 12),
-        top: Math.round(top),
-      });
+      const maxTop = vh - PANEL_H_ESTIMATE - MARGIN;
+      const top = Math.max(MARGIN, Math.min(desiredTop, maxTop));
+
+      setAnchor({ left: Math.round(left), top: Math.round(top) });
     };
     recompute();
     window.addEventListener("resize", recompute);
