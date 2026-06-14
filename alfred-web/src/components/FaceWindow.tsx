@@ -46,12 +46,31 @@ const MODE_LABEL: Record<OrbMode, string> = {
 
 const LINK_STALE_MS = 4000;
 const LEVEL_STALE_MS = 400;
-/** Gaze decays slightly faster than level — when the HUD's face
- *  tracker loses the user, /face should stop pointing at the old
- *  position within ~600 ms (one slow head turn). The HUD publisher
- *  emits ``gaze: null`` immediately when the face is lost so this
- *  upper bound is only hit if the HUD itself crashes mid-track. */
-const GAZE_STALE_MS = 600;
+/**
+ * Gaze decay window. Set high enough that brief detection
+ * dropouts (MediaPipe occasionally misses a frame or two when
+ * the user blinks, looks down, or briefly leaves the frame
+ * edge) don't cause the wireframe head to snap to centre and
+ * back — that bounce was the user-reported "constantly
+ * rescanning where I am and thinks I'm moving around" issue.
+ *
+ * 2.5 s is long enough to ride out short MediaPipe stalls but
+ * short enough that the head DOES recentre if the user actually
+ * walks away (any longer feels uncanny — the head keeps staring
+ * at the empty chair).
+ */
+const GAZE_STALE_MS = 2500;
+/**
+ * Per-frame EMA blend weight for incoming gaze samples. New
+ * sample contributes ``GAZE_SMOOTH`` of its value, the running
+ * smoothed value contributes ``1 - GAZE_SMOOTH``. Low values =
+ * heavy smoothing (laggy but rock-steady); high values =
+ * snappy (responsive but noisier). 0.18 lands in the sweet
+ * spot where micro-jitter from MediaPipe's per-frame
+ * bounding-box noise is filtered out but real head movement
+ * still tracks within ~150 ms.
+ */
+const GAZE_SMOOTH = 0.18;
 
 export function FaceWindow() {
   const busRef = useRef<{
@@ -119,16 +138,28 @@ export function FaceWindow() {
       setLinked(linkFresh);
       setModeLabel(linkFresh ? MODE_LABEL[b.mode] : "AWAITING HUD LINK");
       setHudHasFace(gazeFresh && b.gaze?.active === true);
-      // Refresh the 3D head's gaze ref. When the gaze goes stale we
-      // hand WireframeFace an inactive target — it then falls back
-      // to its built-in ambient idle drift instead of locking on
-      // whatever the last reported (x, y) was.
+      // Refresh the 3D head's gaze ref with EMA smoothing. The
+      // raw per-frame samples from MediaPipe shake a few pixels
+      // each frame even when the user is still — without
+      // smoothing the head jitters around them. When the gaze
+      // goes stale we hand WireframeFace an inactive target so
+      // it falls back to its built-in ambient idle drift instead
+      // of locking on whatever the last reported (x, y) was.
       if (gazeFresh && b.gaze && b.gaze.active) {
-        gazeRef.current = { x: b.gaze.x, y: b.gaze.y, active: true };
+        const prev = gazeRef.current;
+        const w = GAZE_SMOOTH;
+        // If the previous sample was inactive (user just walked
+        // back in), snap to the new value rather than easing in
+        // from (0,0) — that ease-in reads as the head "scanning"
+        // the room before finding you, which feels weirder than
+        // an instant lock.
+        const x = prev.active ? prev.x * (1 - w) + b.gaze.x * w : b.gaze.x;
+        const y = prev.active ? prev.y * (1 - w) + b.gaze.y * w : b.gaze.y;
+        gazeRef.current = { x, y, active: true };
       } else {
         gazeRef.current = { ...gazeRef.current, active: false };
       }
-    }, 250);
+    }, 50);
     return () => window.clearInterval(id);
   }, []);
 

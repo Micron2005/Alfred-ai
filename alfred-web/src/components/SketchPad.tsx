@@ -677,43 +677,55 @@ function BrushPreviewChip(props: {
     const y = h / 2;
     const x0 = 8;
     const x1 = w - 8;
-    const segs = 24;
     const lineWidth = Math.max(0.6, Math.min(h - 6, size));
     if (texture === "grainy") {
-      const coreWidth = Math.max(0.4, lineWidth * 0.45);
-      ctx.lineWidth = coreWidth;
-      // Faint core — even fainter than the runtime stroke so the
-      // chip leans extra-pencilly visually; the stamps below carry
-      // the readable weight.
-      ctx.globalAlpha = opacity * 0.35;
+      // Mirror SketchPad's drawSegment grainy path: halo + body +
+      // spine + sparse grain. See the long comment in
+      // ``drawSegment`` for the model.
+      const baseAlpha = opacity;
+      // 1. Halo
+      ctx.lineWidth = Math.max(0.5, lineWidth * 1.2);
+      ctx.globalAlpha = baseAlpha * 0.12;
       ctx.beginPath();
       ctx.moveTo(x0, y);
       ctx.lineTo(x1, y);
       ctx.stroke();
-      const dotRadius = Math.max(0.5, lineWidth * 0.45);
-      const jitter = Math.max(1, lineWidth * 0.85);
+      // 2. Body
+      ctx.lineWidth = Math.max(0.4, lineWidth * 0.8);
+      ctx.globalAlpha = baseAlpha * 0.4;
+      ctx.beginPath();
+      ctx.moveTo(x0, y);
+      ctx.lineTo(x1, y);
+      ctx.stroke();
+      // 3. Spine
+      ctx.lineWidth = Math.max(0.3, lineWidth * 0.45);
+      ctx.globalAlpha = baseAlpha * 0.75;
+      ctx.beginPath();
+      ctx.moveTo(x0, y);
+      ctx.lineTo(x1, y);
+      ctx.stroke();
+      // 4. Grain
       const totalLen = x1 - x0;
-      const stampsPerSeg = Math.max(
+      const stamps = Math.max(
         1,
-        Math.ceil(totalLen / segs / Math.max(1, lineWidth * 0.5)),
+        Math.floor(totalLen / Math.max(1, lineWidth * 2)),
       );
-      for (let i = 0; i < segs; i++) {
-        for (let k = 0; k < stampsPerSeg; k++) {
-          const t = (i + (k + 0.5) / stampsPerSeg) / segs;
-          const cx = x0 + (x1 - x0) * t;
-          const ox = (Math.random() + Math.random() - 1) * jitter;
-          const oy = (Math.random() + Math.random() - 1) * jitter;
-          ctx.globalAlpha = opacity * (0.35 + Math.random() * 0.65);
-          ctx.beginPath();
-          ctx.arc(
-            cx + ox,
-            y + oy,
-            dotRadius * (0.6 + Math.random() * 0.8),
-            0,
-            Math.PI * 2,
-          );
-          ctx.fill();
-        }
+      const dotR = Math.max(0.35, lineWidth * 0.18);
+      const lateral = Math.max(0.5, lineWidth * 0.35);
+      for (let i = 0; i < stamps; i++) {
+        const t = (i + 0.3 + Math.random() * 0.4) / stamps;
+        const cx = x0 + totalLen * t;
+        const lateralOff = (Math.random() - 0.5) * 2 * lateral;
+        ctx.globalAlpha = baseAlpha * (0.18 + Math.random() * 0.18);
+        ctx.beginPath();
+        ctx.arc(
+          cx,
+          y + lateralOff,
+          dotR * (0.85 + Math.random() * 0.3),
+          0,
+          Math.PI * 2,
+        );
+        ctx.fill();
       }
     } else {
       ctx.globalAlpha = opacity;
@@ -987,58 +999,93 @@ export function SketchPad() {
     // result reads as graphite rather than ink. Smooth tools (pen,
     // marker, eraser) keep the existing crisp single stroke.
     if (cfg.texture === "grainy") {
-      // Core line at ~45% of nominal width and very low alpha so
-      // the grain dots (drawn next) carry the visible weight —
-      // same idea as Procreate's pencil brushes, where the
-      // texture is the mark, not a halo around a solid line.
-      const coreWidth = Math.max(0.4, lineWidth * 0.45);
+      // Procreate-style pencil — three concentric passes plus a
+      // sparse grain layer. The result reads as soft graphite, NOT
+      // the jittery stippling the previous pass produced (which
+      // the user called out as "too scratchy, not like Procreate").
+      //
+      // Pass model:
+      //   1. Halo  — slightly wider than nominal, very low alpha.
+      //              Gives the line a soft outer edge instead of
+      //              a hard stroke boundary.
+      //   2. Body  — at ~80% nominal width, mid-low alpha. The
+      //              bulk of the visible weight.
+      //   3. Spine — narrow, higher alpha. The visible darkest
+      //              centre line that makes the stroke feel like
+      //              graphite has pressed into paper.
+      //   4. Grain — a SMALL handful of jittered dots placed
+      //              perpendicular to the path, low alpha. Adds
+      //              just enough breakup to read as graphite
+      //              without the previous scratchy look.
+      //
+      // All passes share the same start/end points so the
+      // perceived stroke geometry stays smooth; the user's input
+      // is faithfully represented in the spine, with halo + body
+      // softening the edges.
       const prevAlpha = ctx.globalAlpha;
-      ctx.lineWidth = coreWidth;
-      // Faint core — keeps the line readable when the user draws
-      // very slowly (so stamps don't overlap densely).
-      ctx.globalAlpha = prevAlpha * 0.35;
+      const baseAlpha = prevAlpha;
+
+      // 1. Halo
+      ctx.lineWidth = Math.max(0.5, lineWidth * 1.2);
+      ctx.globalAlpha = baseAlpha * 0.12;
       ctx.beginPath();
       ctx.moveTo(from.x, from.y);
       ctx.lineTo(to.x, to.y);
       ctx.stroke();
-      ctx.globalAlpha = prevAlpha;
-      // Stamp small jittered dots along the segment. Density is
-      // proportional to segment length so fast strokes still get
-      // continuous grain, and dot size is proportional to line
-      // width so the texture scales with the brush.
-      const segLen = Math.hypot(to.x - from.x, to.y - from.y);
-      // ~1 stamp per (0.5 × lineWidth) pixels of travel — dense
-      // enough to look continuous, sparse enough to be cheap.
-      const stamps = Math.min(
-        32,
-        Math.max(1, Math.ceil(segLen / Math.max(1, lineWidth * 0.5))),
-      );
-      const dotRadius = Math.max(0.5, lineWidth * 0.45);
-      const jitter = Math.max(1, lineWidth * 0.85);
-      for (let i = 0; i < stamps; i++) {
-        const t = (i + 0.5) / stamps;
-        const cx = from.x + (to.x - from.x) * t;
-        const cy = from.y + (to.y - from.y) * t;
-        // Box-Muller-ish quick gaussian: average two uniforms so
-        // jitter clusters near the centre line, mimicking how
-        // pencil pigment falls heaviest along the stroke axis.
-        const ox =
-          (Math.random() + Math.random() - 1) * jitter;
-        const oy =
-          (Math.random() + Math.random() - 1) * jitter;
-        // Per-dot alpha variation — some grains are darker, some
-        // fainter, which is what gives graphite its broken edge.
-        const dotAlpha = prevAlpha * (0.35 + Math.random() * 0.65);
-        ctx.globalAlpha = dotAlpha;
-        ctx.beginPath();
-        ctx.arc(
-          cx + ox,
-          cy + oy,
-          dotRadius * (0.6 + Math.random() * 0.8),
-          0,
-          Math.PI * 2,
+
+      // 2. Body
+      ctx.lineWidth = Math.max(0.4, lineWidth * 0.8);
+      ctx.globalAlpha = baseAlpha * 0.4;
+      ctx.beginPath();
+      ctx.moveTo(from.x, from.y);
+      ctx.lineTo(to.x, to.y);
+      ctx.stroke();
+
+      // 3. Spine
+      ctx.lineWidth = Math.max(0.3, lineWidth * 0.45);
+      ctx.globalAlpha = baseAlpha * 0.75;
+      ctx.beginPath();
+      ctx.moveTo(from.x, from.y);
+      ctx.lineTo(to.x, to.y);
+      ctx.stroke();
+
+      // 4. Subtle grain — sparse, perpendicular to stroke. Tiny
+      // dots placed roughly along the spine with small lateral
+      // offsets to suggest paper grain. Way fewer + softer than
+      // the previous implementation: about ONE dot per (line × 2)
+      // pixels of travel, alpha varying gently around 0.25 ×
+      // base.
+      const dx = to.x - from.x;
+      const dy = to.y - from.y;
+      const segLen = Math.hypot(dx, dy);
+      if (segLen > 0.5) {
+        // Unit perpendicular for lateral jitter.
+        const nx = -dy / segLen;
+        const ny = dx / segLen;
+        const stamps = Math.max(
+          1,
+          Math.floor(segLen / Math.max(1, lineWidth * 2)),
         );
-        ctx.fill();
+        const dotR = Math.max(0.35, lineWidth * 0.18);
+        const lateral = Math.max(0.5, lineWidth * 0.35);
+        for (let i = 0; i < stamps; i++) {
+          // Slight irregular spacing along the stroke so the grain
+          // doesn't look gridded.
+          const t = (i + 0.3 + Math.random() * 0.4) / stamps;
+          const cx = from.x + dx * t;
+          const cy = from.y + dy * t;
+          const lateralOff = (Math.random() - 0.5) * 2 * lateral;
+          ctx.globalAlpha = baseAlpha * (0.18 + Math.random() * 0.18);
+          ctx.beginPath();
+          ctx.arc(
+            cx + nx * lateralOff,
+            cy + ny * lateralOff,
+            dotR * (0.85 + Math.random() * 0.3),
+            0,
+            Math.PI * 2,
+          );
+          ctx.fill();
+        }
       }
       ctx.globalAlpha = prevAlpha;
     } else {

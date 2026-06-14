@@ -1016,11 +1016,21 @@ export function ChatWindow() {
   // wired together via the same BroadcastChannel that already
   // carries mode/level for lip-sync. See faceBus.ts for the
   // protocol and the ownership-note comment block.
+  //
+  // Publisher-side grace period: when MediaPipe drops the face
+  // for a single frame, the user is almost always still there —
+  // they blinked, looked down, or partially obscured a feature.
+  // Don't broadcast "no face" until the dropout persists for
+  // ~250 ms. /face has its own EMA + stale window on top of
+  // this; together the two filters keep the wireframe head from
+  // bouncing around the room when the user is sitting still.
   useEffect(() => {
     const f = face.face;
     if (!f) {
-      publishGaze({ x: 0, y: 0, active: false });
-      return;
+      const t = window.setTimeout(() => {
+        publishGaze({ x: 0, y: 0, active: false });
+      }, 250);
+      return () => window.clearTimeout(t);
     }
     const vw = window.innerWidth || 1;
     const vh = window.innerHeight || 1;

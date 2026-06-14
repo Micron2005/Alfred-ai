@@ -545,6 +545,72 @@ function updateTrayMenu() {
         },
       },
       { type: "separator" },
+      // Submenu listing every connected display so the user can
+      // explicitly pin the sketch window to whichever monitor IS
+      // their touchscreen — useful when ``sketchResolution: "auto"``
+      // guessed wrong (e.g. Electron didn't detect the touch
+      // capability flag on the monitor, or you have multiple
+      // touchscreens and want to override the auto pick).
+      {
+        label: "Sketch Window → Display…",
+        submenu: [
+          ...screen.getAllDisplays().map((d, idx) => {
+            const primary = screen.getPrimaryDisplay();
+            const isPrimary = d.id === primary.id;
+            const phys = physicalSize(d);
+            const touch =
+              d.touchSupport === "available"
+                ? " · touch"
+                : d.touchSupport === "unavailable"
+                  ? ""
+                  : " · ?touch";
+            return {
+              label: `${idx + 1}. ${phys.w}×${phys.h}${isPrimary ? " · primary" : ""}${touch}`,
+              type: "radio",
+              checked:
+                config.sketchResolution === `${phys.w}x${phys.h}` ||
+                (config.sketchResolution === "auto" && pickSketchDisplay()?.id === d.id) ||
+                (config.sketchResolution === "primary" && isPrimary),
+              click: () => {
+                config.sketchResolution = `${phys.w}x${phys.h}`;
+                saveConfig();
+                // Close any existing sketch window so the next POP
+                // click opens it on the new display. The window
+                // itself can't move across displays cleanly when
+                // it's fullscreen so a reopen is simplest.
+                if (sketchWin && !sketchWin.isDestroyed()) {
+                  sketchWin.close();
+                }
+                updateTrayMenu();
+              },
+            };
+          }),
+          { type: "separator" },
+          {
+            label: "Auto (pick the other touch monitor)",
+            type: "radio",
+            checked: config.sketchResolution === "auto",
+            click: () => {
+              config.sketchResolution = "auto";
+              saveConfig();
+              if (sketchWin && !sketchWin.isDestroyed()) sketchWin.close();
+              updateTrayMenu();
+            },
+          },
+        ],
+      },
+      {
+        label: "Sketch Window Fullscreen",
+        type: "checkbox",
+        checked: !!config.sketchFullscreen,
+        click: (item) => {
+          config.sketchFullscreen = item.checked;
+          saveConfig();
+          if (sketchWin && !sketchWin.isDestroyed()) sketchWin.close();
+          updateTrayMenu();
+        },
+      },
+      { type: "separator" },
       {
         label: "Start with Windows",
         type: "checkbox",
