@@ -161,12 +161,16 @@ export function useCamera(opts: UseCameraOptions): UseCameraReturn {
     setError(null);
 
     void (async () => {
+      let acquired: MediaStream | null = null;
       try {
-        // Get the camera FIRST, before loading MediaPipe. This way
-        // if permission is denied we surface the error immediately
-        // instead of after a ~1 second WASM load — and we don't
-        // hold any resources during the failed permission prompt.
-        const acquired = await navigator.mediaDevices.getUserMedia({
+        // Step 1 — acquire the camera. This is the only step that
+        // can legitimately fail with a user-fixable error (permission,
+        // device-in-use, missing camera). Everything past this point
+        // (MediaPipe init, RAF detection loop, video.play()) is
+        // best-effort and MUST NOT tear down the stream if it fails —
+        // the user can still see themselves in the preview tile even
+        // if face counting / GPU acceleration is broken.
+        acquired = await navigator.mediaDevices.getUserMedia({
           video: { facingMode: "user", width: 640, height: 480 },
           audio: false,
         });
@@ -175,32 +179,11 @@ export function useCamera(opts: UseCameraOptions): UseCameraReturn {
           return;
         }
         streamRef.current = acquired;
-        // Publish the stream BEFORE awaiting MediaPipe init — this
-        // lets face/pose hooks kick off their detector setup in
-        // parallel with our face detector, halving wall-clock
-        // startup time when all three are wired up.
         setStream(acquired);
 
-        // Lazy-load MediaPipe so the ~1 MB JS bundle stays out of
-        // the initial page load. Same pattern as ``useWakeWord``.
-        const { FaceDetector, FilesetResolver } = await import(
-          "@mediapipe/tasks-vision"
-        );
-        const fileset = await FilesetResolver.forVisionTasks(WASM_BASE_URL);
-        const detector = await FaceDetector.createFromOptions(fileset, {
-          baseOptions: {
-            modelAssetPath: FACE_MODEL_URL,
-            delegate: "GPU",
-          },
-          runningMode: "VIDEO",
-          minDetectionConfidence: 0.5,
-        });
-        if (cancelled) {
-          detector.close();
-          return;
-        }
-        detectorRef.current = detector;
-
+        // Step 2 — wire the stream to the hidden <video> the rest of
+        // the app reads frames from. This MUST succeed for the visible
+        // preview to render; if it fails, surface a real error.
         const video = videoRef.current;
         if (!video) {
           throw new Error(
@@ -209,37 +192,111 @@ export function useCamera(opts: UseCameraOptions): UseCameraReturn {
         }
         video.srcObject = acquired;
         video.muted = true;
-        await video.play();
+        try {
+          await video.play();
+        } catch (playErr) {
+          // ``play()`` can reject with NotAllowedError if there hasn't
+          // been a user gesture yet (rare in our flow — the user
+          // clicked the CAM toggle, which counts), or AbortError if
+          // the page navigates away mid-play. Neither is fatal for
+          // the visible preview component (which has its own
+          // ``play()`` call on srcObject change), so just log and
+          // continue to ready.
+          // eslint-disable-next-line no-console
+          console.warn("[useCamera] hidden video.play() failed:", playErr);
+        }
 
+        // We're already showing the user themselves at this point —
+        // flip to ready BEFORE the optional MediaPipe init, so the
+        // tile is responsive even if the rest of the pipeline is
+        // slow or fails.
         setStatus("ready");
 
-        // RAF-driven detection loop. Throttle to detectionIntervalMs so
-        // we don't burn battery on a CPU-only laptop. The detector's
-        // ``detectForVideo`` is synchronous but cheap on the small face
-        // model — under 5ms per call on a modern CPU.
-        const tick = (now: number) => {
-          if (cancelled) return;
-          const det = detectorRef.current;
-          const v = videoRef.current;
-          if (
-            det &&
-            v &&
-            v.readyState >= 2 &&
-            now - lastInferAtRef.current >= detectionIntervalMs
-          ) {
-            lastInferAtRef.current = now;
-            try {
-              const res = det.detectForVideo(v, now);
-              const n = res.detections?.length ?? 0;
-              setFaceCount((prev) => (prev === n ? prev : n));
-            } catch {
-              // Single-frame failure (e.g. video pipe stutter) is not
-              // fatal; just skip the frame.
-            }
+        // Step 3 — MediaPipe FaceDetector for the face-count badge.
+        // Best-effort: if WebGL is blocklisted (common in WSL /
+        // remote desktop / older GPUs), CDN-hosted WASM can't load
+        // (offline / firewall), or the model file is missing, we
+        // simply skip the badge and leave faceCount at 0. The
+        // camera itself stays online. Previously this whole block
+        // was inside the outer try and a failure here tore down the
+        // entire stream — same surface symptom as the camera
+        // permission being denied, which is what the user was
+        // hitting on the post-rebuild Windows install.
+        try {
+          const { FaceDetector, FilesetResolver } = await import(
+            "@mediapipe/tasks-vision"
+          );
+          const fileset = await FilesetResolver.forVisionTasks(WASM_BASE_URL);
+          let detector: FaceDetector;
+          try {
+            detector = await FaceDetector.createFromOptions(fileset, {
+              baseOptions: {
+                modelAssetPath: FACE_MODEL_URL,
+                delegate: "GPU",
+              },
+              runningMode: "VIDEO",
+              minDetectionConfidence: 0.5,
+            });
+          } catch (gpuErr) {
+            // Fall back to CPU if GPU init blew up — Chromium
+            // blocklists WebGL on a surprisingly long list of
+            // driver/GPU combos, and the face count is too cheap
+            // to be worth losing entirely over a delegate choice.
+            // eslint-disable-next-line no-console
+            console.warn(
+              "[useCamera] FaceDetector GPU init failed, retrying on CPU:",
+              gpuErr,
+            );
+            detector = await FaceDetector.createFromOptions(fileset, {
+              baseOptions: {
+                modelAssetPath: FACE_MODEL_URL,
+                delegate: "CPU",
+              },
+              runningMode: "VIDEO",
+              minDetectionConfidence: 0.5,
+            });
           }
+          if (cancelled) {
+            detector.close();
+            return;
+          }
+          detectorRef.current = detector;
+
+          // RAF-driven detection loop. Throttle to detectionIntervalMs
+          // so we don't burn battery on a CPU-only laptop. The
+          // detector's ``detectForVideo`` is cheap (under 5 ms per
+          // call on a modern CPU for the small face model).
+          const tick = (now: number) => {
+            if (cancelled) return;
+            const det = detectorRef.current;
+            const v = videoRef.current;
+            if (
+              det &&
+              v &&
+              v.readyState >= 2 &&
+              now - lastInferAtRef.current >= detectionIntervalMs
+            ) {
+              lastInferAtRef.current = now;
+              try {
+                const res = det.detectForVideo(v, now);
+                const n = res.detections?.length ?? 0;
+                setFaceCount((prev) => (prev === n ? prev : n));
+              } catch {
+                // Single-frame failure (e.g. video pipe stutter) is
+                // not fatal; just skip the frame.
+              }
+            }
+            rafRef.current = requestAnimationFrame(tick);
+          };
           rafRef.current = requestAnimationFrame(tick);
-        };
-        rafRef.current = requestAnimationFrame(tick);
+        } catch (mpErr) {
+          // eslint-disable-next-line no-console
+          console.warn(
+            "[useCamera] MediaPipe FaceDetector init failed — face count badge disabled, but the camera preview still works:",
+            mpErr,
+          );
+          // Leave faceCount at 0; do NOT teardown.
+        }
       } catch (e) {
         if (cancelled) return;
         const msg = e instanceof Error ? e.message : String(e);
