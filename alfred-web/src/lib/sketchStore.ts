@@ -56,16 +56,14 @@ export interface ToolSettings {
 }
 
 export const DEFAULT_TOOL_SETTINGS: Record<SketchTool, ToolSettings> = {
-  // Pencil — Procreate-style soft graphite. Slightly higher
-  // default opacity than v1 because the new draw model (halo +
-  // body + spine + grain) self-modulates alpha across the three
-  // passes; a 0.55 base ends up reading like ~0.4 perceptually
-  // which is too faint.
-  pencil: { size: 5, opacity: 0.85, streamline: 0.25 },
+  // Pencil — Procreate-style soft graphite. Sizes are in LOGICAL
+  // pixels (canvas backing is 3200 × 2000 — see SketchPad.tsx
+  // LOGICAL_W comment), so doubled vs the pre-2× backing.
+  pencil: { size: 10, opacity: 0.85, streamline: 0.25 },
   // Pen — confident, opaque ink, mid streamline for clean curves.
-  pen: { size: 6, opacity: 1, streamline: 0.5 },
-  marker: { size: 16, opacity: 0.32, streamline: 0.35 },
-  eraser: { size: 20, opacity: 1, streamline: 0.2 },
+  pen: { size: 12, opacity: 1, streamline: 0.5 },
+  marker: { size: 32, opacity: 0.32, streamline: 0.35 },
+  eraser: { size: 40, opacity: 1, streamline: 0.2 },
 };
 
 export interface SketchSnapshotState {

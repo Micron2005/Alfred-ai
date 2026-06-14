@@ -44,8 +44,24 @@ import {
  * snapshot) are module-level too, so they work even mid tab-switch.
  */
 
-const LOGICAL_W = 1600;
-const LOGICAL_H = 1000;
+// Canvas backing resolution. Bumped 2× from the original 1600×1000
+// because at the previous backing the user saw aliasing at any
+// zoom past ~1.2x and on a 2K+ monitor the paper looked soft even
+// at 100 %. Doubling each axis (so 4× total pixels) gives ~3200×
+// 2000 of bitmap data per layer — plenty of headroom for the
+// /sketch popout on a 1920 or 2560 monitor at 2× zoom without
+// pixelation. Aspect ratio stays 1.6:1 (matches a 16:10 desk).
+//
+// Memory cost: ~25 MB per layer at full backing (vs ~6 MB before).
+// With four layers + the stroke buffer + a flatten canvas that's
+// ~150 MB peak — fine on the desktop machine the app targets.
+//
+// All draw / sample / clear ops work in these logical pixels;
+// pointer coordinates project from the visible CSS size into the
+// logical resolution via ``toLogical`` so the brush still feels
+// the same physical thickness on screen.
+const LOGICAL_W = 3200;
+const LOGICAL_H = 2000;
 /** Vision-model snapshot width — keeps the analyze payload small. */
 const SNAPSHOT_W = 1024;
 const UNDO_LIMIT = 30;
@@ -929,6 +945,88 @@ function contrastForeground(hex: string): string {
   // colours with high saturation still read clearly.
   const luma = 0.2126 * r + 0.7152 * g + 0.0722 * b;
   return luma > 140 ? "#000" : "#fff";
+}
+
+/**
+ * Vertical slider used in the Procreate-style edge rail. A native
+ * range input is rotated 90° so it actually behaves like a vertical
+ * slider on touch (no custom drag logic needed). Label sits on top,
+ * formatted current value on bottom. Tall + thin to maximise touch
+ * accuracy on the touchscreen pop-out.
+ */
+function VerticalSlider(props: {
+  testid: string;
+  label: string;
+  value: number;
+  min: number;
+  max: number;
+  step: number;
+  onChange: (v: number) => void;
+  format: (v: number) => string;
+}) {
+  const { testid, label, value, min, max, step, onChange, format } = props;
+  return (
+    <div
+      style={{
+        display: "flex",
+        flexDirection: "column",
+        alignItems: "center",
+        gap: 6,
+      }}
+    >
+      <span
+        className="mono"
+        style={{
+          fontSize: 9,
+          letterSpacing: 1.5,
+          color: "rgba(255,255,255,0.55)",
+        }}
+      >
+        {label}
+      </span>
+      {/* The range input is the actual semantic control. We rotate
+          its visual presentation -90deg so it reads vertical, but
+          input events (touch, mouse, keyboard) still work fine —
+          the underlying value is just a 1D number. */}
+      <div
+        style={{
+          height: 120,
+          width: 22,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+        }}
+      >
+        <input
+          type="range"
+          data-testid={testid}
+          min={min}
+          max={max}
+          step={step}
+          value={value}
+          onChange={(e) => onChange(Number(e.target.value))}
+          style={{
+            width: 120,
+            transform: "rotate(-90deg)",
+            accentColor: "var(--hud)",
+            cursor: "pointer",
+          }}
+        />
+      </div>
+      <span
+        className="mono"
+        style={{
+          fontSize: 9,
+          letterSpacing: 1,
+          color: "rgba(255,255,255,0.85)",
+          minWidth: 30,
+          textAlign: "center",
+        }}
+      >
+        {format(value)}
+      </span>
+    </div>
+  );
 }
 
 /**
@@ -1861,55 +1959,214 @@ export function SketchPad() {
   const cfg = TOOL_CONFIG[state.tool];
   const toolSet = state.toolSettings[state.tool];
 
+  // Layers + brush settings panels are now slide-ins (Procreate
+  // style — tap an icon, panel floats over the canvas, tap away
+  // to dismiss). Always-visible 232 px-wide asides took up too
+  // much horizontal real estate on the touchscreen pop-out, and
+  // the user explicitly asked for the Procreate look.
+  const [layersOpen, setLayersOpen] = useState(false);
+  const [brushOpen, setBrushOpen] = useState(false);
+
   return (
     <div
       data-testid="sketch-pad"
       style={{
         flex: 1,
         minHeight: 0,
-        display: "flex",
-        flexDirection: "column",
-        background: "rgba(3, 6, 12, 0.85)",
+        position: "relative",
+        // Pure white paper background ALL the way to the edges —
+        // floating chrome sits on top via translucent dark glass.
+        // The 28 px-tall faint vignette at the very top + bottom
+        // gives the floating bars something darker to render
+        // against (otherwise they fight the white).
+        background:
+          "radial-gradient(120% 80% at 50% 50%, #ffffff 0%, #eeeef1 78%, #d4d6dc 100%)",
+        overflow: "hidden",
       }}
     >
-      {/* ── Top bar ─────────────────────────────────────────────── */}
-      <header
+      {/* ── Canvas viewport (full-bleed) ─────────────────────────── */}
+      <main
+        ref={viewportRef}
+        data-testid="sketch-viewport"
+        onPointerDown={handlePointerDown}
+        onPointerMove={handlePointerMove}
+        onPointerUp={handlePointerEnd}
+        onPointerCancel={handlePointerEnd}
         style={{
+          position: "absolute",
+          inset: 0,
           display: "flex",
           alignItems: "center",
-          gap: 8,
-          padding: "8px 16px",
-          borderBottom: "1px solid var(--border)",
-          flexWrap: "wrap",
+          justifyContent: "center",
+          // Padding stays modest so the paper is as big as the
+          // viewport allows. The floating chrome sits ON TOP and
+          // doesn't push the paper down.
+          padding: 24,
+          touchAction: "none",
         }}
       >
-        <span
-          className="mono"
+        <div
+          ref={stackRef}
+          data-testid="sketch-canvas-stack"
           style={{
-            fontSize: 14,
-            letterSpacing: 4,
-            color: "var(--hud)",
-            textShadow: "0 0 10px var(--orb-glow)",
+            position: "relative",
+            // Take the largest rectangle that fits the viewport
+            // AND respects the paper aspect ratio. ``min(...)`` of
+            // both axes so neither axis overflows.
+            width: `min(calc(100vw - 48px), calc((100vh - 48px) * ${LOGICAL_W / LOGICAL_H}))`,
+            aspectRatio: `${LOGICAL_W} / ${LOGICAL_H}`,
+            transformOrigin: "50% 50%",
+            willChange: "transform",
+            cursor: "crosshair",
+            borderRadius: 4,
+            background: CANVAS_BG,
+            // Soft paper shadow against the muted off-white desk
+            // — same idea as Procreate's paper-on-table aesthetic.
+            boxShadow:
+              "0 24px 80px rgba(15, 18, 30, 0.18), 0 4px 12px rgba(15, 18, 30, 0.1)",
+            overflow: "hidden",
+          }}
+        />
+
+        {/* Zoom controls — bottom-right, floating glass. */}
+        <div
+          style={{
+            position: "absolute",
+            right: 18,
+            bottom: 18,
+            display: "flex",
+            gap: 4,
+            padding: 4,
+            background: "rgba(15, 18, 30, 0.65)",
+            backdropFilter: "blur(18px) saturate(150%)",
+            WebkitBackdropFilter: "blur(18px) saturate(150%)",
+            border: "1px solid rgba(255, 255, 255, 0.08)",
+            borderRadius: 10,
+            zIndex: 2,
           }}
         >
-          ✏ DESIGN PAD
-        </span>
-        <span
-          className="mono"
-          style={{ fontSize: 10, color: "var(--muted)", letterSpacing: 1 }}
+          <button
+            type="button"
+            className="hud-button"
+            data-testid="sketch-zoom-out-btn"
+            onClick={() => zoomAtCenter(1 / 1.25)}
+            title="Zoom out (pinch or scroll wheel works too)"
+            style={{ minWidth: 32 }}
+          >
+            −
+          </button>
+          <button
+            type="button"
+            className="hud-button"
+            data-testid="sketch-zoom-reset-btn"
+            onClick={resetView}
+            title="Reset zoom, rotation & position"
+            style={{ minWidth: 58 }}
+          >
+            {zoomPct}%
+          </button>
+          <button
+            type="button"
+            className="hud-button"
+            data-testid="sketch-zoom-in-btn"
+            onClick={() => zoomAtCenter(1.25)}
+            title="Zoom in (pinch or scroll wheel works too)"
+            style={{ minWidth: 32 }}
+          >
+            +
+          </button>
+        </div>
+
+        {/* Eyedropper loupe — same as before. */}
+        {eyedropper ? (
+          <div
+            data-testid="sketch-eyedropper-loupe"
+            style={{
+              position: "fixed",
+              left: eyedropper.x - 32,
+              top: eyedropper.y - 100,
+              width: 64,
+              height: 64,
+              borderRadius: "50%",
+              background: eyedropper.color,
+              border: "3px solid #ffffff",
+              boxShadow:
+                "0 4px 16px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(0, 0, 0, 0.35)",
+              pointerEvents: "none",
+              zIndex: 50,
+            }}
+          >
+            <span
+              className="mono"
+              data-testid="sketch-eyedropper-hex"
+              style={{
+                position: "absolute",
+                top: 68,
+                left: "50%",
+                transform: "translateX(-50%)",
+                fontSize: 10,
+                letterSpacing: 1,
+                color: "#fff",
+                background: "rgba(3, 6, 12, 0.85)",
+                padding: "1px 6px",
+                borderRadius: 3,
+                whiteSpace: "nowrap",
+              }}
+            >
+              {eyedropper.color.toUpperCase()}
+            </span>
+          </div>
+        ) : null}
+      </main>
+
+      {/* ── Top bar (floating glass) ─────────────────────────────── */}
+      <header
+        style={{
+          position: "absolute",
+          top: 12,
+          left: 12,
+          right: 12,
+          display: "flex",
+          alignItems: "center",
+          gap: 6,
+          padding: "6px 10px",
+          background: "rgba(15, 18, 30, 0.72)",
+          backdropFilter: "blur(20px) saturate(160%)",
+          WebkitBackdropFilter: "blur(20px) saturate(160%)",
+          border: "1px solid rgba(255, 255, 255, 0.08)",
+          borderRadius: 14,
+          color: "#fff",
+          zIndex: 5,
+          // Top bar is intentionally minimal: just the actions, not
+          // a wordmark. The user is drawing, not reading branding.
+        }}
+      >
+        <button
+          type="button"
+          className="hud-button"
+          data-testid="sketch-close-btn"
+          onClick={() => sketchStore.setOpen(false)}
+          title="Back to chat (your sketch is kept)"
+          style={{ padding: "6px 10px" }}
         >
-          {cfg.label.toUpperCase()} · {toolSet.size}px ·{" "}
-          {Math.round(toolSet.opacity * 100)}%
-        </span>
-        <span style={{ flex: 1 }} />
+          ✕
+        </button>
+        <span
+          style={{
+            width: 1,
+            height: 18,
+            background: "rgba(255,255,255,0.12)",
+          }}
+        />
         <button
           type="button"
           className="hud-button"
           data-testid="sketch-undo-btn"
           onClick={undoStroke}
           title="Undo — or two-finger tap the canvas"
+          style={{ padding: "6px 10px" }}
         >
-          ↶ UNDO
+          ↶
         </button>
         <button
           type="button"
@@ -1917,17 +2174,33 @@ export function SketchPad() {
           data-testid="sketch-redo-btn"
           onClick={redoStroke}
           title="Redo — or three-finger tap the canvas"
+          style={{ padding: "6px 10px" }}
         >
-          ↷ REDO
+          ↷
         </button>
+        <span
+          className="mono"
+          style={{
+            fontSize: 10,
+            letterSpacing: 2,
+            color: "rgba(255,255,255,0.55)",
+            marginLeft: 8,
+            whiteSpace: "nowrap",
+          }}
+        >
+          {cfg.label.toUpperCase()} · {toolSet.size}PX ·{" "}
+          {Math.round(toolSet.opacity * 100)}%
+        </span>
+        <span style={{ flex: 1 }} />
         <button
           type="button"
           className="hud-button"
           data-testid="sketch-clear-btn"
           onClick={clearActiveLayer}
           title="Clear the active layer (undoable)"
+          style={{ padding: "6px 10px", fontSize: 11 }}
         >
-          ⌧ CLEAR LAYER
+          CLEAR
         </button>
         <button
           type="button"
@@ -1935,18 +2208,10 @@ export function SketchPad() {
           data-testid="sketch-export-btn"
           onClick={exportPng}
           title="Download the flattened sketch as a PNG"
+          style={{ padding: "6px 10px", fontSize: 11 }}
         >
-          ⤓ EXPORT
+          ⤓
         </button>
-        {/*
-          POP TO TOUCHSCREEN — opens this Sketch Pad in its own
-          window so the user can drag it to their embedded touchscreen
-          monitor. Once moved, Windows remembers the monitor for
-          subsequent opens. Hidden when we're ALREADY inside the
-          popped /sketch window (would just open a sibling popup).
-          State is independent of the main HUD's DESIGN tab — popping
-          is a "commit to drawing on the touchscreen" gesture.
-        */}
         {typeof window !== "undefined" &&
         window.location.pathname !== "/sketch" ? (
           <button
@@ -1954,16 +2219,6 @@ export function SketchPad() {
             className="hud-button"
             data-testid="sketch-pop-btn"
             onClick={() => {
-              // In the Alfred Desktop (Electron) shell, the main
-              // process intercepts ``/sketch`` window.opens and
-              // positions them on the configured sketch monitor
-              // (sketchResolution in config.json) — see
-              // alfred-desktop/main.js. In a plain browser we ask
-              // for popup-style chrome instead of a new tab; some
-              // browsers honour the hint when the call is inside a
-              // user gesture (which a button click satisfies),
-              // others land it as a regular window the user drags
-              // to their touchscreen once and the OS remembers.
               const features = [
                 "popup=yes",
                 "width=1920",
@@ -1976,7 +2231,11 @@ export function SketchPad() {
                 "status=no",
                 "resizable=yes",
               ].join(",");
-              const popped = window.open("/sketch", "alfred-sketch", features);
+              const popped = window.open(
+                "/sketch",
+                "alfred-sketch",
+                features,
+              );
               if (popped && typeof popped.focus === "function") {
                 try {
                   popped.focus();
@@ -1985,304 +2244,211 @@ export function SketchPad() {
                 }
               }
             }}
-            title="Open the Sketch Pad in a separate window — drag it to your touchscreen monitor (Alfred Desktop auto-positions it)"
+            title="Open the Sketch Pad in a separate window — drag it to your touchscreen monitor"
+            style={{ padding: "6px 10px" }}
           >
-            ⤴ POP TO TOUCHSCREEN
+            ⤴
           </button>
         ) : null}
-        <button
-          type="button"
-          className="hud-button"
-          data-testid="sketch-close-btn"
-          onClick={() => sketchStore.setOpen(false)}
-          title="Back to chat (your sketch is kept)"
-        >
-          ✕ CLOSE
-        </button>
       </header>
 
-      {/* ── Body: tool rail / canvas / layers panel ─────────────── */}
-      <div style={{ flex: 1, display: "flex", minHeight: 0 }}>
-        {/* Tool rail. ``touchAction: pan-y`` lets touchscreen users
-            (the /sketch pop-out is designed for one) physically
-            swipe the rail up/down to scroll without the canvas
-            stealing the gesture. ``WebkitOverflowScrolling: touch``
-            keeps momentum scrolling on iOS/Edge touch. */}
-        <aside
+      {/* ── Left edge: vertical size + opacity sliders ──────────── */}
+      <aside
+        style={{
+          position: "absolute",
+          left: 12,
+          top: "50%",
+          transform: "translateY(-50%)",
+          width: 56,
+          display: "flex",
+          flexDirection: "column",
+          alignItems: "center",
+          gap: 14,
+          padding: "16px 6px",
+          background: "rgba(15, 18, 30, 0.72)",
+          backdropFilter: "blur(20px) saturate(160%)",
+          WebkitBackdropFilter: "blur(20px) saturate(160%)",
+          border: "1px solid rgba(255, 255, 255, 0.08)",
+          borderRadius: 14,
+          color: "#fff",
+          zIndex: 5,
+        }}
+      >
+        {/* Size — Procreate-style vertical slider with a tick mark.
+            Range max is 128 LOGICAL px (canvas backing is 3200 × 2000;
+            see LOGICAL_W comment) — that's roughly a 64-px screen-pixel
+            brush at 100 % zoom on a typical 1080p sketch pop-out. */}
+        <VerticalSlider
+          testid="sketch-brush-slider"
+          label="SIZE"
+          value={toolSet.size}
+          min={1}
+          max={128}
+          step={1}
+          onChange={(v) => sketchStore.setBrushSize(v)}
+          format={(v) => `${v}`}
+        />
+        {/* Opacity */}
+        <VerticalSlider
+          testid="sketch-tool-opacity-slider"
+          label="α"
+          value={Math.round(toolSet.opacity * 100)}
+          min={1}
+          max={100}
+          step={1}
+          onChange={(v) => sketchStore.setBrushOpacity(v / 100)}
+          format={(v) => `${v}%`}
+        />
+      </aside>
+
+      {/* ── Right edge: tool palette + color drop + drawers ─────── */}
+      <aside
+        style={{
+          position: "absolute",
+          right: 12,
+          top: "50%",
+          transform: "translateY(-50%)",
+          width: 56,
+          display: "flex",
+          flexDirection: "column",
+          alignItems: "center",
+          gap: 8,
+          padding: 8,
+          background: "rgba(15, 18, 30, 0.72)",
+          backdropFilter: "blur(20px) saturate(160%)",
+          WebkitBackdropFilter: "blur(20px) saturate(160%)",
+          border: "1px solid rgba(255, 255, 255, 0.08)",
+          borderRadius: 14,
+          color: "#fff",
+          zIndex: 5,
+        }}
+      >
+        {SKETCH_TOOLS.map((tool) => (
+          <button
+            key={tool}
+            type="button"
+            data-testid={`sketch-tool-${tool}`}
+            aria-pressed={state.tool === tool}
+            onClick={() => sketchStore.setTool(tool)}
+            title={`${TOOL_CONFIG[tool].label} — say "Alfred, switch to the ${tool}"`}
+            style={{
+              width: 40,
+              height: 40,
+              borderRadius: 8,
+              border:
+                state.tool === tool
+                  ? "1px solid rgba(108, 214, 255, 0.6)"
+                  : "1px solid rgba(255,255,255,0.08)",
+              background:
+                state.tool === tool
+                  ? "rgba(108, 214, 255, 0.18)"
+                  : "rgba(255,255,255,0.04)",
+              color: "#fff",
+              fontSize: 18,
+              cursor: "pointer",
+              transition:
+                "background-color 120ms ease, border-color 120ms ease",
+            }}
+          >
+            {TOOL_CONFIG[tool].glyph}
+          </button>
+        ))}
+
+        <span
           style={{
-            width: 92,
-            padding: "12px 10px",
-            borderRight: "1px solid var(--border)",
-            display: "flex",
-            flexDirection: "column",
-            alignItems: "stretch",
-            gap: 8,
-            overflowY: "auto",
-            touchAction: "pan-y",
-            WebkitOverflowScrolling: "touch",
+            width: 28,
+            height: 1,
+            background: "rgba(255,255,255,0.1)",
+            margin: "2px 0",
+          }}
+        />
+
+        {/* Big circular color drop — Procreate's iconic widget. */}
+        <ColorDropdown
+          current={state.color}
+          onPick={(c) => sketchStore.setColor(c)}
+        />
+
+        {/* Brush settings drawer trigger (streamline lives here). */}
+        <button
+          type="button"
+          data-testid="sketch-brush-settings-btn"
+          onClick={() => setBrushOpen((v) => !v)}
+          aria-pressed={brushOpen}
+          title="Brush settings"
+          style={{
+            width: 40,
+            height: 40,
+            borderRadius: 8,
+            border: brushOpen
+              ? "1px solid rgba(108, 214, 255, 0.6)"
+              : "1px solid rgba(255,255,255,0.08)",
+            background: brushOpen
+              ? "rgba(108, 214, 255, 0.18)"
+              : "rgba(255,255,255,0.04)",
+            color: "#fff",
+            fontSize: 16,
+            cursor: "pointer",
           }}
         >
-          {SKETCH_TOOLS.map((tool) => (
-            <button
-              key={tool}
-              type="button"
-              className="hud-button"
-              data-testid={`sketch-tool-${tool}`}
-              aria-pressed={state.tool === tool}
-              onClick={() => sketchStore.setTool(tool)}
-              title={`${TOOL_CONFIG[tool].label} — say "Alfred, switch to the ${tool}"`}
-              style={{ padding: "8px 4px", fontSize: 11 }}
-            >
-              {TOOL_CONFIG[tool].glyph}
-              <br />
-              {TOOL_CONFIG[tool].label.toUpperCase()}
-            </button>
-          ))}
+          ⚙
+        </button>
 
-          <div
-            style={{
-              borderTop: "1px solid var(--border)",
-              margin: "4px 0",
-            }}
-          />
-
-          {/* Brush size — per tool, like Procreate */}
-          <label
-            className="mono"
-            style={{
-              fontSize: 9,
-              letterSpacing: 1.5,
-              color: "var(--muted)",
-              textAlign: "center",
-            }}
-          >
-            SIZE {toolSet.size}
-          </label>
-          <input
-            type="range"
-            min={1}
-            max={64}
-            step={1}
-            value={toolSet.size}
-            data-testid="sketch-brush-slider"
-            onChange={(e) => sketchStore.setBrushSize(Number(e.target.value))}
-            style={{ width: "100%", accentColor: "var(--hud)" }}
-          />
-          {/* Tool opacity — also per tool */}
-          <label
-            className="mono"
-            style={{
-              fontSize: 9,
-              letterSpacing: 1.5,
-              color: "var(--muted)",
-              textAlign: "center",
-            }}
-          >
-            OPACITY {Math.round(toolSet.opacity * 100)}%
-          </label>
-          <input
-            type="range"
-            min={1}
-            max={100}
-            step={1}
-            value={Math.round(toolSet.opacity * 100)}
-            data-testid="sketch-tool-opacity-slider"
-            onChange={(e) =>
-              sketchStore.setBrushOpacity(Number(e.target.value) / 100)
-            }
-            style={{ width: "100%", accentColor: "var(--hud)" }}
-          />
-          {/* Streamline — exponential stroke smoothing, per tool.
-              Procreate's first-impression "wow that feels good" knob. */}
-          <label
-            className="mono"
-            style={{
-              fontSize: 9,
-              letterSpacing: 1.5,
-              color: "var(--muted)",
-              textAlign: "center",
-            }}
-          >
-            STREAMLINE {Math.round(toolSet.streamline * 100)}%
-          </label>
-          <input
-            type="range"
-            min={0}
-            max={100}
-            step={1}
-            value={Math.round(toolSet.streamline * 100)}
-            data-testid="sketch-streamline-slider"
-            onChange={(e) =>
-              sketchStore.setBrushStreamline(Number(e.target.value) / 100)
-            }
-            style={{ width: "100%", accentColor: "var(--hud)" }}
-          />
-          {/* Live brush preview chip — a small white paper sample
-              with a representative stroke drawn through it using the
-              same texture/opacity/size as the active tool. So pen
-              looks like a smooth ink line, pencil like a grainy
-              graphite line, marker like a wide flat band — visible
-              difference before the user puts pen to paper. */}
-          <BrushPreviewChip
-            tool={state.tool}
-            color={state.color}
-            size={toolSet.size}
-            opacity={toolSet.opacity}
-            texture={cfg.texture}
-          />
-
-          <div
-            style={{
-              borderTop: "1px solid var(--border)",
-              margin: "4px 0",
-            }}
-          />
-
-          {/* Colour picker — a single button that drops down a panel
-              with the curated swatches AND a system-native colour
-              wheel. Collapsing this saves ~140 px of vertical space,
-              which means the tool rail no longer needs to scroll on
-              the standard /sketch touchscreen viewport. Click the
-              button again (or click any swatch) to close. */}
-          <ColorDropdown
-            current={state.color}
-            onPick={(c) => sketchStore.setColor(c)}
-          />
-        </aside>
-
-        {/* Canvas viewport — pinch/wheel zoom + pan happens here */}
-        <main
-          ref={viewportRef}
-          data-testid="sketch-viewport"
-          onPointerDown={handlePointerDown}
-          onPointerMove={handlePointerMove}
-          onPointerUp={handlePointerEnd}
-          onPointerCancel={handlePointerEnd}
+        {/* Layers drawer trigger. */}
+        <button
+          type="button"
+          data-testid="sketch-layers-toggle-btn"
+          onClick={() => setLayersOpen((v) => !v)}
+          aria-pressed={layersOpen}
+          title="Layers"
           style={{
-            flex: 1,
-            position: "relative",
+            width: 40,
+            height: 40,
+            borderRadius: 8,
+            border: layersOpen
+              ? "1px solid rgba(108, 214, 255, 0.6)"
+              : "1px solid rgba(255,255,255,0.08)",
+            background: layersOpen
+              ? "rgba(108, 214, 255, 0.18)"
+              : "rgba(255,255,255,0.04)",
+            color: "#fff",
+            fontSize: 14,
+            cursor: "pointer",
+            // Tiny "stacked rectangles" glyph instead of an emoji
+            // so it scales cleanly at small sizes.
             display: "flex",
             alignItems: "center",
             justifyContent: "center",
-            padding: 16,
-            minWidth: 0,
-            overflow: "hidden",
-            touchAction: "none",
           }}
         >
-          <div
-            ref={stackRef}
-            data-testid="sketch-canvas-stack"
-            style={{
-              position: "relative",
-              width: `min(100%, calc((100vh - 260px) * ${LOGICAL_W / LOGICAL_H}))`,
-              aspectRatio: `${LOGICAL_W} / ${LOGICAL_H}`,
-              transformOrigin: "50% 50%",
-              willChange: "transform",
-              cursor: "crosshair",
-              borderRadius: 2,
-              // White paper, floating over the dark desk.
-              background: CANVAS_BG,
-              boxShadow:
-                "0 8px 40px rgba(0, 0, 0, 0.55), 0 2px 10px rgba(0, 0, 0, 0.4)",
-              overflow: "hidden",
-            }}
-          />
+          ☰
+        </button>
+      </aside>
 
-          {/* Zoom controls */}
-          <div
-            style={{
-              position: "absolute",
-              right: 14,
-              bottom: 14,
-              display: "flex",
-              gap: 6,
-              zIndex: 2,
-            }}
-          >
-            <button
-              type="button"
-              className="hud-button"
-              data-testid="sketch-zoom-out-btn"
-              onClick={() => zoomAtCenter(1 / 1.25)}
-              title="Zoom out (pinch or scroll wheel works too)"
-            >
-              −
-            </button>
-            <button
-              type="button"
-              className="hud-button"
-              data-testid="sketch-zoom-reset-btn"
-              onClick={resetView}
-              title="Reset zoom, rotation & position"
-              style={{ minWidth: 58 }}
-            >
-              {zoomPct}%
-            </button>
-            <button
-              type="button"
-              className="hud-button"
-              data-testid="sketch-zoom-in-btn"
-              onClick={() => zoomAtCenter(1.25)}
-              title="Zoom in (pinch or scroll wheel works too)"
-            >
-              +
-            </button>
-          </div>
-
-          {/* Touch & hold eyedropper loupe */}
-          {eyedropper ? (
-            <div
-              data-testid="sketch-eyedropper-loupe"
-              style={{
-                position: "fixed",
-                left: eyedropper.x - 32,
-                top: eyedropper.y - 100,
-                width: 64,
-                height: 64,
-                borderRadius: "50%",
-                background: eyedropper.color,
-                border: "3px solid #ffffff",
-                boxShadow:
-                  "0 4px 16px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(0, 0, 0, 0.35)",
-                pointerEvents: "none",
-                zIndex: 50,
-              }}
-            >
-              <span
-                className="mono"
-                data-testid="sketch-eyedropper-hex"
-                style={{
-                  position: "absolute",
-                  top: 68,
-                  left: "50%",
-                  transform: "translateX(-50%)",
-                  fontSize: 10,
-                  letterSpacing: 1,
-                  color: "var(--fg)",
-                  background: "rgba(3, 6, 12, 0.85)",
-                  padding: "1px 6px",
-                  borderRadius: 3,
-                  whiteSpace: "nowrap",
-                }}
-              >
-                {eyedropper.color.toUpperCase()}
-              </span>
-            </div>
-          ) : null}
-        </main>
-
-        {/* Layers panel */}
-        <aside
-          data-testid="sketch-layers-panel"
+      {/* ── Brush settings drawer (slide-in from right) ─────────── */}
+      {brushOpen ? (
+        <div
+          data-testid="sketch-brush-drawer"
           style={{
-            width: 232,
-            padding: "12px 10px",
-            borderLeft: "1px solid var(--border)",
+            position: "absolute",
+            right: 80,
+            top: 70,
+            width: 260,
+            padding: 14,
+            background: "rgba(15, 18, 30, 0.85)",
+            backdropFilter: "blur(20px) saturate(160%)",
+            WebkitBackdropFilter: "blur(20px) saturate(160%)",
+            border: "1px solid rgba(255,255,255,0.08)",
+            borderRadius: 14,
+            color: "#fff",
+            zIndex: 6,
             display: "flex",
             flexDirection: "column",
-            gap: 8,
+            gap: 12,
+            maxHeight: "calc(100vh - 90px)",
             overflowY: "auto",
+            touchAction: "pan-y",
+            WebkitOverflowScrolling: "touch",
           }}
         >
           <div
@@ -2297,21 +2463,157 @@ export function SketchPad() {
               style={{
                 fontSize: 10,
                 letterSpacing: 2,
-                color: "var(--hud)",
+                color: "rgba(255,255,255,0.6)",
+              }}
+            >
+              BRUSH · {cfg.label.toUpperCase()}
+            </span>
+            <button
+              type="button"
+              onClick={() => setBrushOpen(false)}
+              style={{
+                background: "transparent",
+                border: "none",
+                color: "rgba(255,255,255,0.6)",
+                cursor: "pointer",
+                fontSize: 14,
+              }}
+            >
+              ✕
+            </button>
+          </div>
+
+          <BrushPreviewChip
+            tool={state.tool}
+            color={state.color}
+            size={toolSet.size}
+            opacity={toolSet.opacity}
+            texture={cfg.texture}
+          />
+
+          {/* Streamline — exponential stroke smoothing per tool. */}
+          <div>
+            <div
+              style={{
+                display: "flex",
+                justifyContent: "space-between",
+                fontSize: 10,
+                letterSpacing: 1.5,
+                color: "rgba(255,255,255,0.6)",
+                marginBottom: 4,
+              }}
+            >
+              <span>STREAMLINE</span>
+              <span>{Math.round(toolSet.streamline * 100)}%</span>
+            </div>
+            <input
+              type="range"
+              min={0}
+              max={100}
+              step={1}
+              value={Math.round(toolSet.streamline * 100)}
+              data-testid="sketch-streamline-slider"
+              onChange={(e) =>
+                sketchStore.setBrushStreamline(Number(e.target.value) / 100)
+              }
+              style={{
+                width: "100%",
+                accentColor: "var(--hud)",
+              }}
+            />
+          </div>
+
+          <p
+            style={{
+              margin: 0,
+              fontSize: 10,
+              color: "rgba(255,255,255,0.4)",
+              lineHeight: 1.5,
+              fontStyle: "italic",
+            }}
+          >
+            Pinch the canvas to zoom &amp; rotate the paper.
+            Two-finger tap = undo, three-finger tap = redo.
+            Press &amp; hold to sample colour.
+          </p>
+        </div>
+      ) : null}
+
+      {/* ── Layers drawer (slide-in from right) ─────────────────── */}
+      {layersOpen ? (
+        <div
+          data-testid="sketch-layers-panel"
+          style={{
+            position: "absolute",
+            right: 80,
+            top: 70,
+            bottom: 12,
+            width: 260,
+            padding: 14,
+            background: "rgba(15, 18, 30, 0.85)",
+            backdropFilter: "blur(20px) saturate(160%)",
+            WebkitBackdropFilter: "blur(20px) saturate(160%)",
+            border: "1px solid rgba(255,255,255,0.08)",
+            borderRadius: 14,
+            color: "#fff",
+            zIndex: 6,
+            display: "flex",
+            flexDirection: "column",
+            gap: 8,
+            overflowY: "auto",
+            touchAction: "pan-y",
+            WebkitOverflowScrolling: "touch",
+          }}
+        >
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
+            }}
+          >
+            <span
+              className="mono"
+              style={{
+                fontSize: 10,
+                letterSpacing: 2,
+                color: "rgba(255,255,255,0.6)",
               }}
             >
               LAYERS
             </span>
-            <button
-              type="button"
-              className="hud-button"
-              data-testid="sketch-layer-add-btn"
-              onClick={() => sketchStore.addLayer()}
-              title='Add a layer (or say "Alfred, new layer")'
-              style={{ padding: "2px 8px", fontSize: 11 }}
-            >
-              + ADD
-            </button>
+            <div style={{ display: "flex", gap: 4 }}>
+              <button
+                type="button"
+                data-testid="sketch-layer-add-btn"
+                onClick={() => sketchStore.addLayer()}
+                title="Add a layer"
+                style={{
+                  padding: "2px 8px",
+                  fontSize: 11,
+                  background: "rgba(108, 214, 255, 0.15)",
+                  border: "1px solid rgba(108, 214, 255, 0.3)",
+                  color: "#fff",
+                  borderRadius: 4,
+                  cursor: "pointer",
+                }}
+              >
+                + NEW
+              </button>
+              <button
+                type="button"
+                onClick={() => setLayersOpen(false)}
+                style={{
+                  background: "transparent",
+                  border: "none",
+                  color: "rgba(255,255,255,0.6)",
+                  cursor: "pointer",
+                  fontSize: 14,
+                }}
+              >
+                ✕
+              </button>
+            </div>
           </div>
 
           {state.layers.map((layer, idx) => {
@@ -2323,14 +2625,16 @@ export function SketchPad() {
                 onClick={() => sketchStore.selectLayer(layer.id)}
                 style={{
                   border: active
-                    ? "1px solid var(--hud)"
-                    : "1px solid var(--border)",
-                  boxShadow: active ? "0 0 10px var(--orb-glow)" : "none",
-                  borderRadius: 4,
+                    ? "1px solid rgba(108, 214, 255, 0.6)"
+                    : "1px solid rgba(255,255,255,0.08)",
+                  boxShadow: active
+                    ? "0 0 10px rgba(108, 214, 255, 0.25)"
+                    : "none",
+                  borderRadius: 6,
                   padding: "6px 8px",
                   background: active
-                    ? "rgba(108, 214, 255, 0.07)"
-                    : "transparent",
+                    ? "rgba(108, 214, 255, 0.1)"
+                    : "rgba(255,255,255,0.03)",
                   cursor: "pointer",
                   display: "flex",
                   flexDirection: "column",
@@ -2355,7 +2659,7 @@ export function SketchPad() {
                       fontSize: 13,
                       padding: 0,
                       opacity: layer.visible ? 1 : 0.35,
-                      color: "var(--fg)",
+                      color: "#fff",
                     }}
                   >
                     {layer.visible ? "👁" : "🚫"}
@@ -2375,10 +2679,10 @@ export function SketchPad() {
                       style={{
                         flex: 1,
                         minWidth: 0,
-                        background: "var(--bg-elev)",
-                        border: "1px solid var(--hud-soft)",
+                        background: "rgba(255,255,255,0.08)",
+                        border: "1px solid rgba(108, 214, 255, 0.4)",
                         borderRadius: 2,
-                        color: "var(--fg)",
+                        color: "#fff",
                         fontSize: 12,
                         padding: "1px 4px",
                       }}
@@ -2395,7 +2699,7 @@ export function SketchPad() {
                         flex: 1,
                         minWidth: 0,
                         fontSize: 12,
-                        color: active ? "var(--fg)" : "var(--muted)",
+                        color: active ? "#fff" : "rgba(255,255,255,0.55)",
                         whiteSpace: "nowrap",
                         overflow: "hidden",
                         textOverflow: "ellipsis",
@@ -2411,11 +2715,7 @@ export function SketchPad() {
                       e.stopPropagation();
                       sketchStore.toggleLayerLock(layer.id);
                     }}
-                    title={
-                      layer.locked
-                        ? "Unlock layer"
-                        : "Lock layer (protects it from drawing & deletion)"
-                    }
+                    title={layer.locked ? "Unlock layer" : "Lock layer"}
                     style={{
                       background: "none",
                       border: "none",
@@ -2423,7 +2723,9 @@ export function SketchPad() {
                       fontSize: 12,
                       padding: 0,
                       opacity: layer.locked ? 1 : 0.35,
-                      color: layer.locked ? "var(--hud)" : "var(--fg)",
+                      color: layer.locked
+                        ? "var(--hud)"
+                        : "#fff",
                     }}
                   >
                     {layer.locked ? "🔒" : "🔓"}
@@ -2441,7 +2743,7 @@ export function SketchPad() {
                       background: "none",
                       border: "none",
                       cursor: idx === 0 ? "default" : "pointer",
-                      color: "var(--muted)",
+                      color: "rgba(255,255,255,0.6)",
                       opacity: idx === 0 ? 0.3 : 1,
                       fontSize: 11,
                       padding: 0,
@@ -2465,8 +2767,9 @@ export function SketchPad() {
                         idx === state.layers.length - 1
                           ? "default"
                           : "pointer",
-                      color: "var(--muted)",
-                      opacity: idx === state.layers.length - 1 ? 0.3 : 1,
+                      color: "rgba(255,255,255,0.6)",
+                      opacity:
+                        idx === state.layers.length - 1 ? 0.3 : 1,
                       fontSize: 11,
                       padding: 0,
                     }}
@@ -2488,7 +2791,9 @@ export function SketchPad() {
                     }}
                     disabled={state.layers.length <= 1 || layer.locked}
                     title={
-                      layer.locked ? "Unlock the layer first" : "Delete layer"
+                      layer.locked
+                        ? "Unlock the layer first"
+                        : "Delete layer"
                     }
                     style={{
                       background: "none",
@@ -2499,7 +2804,9 @@ export function SketchPad() {
                           : "pointer",
                       color: "var(--danger)",
                       opacity:
-                        state.layers.length <= 1 || layer.locked ? 0.3 : 0.85,
+                        state.layers.length <= 1 || layer.locked
+                          ? 0.3
+                          : 0.85,
                       fontSize: 12,
                       padding: 0,
                     }}
@@ -2507,7 +2814,6 @@ export function SketchPad() {
                     ✕
                   </button>
                 </div>
-                {/* Per-layer opacity + merge down */}
                 <div
                   style={{ display: "flex", alignItems: "center", gap: 6 }}
                   onClick={(e) => e.stopPropagation()}
@@ -2517,7 +2823,7 @@ export function SketchPad() {
                     style={{
                       fontSize: 8,
                       letterSpacing: 1,
-                      color: "var(--muted)",
+                      color: "rgba(255,255,255,0.5)",
                     }}
                   >
                     OPACITY
@@ -2557,7 +2863,7 @@ export function SketchPad() {
                         ? "No layer below to merge into"
                         : layer.locked || state.layers[idx + 1]?.locked
                           ? "Unlock both layers first"
-                          : "Merge down into the layer below"
+                          : "Merge down"
                     }
                     style={{
                       background: "none",
@@ -2568,7 +2874,7 @@ export function SketchPad() {
                         state.layers[idx + 1]?.locked
                           ? "default"
                           : "pointer",
-                      color: "var(--muted)",
+                      color: "rgba(255,255,255,0.6)",
                       opacity:
                         idx === state.layers.length - 1 ||
                         layer.locked ||
@@ -2585,23 +2891,8 @@ export function SketchPad() {
               </div>
             );
           })}
-
-          <p
-            style={{
-              margin: "4px 0 0",
-              fontSize: 10,
-              color: "var(--muted)",
-              fontStyle: "italic",
-              lineHeight: 1.5,
-            }}
-          >
-            Pinch to zoom, move &amp; rotate the paper. Two-finger tap =
-            undo, three-finger tap = redo. Hold a finger still to sample
-            a colour. Ask Alfred: &ldquo;analyze my sketch&rdquo;,
-            &ldquo;new layer called shading&rdquo;.
-          </p>
-        </aside>
-      </div>
+        </div>
+      ) : null}
     </div>
   );
 }
