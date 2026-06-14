@@ -624,6 +624,234 @@ type Gesture =
     };
 
 /**
+ * Collapsible colour picker. Replaces the always-visible swatch grid
+ * + native colour input combo: now a single button shows the
+ * currently-selected colour. Tap → an absolutely-positioned panel
+ * floats out to the right of the tool rail with the curated
+ * ``SWATCHES`` + the system colour wheel (``<input type="color">``).
+ *
+ * Why a floating panel instead of an inline accordion: the /sketch
+ * pop-out window is meant for a touchscreen, where the tool rail is
+ * narrow and the canvas is the main surface. Floating the panel
+ * over the canvas (instead of pushing the rail layout taller) lets
+ * the user see their drawing while choosing a colour, AND the rail
+ * stays the same height whether the panel is open or closed — so
+ * the "I can't scroll to reach the colours" problem can't come back.
+ *
+ * Closing rules: click outside the panel, pick any swatch, or click
+ * the trigger button again. The colour wheel does NOT close the
+ * panel on change so the user can fine-tune without re-opening.
+ */
+function ColorDropdown(props: {
+  current: string;
+  onPick: (color: string) => void;
+}) {
+  const { current, onPick } = props;
+  const [open, setOpen] = useState(false);
+  const containerRef = useRef<HTMLDivElement | null>(null);
+
+  // Close on outside click. Mouse + touch + pointer cover Windows
+  // mouse, touchscreen tap, and pen tap from the same handler.
+  useEffect(() => {
+    if (!open) return;
+    const onPointerDown = (e: PointerEvent) => {
+      if (!containerRef.current) return;
+      if (e.target instanceof Node && containerRef.current.contains(e.target)) {
+        return;
+      }
+      setOpen(false);
+    };
+    window.addEventListener("pointerdown", onPointerDown, true);
+    return () =>
+      window.removeEventListener("pointerdown", onPointerDown, true);
+  }, [open]);
+
+  // Esc closes too, in case the user is on a keyboard.
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setOpen(false);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [open]);
+
+  return (
+    <div ref={containerRef} style={{ position: "relative" }}>
+      <button
+        type="button"
+        data-testid="sketch-color-trigger"
+        aria-haspopup="true"
+        aria-expanded={open}
+        onClick={() => setOpen((v) => !v)}
+        title="Choose colour"
+        style={{
+          width: "100%",
+          height: 40,
+          padding: 0,
+          borderRadius: 4,
+          border: open
+            ? "2px solid var(--hud)"
+            : "1px solid var(--border)",
+          background: current,
+          // Subtle inset shadow so a chosen ``white`` colour still
+          // reads as a button rather than disappearing into the
+          // panel background. Plus a glow when open to confirm the
+          // dropdown is now floating to its right.
+          boxShadow: open
+            ? `0 0 12px ${current}, inset 0 0 0 2px rgba(0,0,0,0.15)`
+            : "inset 0 0 0 1px rgba(0,0,0,0.15)",
+          cursor: "pointer",
+          position: "relative",
+        }}
+      >
+        {/* Tiny "▾" caret so the affordance reads as a dropdown. */}
+        <span
+          aria-hidden
+          style={{
+            position: "absolute",
+            right: 4,
+            bottom: 2,
+            fontSize: 9,
+            // Auto-contrast: dark caret on light swatches, vice
+            // versa. Computed from the current colour's perceived
+            // luminance — see ``contrastForeground`` below.
+            color: contrastForeground(current),
+            textShadow: "0 0 2px rgba(0,0,0,0.45)",
+            pointerEvents: "none",
+          }}
+        >
+          ▾
+        </span>
+      </button>
+
+      {open ? (
+        <div
+          data-testid="sketch-color-panel"
+          style={{
+            position: "absolute",
+            top: 0,
+            // 92 px wide rail + 10 px padding — float just outside
+            // it so the panel never clips the toolbar contents.
+            left: "calc(100% + 12px)",
+            zIndex: 50,
+            width: 200,
+            padding: 10,
+            background: "var(--bg)",
+            border: "1px solid var(--border)",
+            borderRadius: 6,
+            boxShadow:
+              "0 8px 24px rgba(0,0,0,0.45), 0 0 0 1px rgba(108,214,255,0.08)",
+            display: "flex",
+            flexDirection: "column",
+            gap: 8,
+          }}
+        >
+          <div
+            style={{
+              fontSize: 10,
+              letterSpacing: 2,
+              color: "var(--muted)",
+            }}
+          >
+            COLOUR
+          </div>
+          {/* Curated palette */}
+          <div
+            style={{
+              display: "grid",
+              gridTemplateColumns: "repeat(4, 1fr)",
+              gap: 6,
+            }}
+          >
+            {SWATCHES.map((swatch, i) => {
+              const selected = current.toLowerCase() === swatch.toLowerCase();
+              return (
+                <button
+                  key={swatch}
+                  type="button"
+                  data-testid={`sketch-color-swatch-${i}`}
+                  aria-pressed={selected}
+                  onClick={() => {
+                    onPick(swatch);
+                    setOpen(false);
+                  }}
+                  title={swatch}
+                  style={{
+                    width: "100%",
+                    aspectRatio: "1",
+                    borderRadius: 4,
+                    background: swatch,
+                    cursor: "pointer",
+                    border: selected
+                      ? "2px solid var(--fg)"
+                      : "1px solid var(--border)",
+                    boxShadow: selected ? `0 0 8px ${swatch}` : "none",
+                  }}
+                />
+              );
+            })}
+          </div>
+
+          <div
+            style={{
+              borderTop: "1px solid var(--border)",
+              margin: "2px 0",
+            }}
+          />
+
+          {/* Colour wheel — the OS-native picker. Live-applies on
+              change without closing the panel so the user can dial
+              in a hue gradually. */}
+          <label
+            style={{
+              fontSize: 10,
+              letterSpacing: 2,
+              color: "var(--muted)",
+            }}
+          >
+            CUSTOM
+          </label>
+          <input
+            type="color"
+            data-testid="sketch-color-picker"
+            value={/^#[0-9a-fA-F]{6}$/.test(current) ? current : "#16181d"}
+            onChange={(e) => onPick(e.target.value)}
+            title="Pick any colour"
+            style={{
+              width: "100%",
+              height: 38,
+              padding: 0,
+              border: "1px solid var(--border)",
+              borderRadius: 4,
+              background: "transparent",
+              cursor: "pointer",
+            }}
+          />
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+/** Return a foreground colour ("#000" or "#fff") that contrasts
+ *  cleanly against the given hex background. Used by ColorDropdown
+ *  for the small caret indicator. */
+function contrastForeground(hex: string): string {
+  const m = /^#([0-9a-f]{6})$/i.exec(hex);
+  if (!m) return "#fff";
+  const n = parseInt(m[1], 16);
+  const r = (n >> 16) & 0xff;
+  const g = (n >> 8) & 0xff;
+  const b = n & 0xff;
+  // Rec. 709 luma. Threshold 140 lands the swap at roughly the
+  // mid-grey point — slightly biased toward dark text so accent
+  // colours with high saturation still read clearly.
+  const luma = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+  return luma > 140 ? "#000" : "#fff";
+}
+
+/**
  * Small canvas sample of the active brush. Draws a horizontal
  * stroke using the same texture model ``drawSegment`` uses, so the
  * preview is visually faithful: pen reads as smooth ink, pencil as
@@ -1695,7 +1923,11 @@ export function SketchPad() {
 
       {/* ── Body: tool rail / canvas / layers panel ─────────────── */}
       <div style={{ flex: 1, display: "flex", minHeight: 0 }}>
-        {/* Tool rail */}
+        {/* Tool rail. ``touchAction: pan-y`` lets touchscreen users
+            (the /sketch pop-out is designed for one) physically
+            swipe the rail up/down to scroll without the canvas
+            stealing the gesture. ``WebkitOverflowScrolling: touch``
+            keeps momentum scrolling on iOS/Edge touch. */}
         <aside
           style={{
             width: 92,
@@ -1706,6 +1938,8 @@ export function SketchPad() {
             alignItems: "stretch",
             gap: 8,
             overflowY: "auto",
+            touchAction: "pan-y",
+            WebkitOverflowScrolling: "touch",
           }}
         >
           {SKETCH_TOOLS.map((tool) => (
@@ -1824,60 +2058,15 @@ export function SketchPad() {
             }}
           />
 
-          {/* Colour swatches */}
-          <div
-            style={{
-              display: "grid",
-              gridTemplateColumns: "1fr 1fr",
-              gap: 6,
-            }}
-          >
-            {SWATCHES.map((swatch, i) => (
-              <button
-                key={swatch}
-                type="button"
-                data-testid={`sketch-color-swatch-${i}`}
-                aria-pressed={
-                  state.color.toLowerCase() === swatch.toLowerCase()
-                }
-                onClick={() => sketchStore.setColor(swatch)}
-                title={swatch}
-                style={{
-                  width: "100%",
-                  aspectRatio: "1",
-                  borderRadius: 3,
-                  background: swatch,
-                  cursor: "pointer",
-                  border:
-                    state.color.toLowerCase() === swatch.toLowerCase()
-                      ? "2px solid var(--fg)"
-                      : "1px solid var(--border)",
-                  boxShadow:
-                    state.color.toLowerCase() === swatch.toLowerCase()
-                      ? `0 0 8px ${swatch}`
-                      : "none",
-                }}
-              />
-            ))}
-          </div>
-          {/* Free colour picker */}
-          <input
-            type="color"
-            data-testid="sketch-color-picker"
-            value={
-              /^#[0-9a-fA-F]{6}$/.test(state.color) ? state.color : "#16181d"
-            }
-            onChange={(e) => sketchStore.setColor(e.target.value)}
-            title="Pick any colour"
-            style={{
-              width: "100%",
-              height: 28,
-              padding: 0,
-              border: "1px solid var(--border)",
-              borderRadius: 3,
-              background: "transparent",
-              cursor: "pointer",
-            }}
+          {/* Colour picker — a single button that drops down a panel
+              with the curated swatches AND a system-native colour
+              wheel. Collapsing this saves ~140 px of vertical space,
+              which means the tool rail no longer needs to scroll on
+              the standard /sketch touchscreen viewport. Click the
+              button again (or click any swatch) to close. */}
+          <ColorDropdown
+            current={state.color}
+            onPick={(c) => sketchStore.setColor(c)}
           />
         </aside>
 
