@@ -663,16 +663,35 @@ function ColorDropdown(props: {
   // resize / scroll so the panel doesn't drift away from the
   // button. ``useLayoutEffect`` so the panel paints with the
   // correct position on the very first frame (no flicker).
+  //
+  // Vertical clamp: the panel is ~360 px tall (swatches + color
+  // wheel + padding). If we anchored it to the button's top
+  // unconditionally, anchoring near the bottom of a 1080 p
+  // viewport would push the wheel off-screen with no way to
+  // scroll to it (the user-reported "i cant scroll down so i
+  // cant see all the colors and i cant see the color wheel"
+  // bug). So we clamp ``top`` so the panel always fully fits
+  // within the viewport, sliding upward if necessary.
   useLayoutEffect(() => {
     if (!open) return;
     const recompute = () => {
       const el = triggerRef.current;
       if (!el) return;
       const rect = el.getBoundingClientRect();
+      const PANEL_H_ESTIMATE = 360; // big enough to cover the worst case
+      const PANEL_MARGIN = 12;
+      const vh = window.innerHeight;
+      // Prefer aligning to the top of the button; if that would
+      // overflow the viewport bottom, slide upward until the panel
+      // fits with a 12 px margin. The minimum clamp at 12 px keeps
+      // a margin from the top too if the viewport itself is tiny.
+      const desiredTop = rect.top;
+      const maxTop = vh - PANEL_H_ESTIMATE - PANEL_MARGIN;
+      const top = Math.max(PANEL_MARGIN, Math.min(desiredTop, maxTop));
       setAnchor({
         // 12 px gap to the right of the button.
         left: Math.round(rect.right + 12),
-        top: Math.round(rect.top),
+        top: Math.round(top),
       });
     };
     recompute();
@@ -731,6 +750,16 @@ function ColorDropdown(props: {
               left: anchor.left,
               zIndex: 10000,
               width: 220,
+              // Hard ceiling on panel height: 24 px less than the
+              // viewport so a top + bottom margin remain visible
+              // even when the panel itself was clamped to the
+              // viewport edge. Combined with ``overflowY: auto``
+              // this guarantees every swatch + the colour wheel is
+              // always reachable, even on a 500 px-tall popped-out
+              // window. (See the same-name bug the user hit on
+              // first revision of this dropdown.)
+              maxHeight: "calc(100vh - 24px)",
+              overflowY: "auto",
               padding: 12,
               background: "var(--bg)",
               border: "1px solid var(--border)",
@@ -741,6 +770,12 @@ function ColorDropdown(props: {
               flexDirection: "column",
               gap: 10,
               fontFamily: "inherit",
+              // Touchscreen scroll: ``pan-y`` lets the user swipe
+              // up/down inside the panel without the canvas behind
+              // it stealing the gesture; momentum scrolling stays
+              // smooth on Edge / iOS Safari touch.
+              touchAction: "pan-y",
+              WebkitOverflowScrolling: "touch",
             }}
           >
             <div
