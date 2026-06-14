@@ -207,6 +207,22 @@ function createHud() {
     autoHideMenuBar: true,
   });
   void hudWin.loadURL(config.appUrl);
+  // F12 → toggle DevTools so the user can self-diagnose camera /
+  // permission / network failures without me having to rebuild a
+  // debug-enabled .exe every time. The chrome stays hidden
+  // (autoHideMenuBar) so this only fires on the explicit keystroke.
+  hudWin.webContents.on("before-input-event", (event, input) => {
+    if (input.type !== "keyDown") return;
+    if (input.key === "F12") {
+      hudWin.webContents.toggleDevTools();
+      event.preventDefault();
+    } else if (input.key === "r" && (input.control || input.meta)) {
+      // Ctrl+R reload — handy when the docker stack restarts under
+      // a long-running Alfred instance.
+      hudWin.webContents.reloadIgnoringCache();
+      event.preventDefault();
+    }
+  });
   hudWin.once("ready-to-show", () => {
     if (splashWin) splashWin.close();
     hudWin.show();
