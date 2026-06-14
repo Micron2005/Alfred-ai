@@ -1384,6 +1384,36 @@ export function SketchPad() {
         >
           ⤓ EXPORT
         </button>
+        {/*
+          POP TO TOUCHSCREEN — opens this Sketch Pad in its own
+          window so the user can drag it to their embedded touchscreen
+          monitor. Once moved, Windows remembers the monitor for
+          subsequent opens. Hidden when we're ALREADY inside the
+          popped /sketch window (would just open a sibling popup).
+          State is independent of the main HUD's DESIGN tab — popping
+          is a "commit to drawing on the touchscreen" gesture.
+        */}
+        {typeof window !== "undefined" &&
+        window.location.pathname !== "/sketch" ? (
+          <button
+            type="button"
+            className="hud-button"
+            data-testid="sketch-pop-btn"
+            onClick={() => {
+              // Best-effort: hint the popup at the largest reasonable
+              // resolution. The user drags it to the touchscreen the
+              // first time; OS remembers position on subsequent opens.
+              window.open(
+                "/sketch",
+                "alfred-sketch",
+                "popup=yes,width=1920,height=1080",
+              );
+            }}
+            title="Open the Sketch Pad in a separate window — drag it to your touchscreen monitor"
+          >
+            ⤴ POP TO TOUCHSCREEN
+          </button>
+        ) : null}
         <button
           type="button"
           className="hud-button"
