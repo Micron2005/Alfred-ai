@@ -1,6 +1,7 @@
 "use client";
 
-import { useEffect, useRef, useState, useSyncExternalStore } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from "react";
+import { createPortal } from "react-dom";
 import {
   SKETCH_TOOLS,
   sketchStore,
@@ -648,17 +649,53 @@ function ColorDropdown(props: {
 }) {
   const { current, onPick } = props;
   const [open, setOpen] = useState(false);
-  const containerRef = useRef<HTMLDivElement | null>(null);
+  const triggerRef = useRef<HTMLButtonElement | null>(null);
+  const panelRef = useRef<HTMLDivElement | null>(null);
+  // Trigger button's screen position, recomputed on open + on
+  // every resize / scroll so the floating panel stays anchored
+  // to it even when the window dimensions change.
+  const [anchor, setAnchor] = useState<{
+    top: number;
+    left: number;
+  } | null>(null);
 
-  // Close on outside click. Mouse + touch + pointer cover Windows
-  // mouse, touchscreen tap, and pen tap from the same handler.
+  // Recompute the anchor whenever the panel opens, plus on
+  // resize / scroll so the panel doesn't drift away from the
+  // button. ``useLayoutEffect`` so the panel paints with the
+  // correct position on the very first frame (no flicker).
+  useLayoutEffect(() => {
+    if (!open) return;
+    const recompute = () => {
+      const el = triggerRef.current;
+      if (!el) return;
+      const rect = el.getBoundingClientRect();
+      setAnchor({
+        // 12 px gap to the right of the button.
+        left: Math.round(rect.right + 12),
+        top: Math.round(rect.top),
+      });
+    };
+    recompute();
+    window.addEventListener("resize", recompute);
+    window.addEventListener("scroll", recompute, true);
+    return () => {
+      window.removeEventListener("resize", recompute);
+      window.removeEventListener("scroll", recompute, true);
+    };
+  }, [open]);
+
+  // Close on outside click. Mouse + touch + pen all come through
+  // ``pointerdown`` so a single listener covers them.
   useEffect(() => {
     if (!open) return;
     const onPointerDown = (e: PointerEvent) => {
-      if (!containerRef.current) return;
-      if (e.target instanceof Node && containerRef.current.contains(e.target)) {
-        return;
-      }
+      const target = e.target;
+      if (!(target instanceof Node)) return;
+      // The trigger button toggles via its own onClick; ignore
+      // pointerdowns inside it (otherwise we close before the
+      // click can re-open).
+      if (triggerRef.current && triggerRef.current.contains(target)) return;
+      if (panelRef.current && panelRef.current.contains(target)) return;
       setOpen(false);
     };
     window.addEventListener("pointerdown", onPointerDown, true);
@@ -676,9 +713,129 @@ function ColorDropdown(props: {
     return () => window.removeEventListener("keydown", onKey);
   }, [open]);
 
+  // The panel itself. Lives in a portal at the document body so
+  // it can NEVER be clipped by the tool rail's ``overflow-y:
+  // auto`` (CSS forces overflow-x to auto when overflow-y is
+  // auto, which clipped the first version of this panel
+  // invisibly — the trigger looked dead because the panel was
+  // off-screen). Position fixed against the trigger rect.
+  const panel =
+    open && anchor && typeof document !== "undefined"
+      ? createPortal(
+          <div
+            ref={panelRef}
+            data-testid="sketch-color-panel"
+            style={{
+              position: "fixed",
+              top: anchor.top,
+              left: anchor.left,
+              zIndex: 10000,
+              width: 220,
+              padding: 12,
+              background: "var(--bg)",
+              border: "1px solid var(--border)",
+              borderRadius: 6,
+              boxShadow:
+                "0 8px 24px rgba(0,0,0,0.45), 0 0 0 1px rgba(108,214,255,0.08)",
+              display: "flex",
+              flexDirection: "column",
+              gap: 10,
+              fontFamily: "inherit",
+            }}
+          >
+            <div
+              style={{
+                fontSize: 10,
+                letterSpacing: 2,
+                color: "var(--muted)",
+              }}
+            >
+              COLOUR
+            </div>
+            {/* Curated palette */}
+            <div
+              style={{
+                display: "grid",
+                gridTemplateColumns: "repeat(4, 1fr)",
+                gap: 6,
+              }}
+            >
+              {SWATCHES.map((swatch, i) => {
+                const selected =
+                  current.toLowerCase() === swatch.toLowerCase();
+                return (
+                  <button
+                    key={swatch}
+                    type="button"
+                    data-testid={`sketch-color-swatch-${i}`}
+                    aria-pressed={selected}
+                    onClick={() => {
+                      onPick(swatch);
+                      setOpen(false);
+                    }}
+                    title={swatch}
+                    style={{
+                      width: "100%",
+                      aspectRatio: "1",
+                      borderRadius: 4,
+                      background: swatch,
+                      cursor: "pointer",
+                      border: selected
+                        ? "2px solid var(--fg)"
+                        : "1px solid var(--border)",
+                      boxShadow: selected ? `0 0 8px ${swatch}` : "none",
+                    }}
+                  />
+                );
+              })}
+            </div>
+
+            <div
+              style={{
+                borderTop: "1px solid var(--border)",
+                margin: "2px 0",
+              }}
+            />
+
+            {/* Colour wheel — the OS-native picker. Live-applies on
+                change without closing the panel so the user can dial
+                in a hue gradually. */}
+            <label
+              style={{
+                fontSize: 10,
+                letterSpacing: 2,
+                color: "var(--muted)",
+              }}
+            >
+              CUSTOM
+            </label>
+            <input
+              type="color"
+              data-testid="sketch-color-picker"
+              value={
+                /^#[0-9a-fA-F]{6}$/.test(current) ? current : "#16181d"
+              }
+              onChange={(e) => onPick(e.target.value)}
+              title="Pick any colour"
+              style={{
+                width: "100%",
+                height: 40,
+                padding: 0,
+                border: "1px solid var(--border)",
+                borderRadius: 4,
+                background: "transparent",
+                cursor: "pointer",
+              }}
+            />
+          </div>,
+          document.body,
+        )
+      : null;
+
   return (
-    <div ref={containerRef} style={{ position: "relative" }}>
+    <>
       <button
+        ref={triggerRef}
         type="button"
         data-testid="sketch-color-trigger"
         aria-haspopup="true"
@@ -694,10 +851,6 @@ function ColorDropdown(props: {
             ? "2px solid var(--hud)"
             : "1px solid var(--border)",
           background: current,
-          // Subtle inset shadow so a chosen ``white`` colour still
-          // reads as a button rather than disappearing into the
-          // panel background. Plus a glow when open to confirm the
-          // dropdown is now floating to its right.
           boxShadow: open
             ? `0 0 12px ${current}, inset 0 0 0 2px rgba(0,0,0,0.15)`
             : "inset 0 0 0 1px rgba(0,0,0,0.15)",
@@ -713,9 +866,6 @@ function ColorDropdown(props: {
             right: 4,
             bottom: 2,
             fontSize: 9,
-            // Auto-contrast: dark caret on light swatches, vice
-            // versa. Computed from the current colour's perceived
-            // luminance — see ``contrastForeground`` below.
             color: contrastForeground(current),
             textShadow: "0 0 2px rgba(0,0,0,0.45)",
             pointerEvents: "none",
@@ -724,113 +874,8 @@ function ColorDropdown(props: {
           ▾
         </span>
       </button>
-
-      {open ? (
-        <div
-          data-testid="sketch-color-panel"
-          style={{
-            position: "absolute",
-            top: 0,
-            // 92 px wide rail + 10 px padding — float just outside
-            // it so the panel never clips the toolbar contents.
-            left: "calc(100% + 12px)",
-            zIndex: 50,
-            width: 200,
-            padding: 10,
-            background: "var(--bg)",
-            border: "1px solid var(--border)",
-            borderRadius: 6,
-            boxShadow:
-              "0 8px 24px rgba(0,0,0,0.45), 0 0 0 1px rgba(108,214,255,0.08)",
-            display: "flex",
-            flexDirection: "column",
-            gap: 8,
-          }}
-        >
-          <div
-            style={{
-              fontSize: 10,
-              letterSpacing: 2,
-              color: "var(--muted)",
-            }}
-          >
-            COLOUR
-          </div>
-          {/* Curated palette */}
-          <div
-            style={{
-              display: "grid",
-              gridTemplateColumns: "repeat(4, 1fr)",
-              gap: 6,
-            }}
-          >
-            {SWATCHES.map((swatch, i) => {
-              const selected = current.toLowerCase() === swatch.toLowerCase();
-              return (
-                <button
-                  key={swatch}
-                  type="button"
-                  data-testid={`sketch-color-swatch-${i}`}
-                  aria-pressed={selected}
-                  onClick={() => {
-                    onPick(swatch);
-                    setOpen(false);
-                  }}
-                  title={swatch}
-                  style={{
-                    width: "100%",
-                    aspectRatio: "1",
-                    borderRadius: 4,
-                    background: swatch,
-                    cursor: "pointer",
-                    border: selected
-                      ? "2px solid var(--fg)"
-                      : "1px solid var(--border)",
-                    boxShadow: selected ? `0 0 8px ${swatch}` : "none",
-                  }}
-                />
-              );
-            })}
-          </div>
-
-          <div
-            style={{
-              borderTop: "1px solid var(--border)",
-              margin: "2px 0",
-            }}
-          />
-
-          {/* Colour wheel — the OS-native picker. Live-applies on
-              change without closing the panel so the user can dial
-              in a hue gradually. */}
-          <label
-            style={{
-              fontSize: 10,
-              letterSpacing: 2,
-              color: "var(--muted)",
-            }}
-          >
-            CUSTOM
-          </label>
-          <input
-            type="color"
-            data-testid="sketch-color-picker"
-            value={/^#[0-9a-fA-F]{6}$/.test(current) ? current : "#16181d"}
-            onChange={(e) => onPick(e.target.value)}
-            title="Pick any colour"
-            style={{
-              width: "100%",
-              height: 38,
-              padding: 0,
-              border: "1px solid var(--border)",
-              borderRadius: 4,
-              background: "transparent",
-              cursor: "pointer",
-            }}
-          />
-        </div>
-      ) : null}
-    </div>
+      {panel}
+    </>
   );
 }
 
