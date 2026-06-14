@@ -29,14 +29,17 @@
     "win": {
       "target": [{ "target": "nsis", "arch": ["x64"] }],
       "icon": "build/icon.ico",
-      "signExecutable": false
+      "signExecutable": false,
+      "signAndEditExecutable": false,
+      "verifyUpdateCodeSignature": false
     },
     "nsis": {
       "oneClick": true,
       "perMachine": false,
       "deleteAppDataOnUninstall": false,
       "runAfterFinish": true,
-      "shortcutName": "Alfred"
+      "shortcutName": "Alfred",
+      "differentialPackage": false
     }
   }
 }
