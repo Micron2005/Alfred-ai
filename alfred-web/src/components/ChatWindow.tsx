@@ -971,22 +971,30 @@ export function ChatWindow() {
   });
 
   const camera = useCamera({ enabled: cameraOn });
-  // Hand / face / pose tracking all auto-start — no opt-in toggles.
-  // Each hook requests its own getUserMedia stream; if the browser
-  // denies the camera permission, ``status`` lands at ``"error"``
-  // and the corresponding overlay simply renders nothing. No noisy
-  // UI. Face tracking runs silently (its data feeds the expression
-  // detector + recognition vector — we deliberately do NOT draw the
-  // face mesh on top of the user). Pose tracking renders the body
-  // skeleton overlay just like the hand cursor does.
-  const hand = useHandTracking({ enabled: true });
+  // Hand / face / pose tracking ALL share the camera stream owned
+  // by ``useCamera`` — no per-hook getUserMedia calls. Without this
+  // the three vision hooks raced for the device on hardware that
+  // can't share a webcam cleanly, leaving the camera tile blank
+  // with the OS light on (the user's reported symptom).
+  //
+  // Gating ``enabled`` on ``cameraOn`` AND on the stream actually
+  // arriving means the MediaPipe detectors don't spin up until
+  // useCamera has the webcam handle — they all initialise in
+  // parallel once the stream lands, then run off the single shared
+  // MediaStreamTrack.
+  const sharedStream = camera.stream;
+  const visionEnabled = cameraOn && sharedStream !== null;
+  const hand = useHandTracking({
+    enabled: visionEnabled,
+    sharedStream,
+  });
   const face = useFaceTracking({
-    enabled: true,
-    sharedStream: camera.streamRef.current ?? null,
+    enabled: visionEnabled,
+    sharedStream,
   });
   const pose = usePoseTracking({
-    enabled: true,
-    sharedStream: camera.streamRef.current ?? null,
+    enabled: visionEnabled,
+    sharedStream,
   });
 
   // Single source of truth for face identity — polls the backend
@@ -2645,8 +2653,9 @@ export function ChatWindow() {
         </p>
       ) : null}
 
-      {cameraOn && camera.error ? (
+      {cameraOn && (camera.error || camera.status === "error") ? (
         <p
+          data-testid="camera-error-banner"
           style={{
             color: "var(--danger)",
             fontSize: 12,
@@ -2657,7 +2666,7 @@ export function ChatWindow() {
             margin: "0 12px 8px",
           }}
         >
-          {camera.error}
+          {camera.error ?? "Camera failed to start. Toggle it off and on, or check OS camera permissions."}
         </p>
       ) : null}
 

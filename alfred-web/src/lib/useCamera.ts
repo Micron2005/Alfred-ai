@@ -73,8 +73,20 @@ export interface UseCameraReturn {
    * stream as ``srcObject`` without disturbing the hidden detection
    * pipeline. Multiple ``<video>`` elements can render the same
    * stream simultaneously.
+   *
+   * Kept around for backwards compat with CameraPreview, which
+   * reads ``streamRef.current`` inside a status-gated effect.
    */
   streamRef: React.RefObject<MediaStream | null>;
+  /**
+   * Same stream, but exposed as React state — when it changes,
+   * downstream hooks (useFaceTracking, usePoseTracking,
+   * useHandTracking) re-render and can attach themselves to the
+   * shared stream instead of grabbing the camera themselves.
+   * Prefer this over ``streamRef.current`` for any consumer that
+   * needs to *react* to the stream arriving.
+   */
+  stream: MediaStream | null;
   /**
    * Capture the most recent frame as a JPEG. Returns ``null`` if the
    * camera isn't ready (e.g. the user hasn't toggled it on yet).
@@ -88,6 +100,16 @@ export function useCamera(opts: UseCameraOptions): UseCameraReturn {
   const [status, setStatus] = useState<CameraStatus>("off");
   const [error, setError] = useState<string | null>(null);
   const [faceCount, setFaceCount] = useState(0);
+  // ``stream`` is exposed as React state (not just a ref) so
+  // downstream hooks — useFaceTracking, usePoseTracking — re-render
+  // when it actually arrives. Before this, those hooks read
+  // ``streamRef.current`` at first paint (always null) and went on
+  // to claim the camera themselves, racing useCamera's getUserMedia
+  // call and ending up with 3 separate MediaStreams fighting for
+  // one device. The visible symptom was a black/blank camera tile
+  // with no error banner — the user reported "camera light is on
+  // in OS but Alfred shows nothing".
+  const [stream, setStream] = useState<MediaStream | null>(null);
 
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
@@ -105,6 +127,7 @@ export function useCamera(opts: UseCameraOptions): UseCameraReturn {
       for (const track of streamRef.current.getTracks()) track.stop();
       streamRef.current = null;
     }
+    setStream(null);
     const v = videoRef.current;
     if (v) {
       try {
@@ -139,8 +162,27 @@ export function useCamera(opts: UseCameraOptions): UseCameraReturn {
 
     void (async () => {
       try {
-        // Lazy-load MediaPipe so the ~1 MB JS bundle stays out of the
-        // initial page load. Same pattern as ``useWakeWord``.
+        // Get the camera FIRST, before loading MediaPipe. This way
+        // if permission is denied we surface the error immediately
+        // instead of after a ~1 second WASM load — and we don't
+        // hold any resources during the failed permission prompt.
+        const acquired = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: "user", width: 640, height: 480 },
+          audio: false,
+        });
+        if (cancelled) {
+          for (const track of acquired.getTracks()) track.stop();
+          return;
+        }
+        streamRef.current = acquired;
+        // Publish the stream BEFORE awaiting MediaPipe init — this
+        // lets face/pose hooks kick off their detector setup in
+        // parallel with our face detector, halving wall-clock
+        // startup time when all three are wired up.
+        setStream(acquired);
+
+        // Lazy-load MediaPipe so the ~1 MB JS bundle stays out of
+        // the initial page load. Same pattern as ``useWakeWord``.
         const { FaceDetector, FilesetResolver } = await import(
           "@mediapipe/tasks-vision"
         );
@@ -159,24 +201,13 @@ export function useCamera(opts: UseCameraOptions): UseCameraReturn {
         }
         detectorRef.current = detector;
 
-        const stream = await navigator.mediaDevices.getUserMedia({
-          video: { facingMode: "user", width: 640, height: 480 },
-          audio: false,
-        });
-        if (cancelled) {
-          for (const track of stream.getTracks()) track.stop();
-          return;
-        }
-        streamRef.current = stream;
-
         const video = videoRef.current;
         if (!video) {
-          for (const track of stream.getTracks()) track.stop();
           throw new Error(
             "Camera video element missing. Mount the hidden <video> element from videoRef.",
           );
         }
-        video.srcObject = stream;
+        video.srcObject = acquired;
         video.muted = true;
         await video.play();
 
@@ -214,13 +245,25 @@ export function useCamera(opts: UseCameraOptions): UseCameraReturn {
         const msg = e instanceof Error ? e.message : String(e);
         setStatus("error");
         const lower = msg.toLowerCase();
-        if (lower.includes("permission") || lower.includes("notallowed")) {
+        if (
+          lower.includes("permission") ||
+          lower.includes("notallowed") ||
+          lower.includes("denied")
+        ) {
           setError(
             "Camera permission denied. Allow camera access in your browser, then toggle the camera off and on.",
           );
         } else if (lower.includes("notfound") || lower.includes("not found")) {
           setError(
             "No camera found. Plug one in (or ensure your laptop's built-in webcam isn't disabled), then toggle the camera off and on.",
+          );
+        } else if (
+          lower.includes("notreadable") ||
+          lower.includes("could not start video source") ||
+          lower.includes("in use")
+        ) {
+          setError(
+            "Camera is in use by another app (Zoom, Teams, OBS, browser tab…). Close that app then toggle the camera off and on.",
           );
         } else {
           setError(`Camera setup failed: ${msg}`);
@@ -272,7 +315,7 @@ export function useCamera(opts: UseCameraOptions): UseCameraReturn {
   }, [faceCount]);
 
   return useMemo(
-    () => ({ status, error, faceCount, videoRef, streamRef, captureFrame }),
-    [status, error, faceCount, captureFrame],
+    () => ({ status, error, faceCount, videoRef, streamRef, stream, captureFrame }),
+    [status, error, faceCount, stream, captureFrame],
   );
 }

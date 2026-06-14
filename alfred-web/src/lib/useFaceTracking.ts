@@ -200,6 +200,12 @@ export function useFaceTracking(
 
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const detectorRef = useRef<FaceLandmarker | null>(null);
+  // Fallback stream this hook owns when no shared one is passed
+  // in. Used by the standalone ``/face`` window, which lives in
+  // its own browser context and has no useCamera to share with.
+  // Inside the main HUD (ChatWindow), ``sharedStream`` is always
+  // populated and this stays null — see the comment in the
+  // effect below for the race condition we're avoiding there.
   const ownStreamRef = useRef<MediaStream | null>(null);
   const rafRef = useRef<number | null>(null);
   const lastInferAt = useRef(0);
@@ -253,6 +259,15 @@ export function useFaceTracking(
 
     void (async () => {
       try {
+        // Face tracking prefers the shared camera stream owned by
+        // useCamera, but falls back to its own getUserMedia if no
+        // shared stream is passed in. Three hooks calling
+        // getUserMedia in parallel was the root cause of the
+        // blank-camera-tile bug the user reported — see the
+        // ChatWindow callsite for the gating that ensures the
+        // sharedStream is always supplied there. Standalone
+        // contexts (the /face popup window) have no useCamera to
+        // share with, so the fallback path is what they need.
         const { FaceLandmarker, FilesetResolver } = await import(
           "@mediapipe/tasks-vision"
         );

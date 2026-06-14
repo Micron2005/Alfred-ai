@@ -56,7 +56,13 @@ export interface ToolSettings {
 }
 
 export const DEFAULT_TOOL_SETTINGS: Record<SketchTool, ToolSettings> = {
-  pencil: { size: 5, opacity: 0.72, streamline: 0.2 },
+  // Pencil leans soft/sketchy — smaller default, lower opacity, less
+  // streamline so the grain reads. The texture itself (drawn in
+  // SketchPad's drawSegment) is what visually separates it from the
+  // pen; the lower opacity then lets overlapping passes build up
+  // tone the way graphite layers really do.
+  pencil: { size: 4, opacity: 0.55, streamline: 0.15 },
+  // Pen — confident, opaque ink, mid streamline for clean curves.
   pen: { size: 6, opacity: 1, streamline: 0.5 },
   marker: { size: 16, opacity: 0.32, streamline: 0.35 },
   eraser: { size: 20, opacity: 1, streamline: 0.2 },

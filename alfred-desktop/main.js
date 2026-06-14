@@ -59,6 +59,24 @@ const DEFAULTS = {
   /** "any" = first secondary display (touch-capable preferred), or a
    *  physical resolution like "1920x1080" to pin a specific monitor. */
   faceResolution: "any",
+  /**
+   * Sketch (Design Pad) window target. When the user clicks "POP TO
+   * TOUCHSCREEN" in the HUD, this is where it goes.
+   *   - "auto"     : pick the touch-capable secondary monitor (the
+   *                  same one the face window doesn't claim — see
+   *                  ``pickSketchDisplay`` for tie-breaking);
+   *   - "any"      : any secondary monitor;
+   *   - "1920x1080": pin to a specific physical resolution;
+   *   - "primary"  : the primary monitor (debug / no-touchscreen
+   *                  setups);
+   *   - "off"      : ignore the pop button and let the web
+   *                  ``window.open`` fall through (browser default).
+   */
+  sketchResolution: "auto",
+  /** Open the sketch window borderless + fullscreen on its display
+   *  (Procreate-on-touchscreen mode). false = a normal resizable
+   *  window the user can move and resize. */
+  sketchFullscreen: true,
   /** Register as a Windows login item so Alfred starts at logon. */
   openAtLogin: true,
   /** How long to wait for the stack before giving up (first boot
@@ -71,6 +89,7 @@ let splashWin = null;
 let hudWin = null;
 let faceWin = null;
 let faceAutoOpened = false;
+let sketchWin = null;
 let tray = null;
 let quitting = false;
 
@@ -193,22 +212,96 @@ function createHud() {
     hudWin.show();
     hudWin.maximize();
   });
-  // In-app window.open (e.g. the FACE panel's manual LAUNCH button)
-  // → real frameless child windows for same-origin pages; anything
-  // external (Spotify auth, source links) → the system browser.
+  // In-app window.open (e.g. the FACE panel's manual LAUNCH button,
+  // or the Sketch Pad's POP TO TOUCHSCREEN) → real frameless child
+  // windows for same-origin pages; anything external (Spotify auth,
+  // source links) → the system browser.
+  //
+  // Sketch Pad special case: ``/sketch`` is the dedicated full-screen
+  // touch surface. We position it on the configured sketch display
+  // (the other touchscreen, by default) and open it borderless +
+  // fullscreen so it Just Works on a touch monitor without window
+  // chrome stealing pixels. Without this, ``window.open`` lands as
+  // a normal tab/window on the *same* monitor the HUD is on — which
+  // is what the user reported.
   hudWin.webContents.setWindowOpenHandler(({ url }) => {
-    if (url.startsWith(config.appUrl)) {
+    if (!url.startsWith(config.appUrl)) {
+      void shell.openExternal(url);
+      return { action: "deny" };
+    }
+    let pathname = "";
+    try {
+      pathname = new URL(url).pathname;
+    } catch {
+      /* malformed url — fall through to default allow */
+    }
+    if (pathname === "/sketch" || pathname === "/sketch/") {
+      // Reuse the existing sketch window if one is already open
+      // rather than spawning a sibling.
+      if (sketchWin && !sketchWin.isDestroyed()) {
+        sketchWin.show();
+        sketchWin.focus();
+        return { action: "deny" };
+      }
+      const display = pickSketchDisplay();
+      if (!display) {
+        // ``sketchResolution: "off"`` — let the browser default
+        // window.open dimensions/placement apply.
+        return {
+          action: "allow",
+          overrideBrowserWindowOptions: {
+            autoHideMenuBar: true,
+            backgroundColor: "#060912",
+            icon: appIcon(),
+          },
+        };
+      }
       return {
         action: "allow",
         overrideBrowserWindowOptions: {
-          autoHideMenuBar: true,
+          x: display.bounds.x,
+          y: display.bounds.y,
+          width: display.bounds.width,
+          height: display.bounds.height,
+          frame: !config.sketchFullscreen,
+          fullscreen: !!config.sketchFullscreen,
           backgroundColor: "#060912",
+          title: "Alfred — Sketch",
           icon: appIcon(),
+          autoHideMenuBar: true,
         },
       };
     }
-    void shell.openExternal(url);
-    return { action: "deny" };
+    return {
+      action: "allow",
+      overrideBrowserWindowOptions: {
+        autoHideMenuBar: true,
+        backgroundColor: "#060912",
+        icon: appIcon(),
+      },
+    };
+  });
+
+  // When a /sketch popup is opened via the SketchPad POP button,
+  // remember the window so subsequent POP clicks refocus it instead
+  // of spawning a sibling, and the tray entry can close it. Using
+  // ``did-create-window`` on the HUD's webContents gives us the
+  // actual BrowserWindow handle that Electron just constructed
+  // (matching the title we set in setWindowOpenHandler).
+  hudWin.webContents.on("did-create-window", (childWin, details) => {
+    let pathname = "";
+    try {
+      pathname = new URL(details.url).pathname;
+    } catch {
+      /* malformed url — just leave it untracked */
+    }
+    if (pathname !== "/sketch" && pathname !== "/sketch/") return;
+    sketchWin = childWin;
+    childWin.on("closed", () => {
+      if (sketchWin === childWin) sketchWin = null;
+      updateTrayMenu();
+    });
+    updateTrayMenu();
   });
   // Closing the HUD hides to tray — Alfred (and the face) stay alive.
   hudWin.on("close", (e) => {
@@ -253,6 +346,58 @@ function pickFaceDisplay() {
   // Electron reports per-display touch capability — the actual
   // touchscreen wins over plain monitors.
   return pool.find((d) => d.touchSupport === "available") ?? pool[0];
+}
+
+/**
+ * Pick a display for the Sketch (Design Pad) window. Strategy:
+ *   - ``off`` → null, the pop button falls back to browser-default
+ *     ``window.open`` behaviour;
+ *   - explicit resolution (e.g. "1920x1080") → pin to that monitor;
+ *   - ``primary`` → primary display (debug / single-monitor setups);
+ *   - ``any`` → any secondary;
+ *   - ``auto`` (default) → the *other* touch-capable secondary
+ *     monitor: if the face window is already on the touchscreen,
+ *     prefer a different touch display for the sketch (this is the
+ *     three-monitor case the user described — face on one screen,
+ *     sketch on the desk touchscreen). Falls back gracefully to
+ *     any touchscreen, then to any secondary, then primary.
+ */
+function pickSketchDisplay() {
+  const setting = String(config.sketchResolution || "auto").toLowerCase();
+  if (setting === "off") return null;
+
+  const all = screen.getAllDisplays();
+  const primary = screen.getPrimaryDisplay();
+  const secondaries = all.filter((d) => d.id !== primary.id);
+
+  if (setting === "primary") return primary;
+
+  const explicit = parseResolution(config.sketchResolution);
+  if (explicit) {
+    const match = all.find((d) => {
+      const p = physicalSize(d);
+      return (p.w === explicit.w && p.h === explicit.h) || (p.w === explicit.h && p.h === explicit.w);
+    });
+    if (match) return match;
+    // Fall through to "auto" behaviour if the pinned monitor isn't plugged in.
+  }
+
+  // ``auto`` and ``any``: pick the best touch-capable secondary that
+  // isn't currently hosting the face window (so the user gets a
+  // separate monitor for the sketch).
+  const facePane = faceWin && !faceWin.isDestroyed() ? faceWin : null;
+  const faceDisplay = facePane
+    ? screen.getDisplayMatching(facePane.getBounds())
+    : null;
+  const candidates = secondaries.filter(
+    (d) => !faceDisplay || d.id !== faceDisplay.id,
+  );
+  const pool = candidates.length > 0 ? candidates : secondaries;
+  if (pool.length === 0) return primary;
+  return (
+    pool.find((d) => d.touchSupport === "available") ??
+    pool[0]
+  );
 }
 
 function openFaceOn(display) {
@@ -347,6 +492,39 @@ function updateTrayMenu() {
           } else {
             faceAutoOpened = false;
             openFaceOn(pickFaceDisplay() ?? screen.getPrimaryDisplay());
+          }
+        },
+      },
+      {
+        label: sketchWin ? "Close Sketch Window" : "Open Sketch Window",
+        click: () => {
+          if (sketchWin && !sketchWin.isDestroyed()) {
+            sketchWin.close();
+          } else {
+            // Manual launch path: same chrome/fullscreen rules as
+            // the SketchPad POP button, but the user picks it from
+            // the tray instead.
+            const display =
+              pickSketchDisplay() ?? screen.getPrimaryDisplay();
+            const win = new BrowserWindow({
+              x: display.bounds.x,
+              y: display.bounds.y,
+              width: display.bounds.width,
+              height: display.bounds.height,
+              frame: !config.sketchFullscreen,
+              fullscreen: !!config.sketchFullscreen,
+              backgroundColor: "#060912",
+              title: "Alfred — Sketch",
+              icon: appIcon(),
+              autoHideMenuBar: true,
+            });
+            void win.loadURL(`${config.appUrl}/sketch`);
+            sketchWin = win;
+            win.on("closed", () => {
+              if (sketchWin === win) sketchWin = null;
+              updateTrayMenu();
+            });
+            updateTrayMenu();
           }
         },
       },

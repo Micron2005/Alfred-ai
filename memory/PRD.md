@@ -498,15 +498,121 @@ DE-DOCKER MIGRATION
 User runs ONE command on his PC to migrate + restore memory:
 ``bash ~/Alfred-ai/scripts/native/go-native.sh``
 
+### Sketch pop-out + pen/pencil texture + camera fix (2026-02 fork)
+User feedback after the Desktop migration:
+1. "i dont like how the pen and pencil draw the same exact way" —
+   they had different pressure curves but visually identical strokes.
+2. "when i click pop to touch screen it just opens it as another
+   tab instead of popping it up on the touch screen" — the SketchPad
+   POP button used a plain ``window.open`` with ``popup=yes`` which
+   Chrome ignores (lands as a tab next to the HUD).
+3. Camera tile stays blank/black with NO error banner; OS camera
+   light is on, so a hook IS holding the device — but the wrong
+   one. Hand tracking was also broken (lower priority).
+
+Fixed in this session:
+
+POP TO TOUCHSCREEN now lands on the configured monitor
+- `alfred-desktop/main.js` intercepts ``/sketch`` window.opens via
+  ``setWindowOpenHandler``. Adds two config knobs:
+  • ``sketchResolution`` (default ``"auto"``): picks the OTHER
+    touch-capable secondary monitor (so face window stays on one,
+    sketch on the other in three-monitor setups). Also accepts
+    ``"any" | "primary" | "1920x1080" | "off"``.
+  • ``sketchFullscreen`` (default ``true``): borderless +
+    fullscreen on the target display (Procreate-on-touchscreen).
+- ``pickSketchDisplay()`` uses Electron's per-display
+  ``touchSupport`` reporting (no browser permission prompts) and
+  avoids the display currently hosting the face window.
+- Existing sketchWin tracked via ``did-create-window`` event;
+  subsequent POP clicks refocus the existing window rather than
+  spawning siblings. Tray gained ``Open Sketch Window`` /
+  ``Close Sketch Window`` entry mirroring the face window UX.
+- SketchPad's POP button updated with richer popup hints (left=0,
+  top=0, menubar/toolbar/location/status=no) so browser-only mode
+  also has a better chance of landing as a window rather than tab.
+
+Pen vs Pencil — visible texture difference
+- ``TOOL_CONFIG`` gains a ``texture: "smooth" | "grainy"`` field.
+  Pencil is now ``grainy``: ``drawSegment`` keeps the smooth core
+  at 60% width + 55% alpha, then stamps small Gaussian-jittered
+  dots along each segment (~1 stamp per 0.6 × lineWidth px). Dot
+  size + per-dot alpha vary so the graphite has a broken edge.
+- Pen/marker/eraser stay ``smooth`` (single antialiased line).
+- Pencil defaults bumped down (size 4, opacity 0.55) so even with
+  the grain the line reads as graphite rather than a thick wash.
+- New ``BrushPreviewChip`` component replaces the old solid-dot
+  preview: a 180×44 canvas that draws a representative stroke
+  using the same texture model, so the user sees pen vs pencil
+  vs marker BEFORE drawing.
+
+Camera tile blank/black — root cause + fix
+- Root cause: ``useFaceTracking``, ``usePoseTracking``, and
+  ``useHandTracking`` were hardcoded ``enabled: true`` and each
+  called its own ``navigator.mediaDevices.getUserMedia``. The
+  ``sharedStream`` they accepted was read from
+  ``camera.streamRef.current`` at render time — a ref, not state,
+  so its later mutation never triggered the hooks to re-init.
+  Result on the user's hardware: three parallel getUserMedia
+  races, one or more silently lose the device (camera light on,
+  but ``useCamera``'s stream lands null) so ``CameraPreview`` has
+  nothing to attach to.
+- Fix: ``useCamera`` now publishes the stream as React **state**
+  (``stream``) the moment it's acquired (BEFORE the MediaPipe
+  ``FaceDetector`` init so the three other detectors can run
+  their setup in parallel — also halves the wall-clock startup).
+  All three downstream hooks (face/pose/hand) now REQUIRE a
+  shared stream and drop their own ``getUserMedia`` fallback;
+  if no shared stream they go ``"off"`` and render nothing. Their
+  teardown no longer stops the shared MediaStream tracks (camera
+  owns the lifecycle).
+- ChatWindow gates ``face/pose/hand`` ``enabled`` on
+  ``cameraOn && camera.stream != null`` so the three detectors
+  spin up exactly when the user toggles the camera on, all
+  feeding off the same MediaStreamTrack.
+- Camera error banner now appears whenever ``camera.status ===
+  "error"`` (not only when ``camera.error`` is also set), with a
+  ``data-testid="camera-error-banner"`` for tests.
+- Added a third error case to ``useCamera``: NotReadableError /
+  "could not start video source" / "in use" now maps to a clear
+  "Camera is in use by another app (Zoom, Teams, OBS, browser
+  tab…)" message instead of the generic catch-all.
+
+Verification:
+- ``yarn build`` clean. ``yarn lint`` clean (1 pre-existing
+  warning unrelated to this change). ``npx tsc --noEmit`` clean.
+- ``node --check alfred-desktop/main.js`` passes.
+- The user is rebuilding locally (Docker Compose + Alfred.exe).
+  Manual verification flow he should run:
+  1. Frontend: ``docker compose up -d --build alfred-web``
+  2. Reload HUD; toggle CAM ON → tile should populate within
+     2 s and the error banner should NOT appear.
+  3. Pop the Sketch Pad from POP TO TOUCHSCREEN → lands on the
+     other touch monitor (or whichever sketchResolution targets).
+  4. In Sketch Pad, switch between pen and pencil → preview chip
+     visibly changes and strokes have grain on paper.
+
 ## Backlog / roadmap
-- P1 (NEW from 2026-06-13 evening): Hand tracking regression. User
-  reported hand tracking isn't working after today's Docker stop /
-  start sequence; HUD otherwise fully restored (chat, memory, vitals,
-  Spotify, weather, Earth, MEMORY sub-tab all back). Likely candidates:
-  alfred-web Electron app needs hard refresh to re-acquire camera
-  permission, OR MediaPipe model failed to fetch behind a hot
-  restart, OR the front-end-only Pose+Hands worker fell silent. Don't
-  touch until user explicitly asks — they said "alright for now."
+- P0 → DONE this fork: Camera tile blank fix (shared MediaStream
+  across face/pose/hand hooks). Awaiting user verification on his
+  Desktop after ``docker compose up -d --build alfred-web``.
+- P1 (NEW from 2026-06-13 evening): Hand tracking regression. The
+  shared-stream refactor in this fork likely also un-breaks hand
+  tracking as a side-effect (it was racing the camera with face/
+  pose), but user explicitly deprioritised this so verification
+  is pending. Once they confirm the camera tile works, hand
+  tracking is the next thing to test.
+- P1: "Alfred runs natively on my desktop and can control things on
+  my desktop" — the user wants more native multi-monitor awareness
+  beyond the current Electron face+sketch window placement. Possible
+  next steps:
+  • IPC channel from Electron main → renderer exposing the display
+    list (touch capability, refresh rate, physical resolution) so
+    the HUD can self-route widgets to monitors;
+  • An OS-control bridge (`scripts/windows/*`) for window switching,
+    app launch, volume, brightness from the Alfred chat;
+  • Replace the WSL Docker stack with the native systemd path
+    long-term so Alfred can run when WSL is sleepy.
 - P1: Face polish candidates (user feedback pending): Alfred
   announcing "monitor connected", brow/expression states tied to
   persona mood, mouth viseme shaping (vs amplitude-only jaw).

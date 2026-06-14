@@ -74,26 +74,38 @@ interface ToolConfig {
   minPressure: number;
   /** …plus this much × pressure on top. */
   pressureGain: number;
+  /**
+   * Stroke texture. ``smooth`` is a plain antialiased line (the
+   * pen + marker behaviour). ``grainy`` stamps small jittered
+   * dots along the stroke so the result reads as graphite on
+   * paper rather than ink — the visible difference between pen
+   * and pencil. Implemented in ``drawSegment``.
+   */
+  texture: "smooth" | "grainy";
 }
 
 // Size and opacity now live in the store (per-tool, user-adjustable,
 // Procreate-style) — this config only keeps each tool's glyph and
 // pressure character.
 const TOOL_CONFIG: Record<SketchTool, ToolConfig> = {
-  // Pencil: strongly pressure-driven — light touch gives a faint
-  // thin line, pressing hard nearly doubles the width.
+  // Pencil: strongly pressure-driven AND grainy — light touch gives
+  // a faint thin chalky line, pressing harder darkens the graphite.
+  // Looks visibly different from the pen because of the texture
+  // stamping in ``drawSegment``.
   pencil: {
     glyph: "✏",
     label: "Pencil",
     minPressure: 0.25,
     pressureGain: 1.3,
+    texture: "grainy",
   },
-  // Pen: moderate pressure response.
+  // Pen: moderate pressure response, smooth ink line.
   pen: {
     glyph: "🖊",
     label: "Pen",
     minPressure: 0.45,
     pressureGain: 0.9,
+    texture: "smooth",
   },
   // Marker: wide chisel, mild pressure response.
   marker: {
@@ -101,6 +113,7 @@ const TOOL_CONFIG: Record<SketchTool, ToolConfig> = {
     label: "Marker",
     minPressure: 0.75,
     pressureGain: 0.4,
+    texture: "smooth",
   },
   // Eraser: destination-out, wide.
   eraser: {
@@ -108,6 +121,7 @@ const TOOL_CONFIG: Record<SketchTool, ToolConfig> = {
     label: "Eraser",
     minPressure: 0.8,
     pressureGain: 0.4,
+    texture: "smooth",
   },
 };
 
@@ -609,6 +623,127 @@ type Gesture =
       view0: ViewState;
     };
 
+/**
+ * Small canvas sample of the active brush. Draws a horizontal
+ * stroke using the same texture model ``drawSegment`` uses, so the
+ * preview is visually faithful: pen reads as smooth ink, pencil as
+ * grainy graphite, marker as wide flat colour. Re-renders on every
+ * prop change — cheap because the canvas is ~180×44 px.
+ */
+function BrushPreviewChip(props: {
+  tool: SketchTool;
+  color: string;
+  size: number;
+  opacity: number;
+  texture: "smooth" | "grainy";
+}) {
+  const { tool, color, size, opacity, texture } = props;
+  const ref = useRef<HTMLCanvasElement | null>(null);
+
+  useEffect(() => {
+    const c = ref.current;
+    if (!c) return;
+    const ctx = c.getContext("2d");
+    if (!ctx) return;
+    const w = c.width;
+    const h = c.height;
+    ctx.clearRect(0, 0, w, h);
+    // Paper background — matches the actual sketch canvas.
+    ctx.fillStyle = CANVAS_BG;
+    ctx.fillRect(0, 0, w, h);
+    if (tool === "eraser") {
+      // Eraser: dashed circle on the paper chip so the user knows it
+      // removes ink rather than adding any.
+      ctx.save();
+      ctx.strokeStyle = "#8a96ad";
+      ctx.setLineDash([3, 3]);
+      ctx.lineWidth = 1;
+      const r = Math.min(h / 2 - 4, Math.max(3, size / 2));
+      ctx.beginPath();
+      ctx.arc(w / 2, h / 2, r, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.restore();
+      return;
+    }
+    // Sample stroke goes ear-to-ear across the chip at the active
+    // size, drawn in ~24 segments so the grain stamping looks
+    // dense and even (one stamp every ~size×0.6 px, matching the
+    // real drawSegment heuristic).
+    ctx.save();
+    ctx.lineCap = "round";
+    ctx.lineJoin = "round";
+    ctx.fillStyle = color;
+    ctx.strokeStyle = color;
+    const y = h / 2;
+    const x0 = 8;
+    const x1 = w - 8;
+    const segs = 24;
+    const lineWidth = Math.max(0.6, Math.min(h - 6, size));
+    if (texture === "grainy") {
+      const coreWidth = Math.max(0.4, lineWidth * 0.6);
+      ctx.lineWidth = coreWidth;
+      ctx.globalAlpha = opacity * 0.55;
+      ctx.beginPath();
+      ctx.moveTo(x0, y);
+      ctx.lineTo(x1, y);
+      ctx.stroke();
+      const dotRadius = Math.max(0.4, lineWidth * 0.35);
+      const jitter = Math.max(0.8, lineWidth * 0.6);
+      // Same stamp density as drawSegment so the chip predicts the
+      // real result accurately.
+      const totalLen = x1 - x0;
+      const stampsPerSeg = Math.max(
+        1,
+        Math.ceil(totalLen / segs / Math.max(1, lineWidth * 0.6)),
+      );
+      for (let i = 0; i < segs; i++) {
+        for (let k = 0; k < stampsPerSeg; k++) {
+          const t = (i + (k + 0.5) / stampsPerSeg) / segs;
+          const cx = x0 + (x1 - x0) * t;
+          const ox =
+            (Math.random() + Math.random() - 1) * jitter;
+          const oy =
+            (Math.random() + Math.random() - 1) * jitter;
+          ctx.globalAlpha = opacity * (0.4 + Math.random() * 0.55);
+          ctx.beginPath();
+          ctx.arc(
+            cx + ox,
+            y + oy,
+            dotRadius * (0.7 + Math.random() * 0.6),
+            0,
+            Math.PI * 2,
+          );
+          ctx.fill();
+        }
+      }
+    } else {
+      ctx.globalAlpha = opacity;
+      ctx.lineWidth = lineWidth;
+      ctx.beginPath();
+      ctx.moveTo(x0, y);
+      ctx.lineTo(x1, y);
+      ctx.stroke();
+    }
+    ctx.restore();
+  }, [tool, color, size, opacity, texture]);
+
+  return (
+    <canvas
+      ref={ref}
+      width={180}
+      height={44}
+      data-testid="sketch-brush-preview"
+      style={{
+        width: "100%",
+        height: 44,
+        borderRadius: 4,
+        border: "1px solid var(--border)",
+        display: "block",
+      }}
+    />
+  );
+}
+
 export function SketchPad() {
   const state = useSketchState();
   // Pointer handlers need the freshest state without re-binding.
@@ -822,6 +957,10 @@ export function SketchPad() {
       ? getStrokeBuffer().getContext("2d")
       : layerCanvases.get(layerId)?.getContext("2d");
     if (!ctx) return;
+    const lineWidth = Math.max(
+      0.5,
+      settings.size * (cfg.minPressure + pressure * cfg.pressureGain),
+    );
     ctx.save();
     ctx.lineCap = "round";
     ctx.lineJoin = "round";
@@ -831,23 +970,84 @@ export function SketchPad() {
       // overlapping segment joints never stack and darken.
       ctx.globalAlpha = 1;
       ctx.strokeStyle = color;
+      ctx.fillStyle = color;
     } else if (tool === "eraser") {
       ctx.globalCompositeOperation = "destination-out";
       ctx.strokeStyle = "rgba(0,0,0,1)";
+      ctx.fillStyle = "rgba(0,0,0,1)";
       // Partial opacity on the eraser = soft, gradual erasing.
       ctx.globalAlpha = settings.opacity;
     } else {
       ctx.globalAlpha = settings.opacity;
       ctx.strokeStyle = color;
+      ctx.fillStyle = color;
     }
-    ctx.lineWidth = Math.max(
-      0.5,
-      settings.size * (cfg.minPressure + pressure * cfg.pressureGain),
-    );
-    ctx.beginPath();
-    ctx.moveTo(from.x, from.y);
-    ctx.lineTo(to.x, to.y);
-    ctx.stroke();
+    ctx.lineWidth = lineWidth;
+    // Grainy tools (pencil) draw a slightly THINNER smooth core for
+    // the line shape AND stamp jittered dots along the path so the
+    // result reads as graphite rather than ink. Smooth tools (pen,
+    // marker, eraser) keep the existing crisp single stroke.
+    if (cfg.texture === "grainy") {
+      // Core line at ~60% of the nominal width so the grain dots
+      // (drawn next) carry most of the visual weight — same idea
+      // as Procreate's pencil brushes, where the texture is the
+      // mark, not a halo around a solid line.
+      const coreWidth = Math.max(0.4, lineWidth * 0.6);
+      const prevAlpha = ctx.globalAlpha;
+      ctx.lineWidth = coreWidth;
+      // Faint core — keeps the line readable when the user draws
+      // very slowly (so stamps don't overlap densely).
+      ctx.globalAlpha = prevAlpha * 0.55;
+      ctx.beginPath();
+      ctx.moveTo(from.x, from.y);
+      ctx.lineTo(to.x, to.y);
+      ctx.stroke();
+      ctx.globalAlpha = prevAlpha;
+      // Stamp small jittered dots along the segment. Density is
+      // proportional to segment length so fast strokes still get
+      // continuous grain, and dot size is proportional to line
+      // width so the texture scales with the brush.
+      const segLen = Math.hypot(to.x - from.x, to.y - from.y);
+      // ~1 stamp per (0.6 × lineWidth) pixels of travel — dense
+      // enough to look continuous, sparse enough to be cheap.
+      const stamps = Math.min(
+        24,
+        Math.max(1, Math.ceil(segLen / Math.max(1, lineWidth * 0.6))),
+      );
+      const dotRadius = Math.max(0.4, lineWidth * 0.35);
+      const jitter = Math.max(0.8, lineWidth * 0.6);
+      for (let i = 0; i < stamps; i++) {
+        const t = (i + 0.5) / stamps;
+        const cx = from.x + (to.x - from.x) * t;
+        const cy = from.y + (to.y - from.y) * t;
+        // Box-Muller-ish quick gaussian: average two uniforms so
+        // jitter clusters near the centre line, mimicking how
+        // pencil pigment falls heaviest along the stroke axis.
+        const ox =
+          (Math.random() + Math.random() - 1) * jitter;
+        const oy =
+          (Math.random() + Math.random() - 1) * jitter;
+        // Per-dot alpha variation — some grains are darker, some
+        // fainter, which is what gives graphite its broken edge.
+        const dotAlpha = prevAlpha * (0.4 + Math.random() * 0.55);
+        ctx.globalAlpha = dotAlpha;
+        ctx.beginPath();
+        ctx.arc(
+          cx + ox,
+          cy + oy,
+          dotRadius * (0.7 + Math.random() * 0.6),
+          0,
+          Math.PI * 2,
+        );
+        ctx.fill();
+      }
+      ctx.globalAlpha = prevAlpha;
+    } else {
+      ctx.beginPath();
+      ctx.moveTo(from.x, from.y);
+      ctx.lineTo(to.x, to.y);
+      ctx.stroke();
+    }
     ctx.restore();
   }
 
@@ -1400,16 +1600,38 @@ export function SketchPad() {
             className="hud-button"
             data-testid="sketch-pop-btn"
             onClick={() => {
-              // Best-effort: hint the popup at the largest reasonable
-              // resolution. The user drags it to the touchscreen the
-              // first time; OS remembers position on subsequent opens.
-              window.open(
-                "/sketch",
-                "alfred-sketch",
-                "popup=yes,width=1920,height=1080",
-              );
+              // In the Alfred Desktop (Electron) shell, the main
+              // process intercepts ``/sketch`` window.opens and
+              // positions them on the configured sketch monitor
+              // (sketchResolution in config.json) — see
+              // alfred-desktop/main.js. In a plain browser we ask
+              // for popup-style chrome instead of a new tab; some
+              // browsers honour the hint when the call is inside a
+              // user gesture (which a button click satisfies),
+              // others land it as a regular window the user drags
+              // to their touchscreen once and the OS remembers.
+              const features = [
+                "popup=yes",
+                "width=1920",
+                "height=1080",
+                "left=0",
+                "top=0",
+                "menubar=no",
+                "toolbar=no",
+                "location=no",
+                "status=no",
+                "resizable=yes",
+              ].join(",");
+              const popped = window.open("/sketch", "alfred-sketch", features);
+              if (popped && typeof popped.focus === "function") {
+                try {
+                  popped.focus();
+                } catch {
+                  /* cross-origin popup or already closed */
+                }
+              }
             }}
-            title="Open the Sketch Pad in a separate window — drag it to your touchscreen monitor"
+            title="Open the Sketch Pad in a separate window — drag it to your touchscreen monitor (Alfred Desktop auto-positions it)"
           >
             ⤴ POP TO TOUCHSCREEN
           </button>
@@ -1535,31 +1757,19 @@ export function SketchPad() {
             }
             style={{ width: "100%", accentColor: "var(--hud)" }}
           />
-          {/* Live brush preview dot on a paper-white chip */}
-          <div
-            style={{
-              display: "flex",
-              justifyContent: "center",
-              alignItems: "center",
-              height: 44,
-              background: CANVAS_BG,
-              borderRadius: 4,
-              border: "1px solid var(--border)",
-            }}
-          >
-            <div
-              style={{
-                width: Math.min(36, Math.max(3, toolSet.size)),
-                height: Math.min(36, Math.max(3, toolSet.size)),
-                borderRadius: "50%",
-                background:
-                  state.tool === "eraser" ? "transparent" : state.color,
-                border:
-                  state.tool === "eraser" ? "1px dashed #8a96ad" : "none",
-                opacity: toolSet.opacity,
-              }}
-            />
-          </div>
+          {/* Live brush preview chip — a small white paper sample
+              with a representative stroke drawn through it using the
+              same texture/opacity/size as the active tool. So pen
+              looks like a smooth ink line, pencil like a grainy
+              graphite line, marker like a wide flat band — visible
+              difference before the user puts pen to paper. */}
+          <BrushPreviewChip
+            tool={state.tool}
+            color={state.color}
+            size={toolSet.size}
+            opacity={toolSet.opacity}
+            texture={cfg.texture}
+          />
 
           <div
             style={{

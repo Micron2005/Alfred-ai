@@ -191,6 +191,14 @@ export interface TwoHandPinch {
 export interface UseHandTrackingOptions {
   enabled: boolean;
   /**
+   * Pre-existing camera stream to share (typically the one
+   * ``useCamera`` already owns). Strongly recommended — without it,
+   * we'd open a second getUserMedia stream and race with the other
+   * vision hooks, which on some hardware ends with the camera tile
+   * blank while a different hook silently owns the device.
+   */
+  sharedStream?: MediaStream | null;
+  /**
    * Hard cap on inference frequency. The model is happy at 30 fps
    * but we throttle to give the CPU a break — 16 ms (~60 fps) feels
    * fluid; tighter than that is wasted on cursor responsiveness.
@@ -296,7 +304,7 @@ function landmarksDiffer(
 export function useHandTracking(
   opts: UseHandTrackingOptions,
 ): UseHandTrackingReturn {
-  const { enabled, detectionIntervalMs = 16 } = opts;
+  const { enabled, sharedStream, detectionIntervalMs = 16 } = opts;
 
   const [status, setStatus] = useState<HandTrackingStatus>("off");
   const [error, setError] = useState<string | null>(null);
@@ -356,10 +364,9 @@ export function useHandTracking(
       cancelAnimationFrame(rafRef.current);
       rafRef.current = null;
     }
-    if (streamRef.current) {
-      for (const track of streamRef.current.getTracks()) track.stop();
-      streamRef.current = null;
-    }
+    // Don't stop tracks here — the shared stream is owned by
+    // useCamera. Just drop the ref and detach our <video>.
+    streamRef.current = null;
     const v = videoRef.current;
     if (v) {
       try {
@@ -419,6 +426,14 @@ export function useHandTracking(
 
     void (async () => {
       try {
+        // Hand tracking ALWAYS rides on the shared camera stream.
+        // See the equivalent comment in ``useFaceTracking`` — three
+        // parallel getUserMedia calls was the cause of the blank
+        // camera tile bug.
+        if (!sharedStream) {
+          setStatus("off");
+          return;
+        }
         const { HandLandmarker, FilesetResolver } = await import(
           "@mediapipe/tasks-vision"
         );
@@ -455,24 +470,21 @@ export function useHandTracking(
         }
         detectorRef.current = detector;
 
-        const stream = await navigator.mediaDevices.getUserMedia({
-          video: { facingMode: "user", width: 640, height: 480 },
-          audio: false,
-        });
-        if (cancelled) {
-          for (const track of stream.getTracks()) track.stop();
-          return;
-        }
-        streamRef.current = stream;
+        // Hand tracking shares the camera stream owned by
+        // ``useCamera`` — see comment above. ``streamRef`` is kept
+        // for backwards compat (some debug surfaces still read it),
+        // but we DO NOT stop the tracks on teardown: the camera
+        // hook owns the lifecycle and stopping its tracks here
+        // would yank the entire shared pipeline.
+        streamRef.current = sharedStream;
 
         const video = videoRef.current;
         if (!video) {
-          for (const track of stream.getTracks()) track.stop();
           throw new Error(
             "Hand-tracking video element missing. Mount the hidden <video> from videoRef.",
           );
         }
-        video.srcObject = stream;
+        video.srcObject = sharedStream;
         video.muted = true;
         await video.play();
 
@@ -855,7 +867,7 @@ export function useHandTracking(
       cancelled = true;
       teardown();
     };
-  }, [enabled, detectionIntervalMs, teardown]);
+  }, [enabled, sharedStream, detectionIntervalMs, teardown]);
 
   // Backwards-compat aliases for pre-12c.3 callers (HandCursor's
   // synthetic-event dispatcher reads cursor / landmarks /

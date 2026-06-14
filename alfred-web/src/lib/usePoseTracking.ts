@@ -180,7 +180,6 @@ export function usePoseTracking(
 
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const detectorRef = useRef<PoseLandmarker | null>(null);
-  const ownStreamRef = useRef<MediaStream | null>(null);
   const rafRef = useRef<number | null>(null);
   const lastInferAt = useRef(0);
 
@@ -188,10 +187,6 @@ export function usePoseTracking(
     if (rafRef.current !== null) {
       cancelAnimationFrame(rafRef.current);
       rafRef.current = null;
-    }
-    if (ownStreamRef.current) {
-      for (const t of ownStreamRef.current.getTracks()) t.stop();
-      ownStreamRef.current = null;
     }
     const v = videoRef.current;
     if (v) {
@@ -226,6 +221,13 @@ export function usePoseTracking(
 
     void (async () => {
       try {
+        // Pose tracking now ALWAYS rides on the shared camera stream
+        // owned by useCamera — see the equivalent comment in
+        // ``useFaceTracking`` for the rationale.
+        if (!sharedStream) {
+          setStatus("off");
+          return;
+        }
         const { PoseLandmarker, FilesetResolver } = await import(
           "@mediapipe/tasks-vision"
         );
@@ -247,31 +249,13 @@ export function usePoseTracking(
         }
         detectorRef.current = detector;
 
-        let stream: MediaStream;
-        if (sharedStream) {
-          stream = sharedStream;
-        } else {
-          stream = await navigator.mediaDevices.getUserMedia({
-            video: { facingMode: "user", width: 640, height: 480 },
-            audio: false,
-          });
-          ownStreamRef.current = stream;
-        }
-        if (cancelled) {
-          if (ownStreamRef.current) {
-            for (const t of ownStreamRef.current.getTracks()) t.stop();
-            ownStreamRef.current = null;
-          }
-          return;
-        }
-
         const video = videoRef.current;
         if (!video) {
           throw new Error(
             "Pose-tracking video element missing. Mount the hidden <video> from videoRef.",
           );
         }
-        video.srcObject = stream;
+        video.srcObject = sharedStream;
         video.muted = true;
         await video.play();
 
