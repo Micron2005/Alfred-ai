@@ -1971,7 +1971,17 @@ export function SketchPad() {
     <div
       data-testid="sketch-pad"
       style={{
+        // ``flex: 1`` makes SketchPad fill the remaining space when
+        // the parent is a flex column (the main HUD's DESIGN tab).
+        // ``width/height: 100 %`` covers the /sketch popup case
+        // where the parent is a plain ``position: fixed, inset: 0``
+        // <main> — without an explicit size the new full-bleed
+        // layout collapsed to 0 height and the user saw only the
+        // page wrapper's dark background ("the pop up to touch
+        // screen button just pulls up a blue screen").
         flex: 1,
+        width: "100%",
+        height: "100%",
         minHeight: 0,
         position: "relative",
         // Pure white paper background ALL the way to the edges —
