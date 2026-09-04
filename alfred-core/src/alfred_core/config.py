@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from functools import lru_cache
+from typing import Literal
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -135,6 +136,23 @@ class Settings(BaseSettings):
     # similarity, not just rank, so we filter junk matches that would
     # otherwise dilute the context.
     alfred_memory_retrieval_min_similarity: float = Field(default=0.35)
+
+    # ─── Structured memory (projects / decisions / devices / …) ────────
+    # Backend for ``alfred_core.memory_system``. ``memory`` keeps every
+    # entity in-process and forgets it on restart (the historical
+    # behaviour, and the default so nothing changes for existing
+    # installs). ``sqlite`` persists to a single file at
+    # ``ALFRED_MEMORY_SQLITE_PATH`` so Alfred remembers across restarts.
+    alfred_memory_backend: Literal["memory", "sqlite"] = Field(default="memory")
+    alfred_memory_sqlite_path: str = Field(default="/app/alfred-memory/alfred-memory.db")
+    # Optional JSON snapshot (see ``memory_system.migration``) to import
+    # on startup when the configured backend is empty — the migration
+    # path from a pre-persistence install. Ignored if the file is absent.
+    alfred_memory_seed_snapshot: str = Field(default="")
+
+    @property
+    def memory_persistence_enabled(self) -> bool:
+        return self.alfred_memory_backend != "memory"
 
     @property
     def has_cloud(self) -> bool:

@@ -49,6 +49,9 @@ Next.js 15 + React. A minimal, un-chatty UI. Standard Mode uses a warm parchment
 - Stores thumbs-up / thumbs-down feedback (UI arrives with Phase 5) — that data powers periodic LoRA fine-tuning later.
 - `pgvector` extension available for semantic memory once we start embedding conversation chunks.
 
+### Structured memory — projects, decisions, devices
+A separate, dependency-light subsystem (`alfred_core/memory_system/`) holds typed, versioned entities — `Project`, `Decision`, `Experiment`, `Device`, `Preference` — behind an abstract `MemoryBackend`. It defaults to in-process (volatile) storage and can be switched to a single-file SQLite store with `ALFRED_MEMORY_BACKEND=sqlite`. Every store / retrieve / delete is announced on the in-process event bus (`alfred_core/bus.py`). See [MEMORY.md](MEMORY.md).
+
 ## How a message flows
 
 1. You type in the browser (`Composer.tsx`) → POST `/chat` with `{message, conversation_id}`.
@@ -75,4 +78,6 @@ Everything is hooked up so that:
 
 - **Adding a new tool** (e.g. `control_lights`, `slice_gcode`) = drop a module under `alfred_core/tools/`, register it in the router, expose it as a function the LLM can call.
 - **Adding a new backend** (e.g. a self-hosted vLLM server, a Groq API account) = implement `LLMBackend`, wire it into `Router.from_settings`.
+- **Adding a new memory backend** (e.g. Postgres, a vector store) = implement `MemoryBackend` (seven methods), add a branch to `memory_system.build_backend`, and reuse `migrate_backend` to carry existing state over.
+- **Reacting to memory changes** = `get_bus().subscribe(EventType.MEMORY_STORE, handler)`.
 - **Adding a new persona mode** (e.g. a "focus" mode) = add an enum value and a template in `persona.py`, register a wake phrase in `wake.py`.
