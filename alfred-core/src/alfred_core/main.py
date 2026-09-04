@@ -21,12 +21,15 @@ from alfred_core.api import (
     weather,
 )
 from alfred_core.db.session import init_db
+from alfred_core.memory_system import get_memory_manager, reset_memory_manager
 
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     await init_db()
+    get_memory_manager()
     yield
+    reset_memory_manager()
 
 
 app = FastAPI(
